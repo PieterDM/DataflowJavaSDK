@@ -27,7 +27,10 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * A SetCoder encodes Sets.
+ * A {@code SetCoder<T>} encodes any {@code Set<T>}
+ * as an encoding of an iterable of its elements. The elements
+ * may not be in a deterministic order, depending on the
+ * {@code Set} implementation.
  *
  * @param <T> the type of the elements of the set
  */
@@ -60,12 +63,6 @@ public class SetCoder<T> extends IterableLikeCoder<T, Set<T>> {
    * two {@code HashSet} instances may be equal but produce different encodings.
    */
   @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
-  }
-
-  @Override
   public void verifyDeterministic() throws NonDeterministicException {
     throw new NonDeterministicException(this,
         "Ordering of elements in a set may be non-deterministic.");
@@ -85,7 +82,7 @@ public class SetCoder<T> extends IterableLikeCoder<T, Set<T>> {
 
   @Override
   protected final Set<T> decodeToIterable(List<T> decodedElements) {
-    return new HashSet(decodedElements);
+    return new HashSet<>(decodedElements);
   }
 
   protected SetCoder(Coder<T> elemCoder) {

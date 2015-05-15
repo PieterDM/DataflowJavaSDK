@@ -40,8 +40,8 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
   /**
    * Provides client-specific operations for size estimates.
    */
-  public static interface SizeEstimator<E> {
-    public long estimateSize(E element) throws Exception;
+  public static interface SizeEstimator<T> {
+    public long estimateSize(T element) throws Exception;
   }
 
   /**
@@ -57,11 +57,11 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
   /**
    * Provides client-specific operations for combining values.
    */
-  public interface Combiner<K, VI, VA, VO> {
-    public VA createAccumulator(K key);
-    public VA add(K key, VA accumulator, VI value);
-    public VA merge(K key, Iterable<VA> accumulators);
-    public VO extract(K key, VA accumulator);
+  public interface Combiner<K, InputT, AccumT, OutputT> {
+    public AccumT createAccumulator(K key);
+    public AccumT add(K key, AccumT accumulator, InputT value);
+    public AccumT merge(K key, Iterable<AccumT> accumulators);
+    public OutputT extract(K key, AccumT accumulator);
   }
 
   /**
@@ -75,7 +75,9 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
       this.value = value;
     }
 
-    public byte[] getValue() { return value; }
+    public byte[] getValue() {
+      return value;
+    }
 
     @Override
     public boolean equals(Object o) {
@@ -268,7 +270,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
     }
   }
 
-  private abstract static class GroupingTable<K, VI, VA> {
+  private abstract static class GroupingTable<K, InputT, AccumT> {
 
     // Keep the table relatively full to increase the chance of collisions.
     private static final double TARGET_LOAD = 0.9;
@@ -278,7 +280,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
     private final PairInfo pairInfo;
 
     private long size = 0;
-    private Map<Object, GroupingTableEntry<K, VI, VA>> table;
+    private Map<Object, GroupingTableEntry<K, InputT, AccumT>> table;
 
     public GroupingTable(long maxSize,
                           GroupingKeyCreator<? super K> groupingKeyCreator,
@@ -289,14 +291,14 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
       this.table = new HashMap<>();
     }
 
-    interface GroupingTableEntry<K, VI, VA> {
+    interface GroupingTableEntry<K, InputT, AccumT> {
       public K getKey();
-      public VA getValue();
-      public void add(VI value) throws Exception;
+      public AccumT getValue();
+      public void add(InputT value) throws Exception;
       public long getSize();
     }
 
-    public abstract GroupingTableEntry<K, VI, VA> createTableEntry(K key) throws Exception;
+    public abstract GroupingTableEntry<K, InputT, AccumT> createTableEntry(K key) throws Exception;
 
     /**
      * Adds a pair to this table, possibly flushing some entries to output
@@ -305,7 +307,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
     @SuppressWarnings("unchecked")
     public void put(Object pair, Receiver receiver) throws Exception {
       put((K) pairInfo.getKeyFromInputPair(pair),
-          (VI) pairInfo.getValueFromInputPair(pair),
+          (InputT) pairInfo.getValueFromInputPair(pair),
           receiver);
     }
 
@@ -313,9 +315,9 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
      * Adds the key and value to this table, possibly flushing some entries
      * to output if the table is full.
      */
-    public void put(K key, VI value, Receiver receiver) throws Exception {
+    public void put(K key, InputT value, Receiver receiver) throws Exception {
       Object groupingKey = groupingKeyCreator.createGroupingKey(key);
-      GroupingTableEntry<K, VI, VA> entry = table.get(groupingKey);
+      GroupingTableEntry<K, InputT, AccumT> entry = table.get(groupingKey);
       if (entry == null) {
         entry = createTableEntry(key);
         table.put(groupingKey, entry);
@@ -328,7 +330,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
 
       if (size >= maxSize) {
         long targetSize = (long) (TARGET_LOAD * maxSize);
-        Iterator<GroupingTableEntry<K, VI, VA>> entries =
+        Iterator<GroupingTableEntry<K, InputT, AccumT>> entries =
             table.values().iterator();
         while (size >= targetSize) {
           if (!entries.hasNext()) {
@@ -336,7 +338,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
             size = 0;
             break;
           }
-          GroupingTableEntry<K, VI, VA> toFlush = entries.next();
+          GroupingTableEntry<K, InputT, AccumT> toFlush = entries.next();
           entries.remove();
           size -= toFlush.getSize() + PER_KEY_OVERHEAD;
           output(toFlush, receiver);
@@ -348,7 +350,8 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
      * Output the given entry. Does not actually remove it from the table or
      * update this table's size.
      */
-    private void output(GroupingTableEntry<K, VI, VA> entry, Receiver receiver) throws Exception {
+    private void output(GroupingTableEntry<K, InputT, AccumT> entry, Receiver receiver)
+        throws Exception {
       receiver.process(pairInfo.makeOutputPair(entry.getKey(), entry.getValue()));
     }
 
@@ -356,7 +359,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
      * Flushes all entries in this table to output.
      */
     public void flush(Receiver output) throws Exception {
-      for (GroupingTableEntry<K, VI, VA> entry : table.values()) {
+      for (GroupingTableEntry<K, InputT, AccumT> entry : table.values()) {
         output(entry, output);
       }
       table.clear();
@@ -388,9 +391,15 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
       return new GroupingTableEntry<K, V, List<V>>() {
         long size = keySizer.estimateSize(key);
         final List<V> values = new ArrayList<>();
-        public K getKey() { return key; }
-        public List<V> getValue() { return values; }
-        public long getSize() { return size; }
+        public K getKey() {
+          return key;
+        }
+        public List<V> getValue() {
+          return values;
+        }
+        public long getSize() {
+          return size;
+        }
         public void add(V value) throws Exception {
           values.add(value);
           size += BYTES_PER_JVM_WORD + valueSizer.estimateSize(value);
@@ -402,18 +411,19 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
   /**
    * A grouping table that uses the given combiner to combine values in place.
    */
-  public static class CombiningGroupingTable<K, VI, VA> extends GroupingTable<K, VI, VA> {
+  public static class CombiningGroupingTable<K, InputT, AccumT>
+      extends GroupingTable<K, InputT, AccumT> {
 
-    private final Combiner<? super K, VI, VA, ?> combiner;
+    private final Combiner<? super K, InputT, AccumT, ?> combiner;
     private final SizeEstimator<? super K> keySizer;
-    private final SizeEstimator<? super VA> accumulatorSizer;
+    private final SizeEstimator<? super AccumT> accumulatorSizer;
 
     public CombiningGroupingTable(long maxSize,
                                   GroupingKeyCreator<? super K> groupingKeyCreator,
                                   PairInfo pairInfo,
-                                  Combiner<? super K, VI, VA, ?> combineFn,
+                                  Combiner<? super K, InputT, AccumT, ?> combineFn,
                                   SizeEstimator<? super K> keySizer,
-                                  SizeEstimator<? super VA> accumulatorSizer) {
+                                  SizeEstimator<? super AccumT> accumulatorSizer) {
       super(maxSize, groupingKeyCreator, pairInfo);
       this.combiner =  combineFn;
       this.keySizer = keySizer;
@@ -421,15 +431,21 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
     }
 
     @Override
-    public GroupingTableEntry<K, VI, VA> createTableEntry(final K key) throws Exception {
-      return new GroupingTableEntry<K, VI, VA>() {
+    public GroupingTableEntry<K, InputT, AccumT> createTableEntry(final K key) throws Exception {
+      return new GroupingTableEntry<K, InputT, AccumT>() {
         final long keySize = keySizer.estimateSize(key);
-        VA accumulator = combiner.createAccumulator(key);
+        AccumT accumulator = combiner.createAccumulator(key);
         long accumulatorSize = 0; // never used before a value is added...
-        public K getKey() { return key; }
-        public VA getValue() { return accumulator; }
-        public long getSize() { return keySize + accumulatorSize; }
-        public void add(VI value) throws Exception {
+        public K getKey() {
+          return key;
+        }
+        public AccumT getValue() {
+          return accumulator;
+        }
+        public long getSize() {
+          return keySize + accumulatorSize;
+        }
+        public void add(InputT value) throws Exception {
           accumulator = combiner.add(key, accumulator, value);
           accumulatorSize = accumulatorSizer.estimateSize(accumulator);
         }
@@ -446,7 +462,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
    * (potentially more expensive) estimator for some elements and returning
    * the average value for others.
    */
-  public static class SamplingSizeEstimator<E> implements SizeEstimator<E> {
+  public static class SamplingSizeEstimator<T> implements SizeEstimator<T> {
 
     /**
      * The degree of confidence required in our expected value predictions
@@ -470,7 +486,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
      */
     public static final long DEFAULT_MIN_SAMPLED = 20;
 
-    private final SizeEstimator<E> underlying;
+    private final SizeEstimator<T> underlying;
     private final double minSampleRate;
     private final double maxSampleRate;
     private final long minSampled;
@@ -485,13 +501,13 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
     private long nextSample = 0;
 
     public SamplingSizeEstimator(
-        SizeEstimator<E> underlying,
+        SizeEstimator<T> underlying,
         double minSampleRate,
         double maxSampleRate) {
       this(underlying, minSampleRate, maxSampleRate, DEFAULT_MIN_SAMPLED, new Random());
     }
 
-    public SamplingSizeEstimator(SizeEstimator<E> underlying,
+    public SamplingSizeEstimator(SizeEstimator<T> underlying,
                                  double minSampleRate,
                                  double maxSampleRate,
                                  long minSampled,
@@ -504,7 +520,7 @@ public class PartialGroupByKeyOperation extends ReceivingOperation {
     }
 
     @Override
-    public long estimateSize(E element) throws Exception {
+    public long estimateSize(T element) throws Exception {
       if (sampleNow()) {
         return recordSample(underlying.estimateSize(element));
       } else {

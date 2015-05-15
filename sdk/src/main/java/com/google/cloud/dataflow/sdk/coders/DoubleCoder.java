@@ -27,7 +27,7 @@ import java.io.OutputStream;
 import java.io.UTFDataFormatException;
 
 /**
- * A DoubleCoder encodes Doubles in 8 bytes.
+ * A {@code DoubleCoder} encodes {@code Doubles} in 8 bytes.
  */
 @SuppressWarnings("serial")
 public class DoubleCoder extends AtomicCoder<Double> {
@@ -69,12 +69,6 @@ public class DoubleCoder extends AtomicCoder<Double> {
    * if the storage format might be, so floating point representations are not
    * recommended for use in operations that require deterministic inputs.
    */
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
-  }
-
   @Override
   public void verifyDeterministic() throws NonDeterministicException {
     throw new NonDeterministicException(this,

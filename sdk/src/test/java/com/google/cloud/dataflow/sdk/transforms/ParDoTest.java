@@ -20,17 +20,14 @@ import static com.google.cloud.dataflow.sdk.TestUtils.createInts;
 import static com.google.cloud.dataflow.sdk.util.SerializableUtils.serializeToByteArray;
 import static com.google.cloud.dataflow.sdk.util.StringUtils.byteArrayToJsonString;
 import static com.google.cloud.dataflow.sdk.util.StringUtils.jsonStringToByteArray;
-import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.collection.IsIterableContainingInAnyOrder.containsInAnyOrder;
 import static org.hamcrest.collection.IsIterableContainingInOrder.contains;
 import static org.hamcrest.core.AnyOf.anyOf;
 import static org.hamcrest.core.IsEqual.equalTo;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import com.google.api.client.util.Preconditions;
 import com.google.cloud.dataflow.sdk.Pipeline;
@@ -39,7 +36,9 @@ import com.google.cloud.dataflow.sdk.coders.AtomicCoder;
 import com.google.cloud.dataflow.sdk.coders.BigEndianLongCoder;
 import com.google.cloud.dataflow.sdk.coders.CoderException;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
+import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
+import com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.RequiresWindowAccess;
 import com.google.cloud.dataflow.sdk.transforms.windowing.FixedWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
@@ -154,104 +153,67 @@ public class ParDoTest implements Serializable {
                      sideOutputTupleTag.getId() + ": " + value);
       }
     }
+  }
 
-    /** DataflowAssert "matcher" for expected output. */
-    static class HasExpectedOutput
-        implements SerializableFunction<Iterable<String>, Void>, Serializable {
-      private final List<Integer> inputs;
-      private final List<Integer> sideInputs;
-      private final String sideOutput;
-      private final boolean ordered;
+  static class TestDoFnWithContext extends DoFnWithContext<Integer, String> {
+    enum State { UNSTARTED, STARTED, PROCESSING, FINISHED }
+    State state = State.UNSTARTED;
 
-      public static HasExpectedOutput forInput(List<Integer> inputs) {
-        return new HasExpectedOutput(
-            new ArrayList<Integer>(inputs),
-            new ArrayList<Integer>(),
-            "",
-            false);
+    final List<PCollectionView<Integer>> sideInputViews = new ArrayList<>();
+    final List<TupleTag<String>> sideOutputTupleTags = new ArrayList<>();
+
+    public TestDoFnWithContext() {
+    }
+
+    public TestDoFnWithContext(List<PCollectionView<Integer>> sideInputViews,
+                    List<TupleTag<String>> sideOutputTupleTags) {
+      this.sideInputViews.addAll(sideInputViews);
+      this.sideOutputTupleTags.addAll(sideOutputTupleTags);
+    }
+
+    @StartBundle
+    public void startBundle(Context c) {
+      assertEquals(State.UNSTARTED, state);
+      state = State.STARTED;
+      outputToAll(c, "started");
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext c) {
+      assertThat(state,
+                 anyOf(equalTo(State.STARTED), equalTo(State.PROCESSING)));
+      state = State.PROCESSING;
+      outputToAllWithSideInputs(c, "processing: " + c.element());
+    }
+
+    @FinishBundle
+    public void finishBundle(Context c) {
+      assertThat(state,
+                 anyOf(equalTo(State.STARTED), equalTo(State.PROCESSING)));
+      state = State.FINISHED;
+      outputToAll(c, "finished");
+    }
+
+    private void outputToAll(Context c, String value) {
+      c.output(value);
+      for (TupleTag<String> sideOutputTupleTag : sideOutputTupleTags) {
+        c.sideOutput(sideOutputTupleTag,
+                     sideOutputTupleTag.getId() + ": " + value);
       }
+    }
 
-      private HasExpectedOutput(List<Integer> inputs,
-                                List<Integer> sideInputs,
-                                String sideOutput,
-                                boolean ordered) {
-        this.inputs = inputs;
-        this.sideInputs = sideInputs;
-        this.sideOutput = sideOutput;
-        this.ordered = ordered;
+    private void outputToAllWithSideInputs(ProcessContext c, String value) {
+      if (!sideInputViews.isEmpty()) {
+        List<Integer> sideInputValues = new ArrayList<>();
+        for (PCollectionView<Integer> sideInputView : sideInputViews) {
+          sideInputValues.add(c.sideInput(sideInputView));
+        }
+        value += ": " + sideInputValues;
       }
-
-      public HasExpectedOutput andSideInputs(Integer... sideInputValues) {
-        List<Integer> sideInputs = new ArrayList<>();
-        for (Integer sideInputValue : sideInputValues) {
-          sideInputs.add(sideInputValue);
-        }
-        return new HasExpectedOutput(inputs, sideInputs, sideOutput, ordered);
-      }
-
-      public HasExpectedOutput fromSideOutput(TupleTag<String> sideOutputTag) {
-        return fromSideOutput(sideOutputTag.getId());
-      }
-      public HasExpectedOutput fromSideOutput(String sideOutput) {
-        return new HasExpectedOutput(inputs, sideInputs, sideOutput, ordered);
-      }
-
-      public HasExpectedOutput inOrder() {
-        return new HasExpectedOutput(inputs, sideInputs, sideOutput, true);
-      }
-
-      @Override
-      public Void apply(Iterable<String> outputs) {
-        List<String> starteds = new ArrayList<>();
-        List<String> processeds = new ArrayList<>();
-        List<String> finisheds = new ArrayList<>();
-        for (String output : outputs) {
-          if (output.contains("started")) {
-            starteds.add(output);
-          } else if (output.contains("finished")) {
-            finisheds.add(output);
-          } else {
-            processeds.add(output);
-          }
-        }
-
-        String sideInputsSuffix;
-        if (sideInputs.isEmpty()) {
-          sideInputsSuffix = "";
-        } else {
-          sideInputsSuffix = ": " + sideInputs;
-        }
-
-        String sideOutputPrefix;
-        if (sideOutput.isEmpty()) {
-          sideOutputPrefix = "";
-        } else {
-          sideOutputPrefix = sideOutput + ": ";
-        }
-
-        List<String> expectedProcesseds = new ArrayList<>();
-        for (Integer input : inputs) {
-          expectedProcesseds.add(
-              sideOutputPrefix + "processing: " + input + sideInputsSuffix);
-        }
-        String[] expectedProcessedsArray =
-            expectedProcesseds.toArray(new String[expectedProcesseds.size()]);
-        if (!ordered || expectedProcesseds.isEmpty()) {
-          assertThat(processeds, containsInAnyOrder(expectedProcessedsArray));
-        } else {
-          assertThat(processeds, contains(expectedProcessedsArray));
-        }
-
-        assertEquals(starteds.size(), finisheds.size());
-        assertTrue(starteds.size() > 0);
-        for (String started : starteds) {
-          assertEquals(sideOutputPrefix + "started", started);
-        }
-        for (String finished : finisheds) {
-          assertEquals(sideOutputPrefix + "finished", finished);
-        }
-
-        return null;
+      c.output(value);
+      for (TupleTag<String> sideOutputTupleTag : sideOutputTupleTags) {
+        c.sideOutput(sideOutputTupleTag,
+                     sideOutputTupleTag.getId() + ": " + value);
       }
     }
   }
@@ -397,7 +359,7 @@ public class ParDoTest implements Serializable {
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testParDo() {
     Pipeline p = TestPipeline.create();
 
@@ -410,13 +372,32 @@ public class ParDoTest implements Serializable {
         .apply(ParDo.of(new TestDoFn()));
 
     DataflowAssert.that(output)
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs));
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs));
 
     p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
+  public void testParDo2() {
+    Pipeline p = TestPipeline.create();
+
+    List<Integer> inputs = Arrays.asList(3, -42, 666);
+
+    PCollection<Integer> input = createInts(p, inputs);
+
+    PCollection<String> output =
+        input
+        .apply(ParDo.of(new TestDoFnWithContext()));
+
+    DataflowAssert.that(output)
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs));
+
+    p.run();
+  }
+
+  @Test
+  @Category(RunnableOnService.class)
   public void testParDoEmpty() {
     Pipeline p = TestPipeline.create();
 
@@ -429,13 +410,13 @@ public class ParDoTest implements Serializable {
         .apply(ParDo.of(new TestDoFn()));
 
     DataflowAssert.that(output)
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs));
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs));
 
     p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testParDoWithSideOutputs() {
     Pipeline p = TestPipeline.create();
 
@@ -461,16 +442,16 @@ public class ParDoTest implements Serializable {
                    .and(sideTagUnwritten).and(sideTag2)));
 
     DataflowAssert.that(outputs.get(mainTag))
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs));
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs));
 
     DataflowAssert.that(outputs.get(sideTag1))
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs)
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs)
                    .fromSideOutput(sideTag1));
     DataflowAssert.that(outputs.get(sideTag2))
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs)
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs)
                    .fromSideOutput(sideTag2));
     DataflowAssert.that(outputs.get(sideTag3))
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs)
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs)
                    .fromSideOutput(sideTag3));
     DataflowAssert.that(outputs.get(sideTagUnwritten)).containsInAnyOrder();
 
@@ -478,7 +459,7 @@ public class ParDoTest implements Serializable {
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testParDoWithOnlySideOutputs() {
     Pipeline p = TestPipeline.create();
 
@@ -521,7 +502,7 @@ public class ParDoTest implements Serializable {
             Arrays.asList(sideTag))));
 
     DataflowAssert.that(output)
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs));
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs));
 
     p.run();
   }
@@ -556,17 +537,14 @@ public class ParDoTest implements Serializable {
                 c.sideOutput(new TupleTag<String>(){}, "side");
               }
             }}));
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(),
-                 containsString("the number of side outputs has exceeded a limit"));
-    }
+
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("the number of side outputs has exceeded a limit");
+    p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testParDoWithSideInputs() {
     Pipeline p = TestPipeline.create();
 
@@ -587,7 +565,7 @@ public class ParDoTest implements Serializable {
                    Arrays.<TupleTag<String>>asList())));
 
     DataflowAssert.that(output)
-        .satisfies(TestDoFn.HasExpectedOutput
+        .satisfies(ParDoTest.HasExpectedOutput
                    .forInput(inputs)
                    .andSideInputs(11, 222));
 
@@ -609,13 +587,9 @@ public class ParDoTest implements Serializable {
             Arrays.<PCollectionView<Integer>>asList(sideView),
             Arrays.<TupleTag<String>>asList())));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(),
-                 containsString("calling sideInput() with unknown view"));
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("calling sideInput() with unknown view");
+    p.run();
   }
 
   @Test
@@ -629,12 +603,9 @@ public class ParDoTest implements Serializable {
     input
         .apply(ParDo.of(new TestStartBatchErrorDoFn()));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(), containsString("test error in initialize"));
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("test error in initialize");
+    p.run();
   }
 
   @Test
@@ -648,12 +619,9 @@ public class ParDoTest implements Serializable {
     input
         .apply(ParDo.of(new TestProcessElementErrorDoFn()));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(), containsString("test error in process"));
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("test error in process");
+    p.run();
   }
 
   @Test
@@ -667,16 +635,13 @@ public class ParDoTest implements Serializable {
     input
         .apply(ParDo.of(new TestFinishBatchErrorDoFn()));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(), containsString("test error in finalize"));
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("test error in finalize");
+    p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testParDoKeyedState() {
     Pipeline p = TestPipeline.create();
 
@@ -698,6 +663,42 @@ public class ParDoTest implements Serializable {
     p.run();
   }
 
+
+  @Test
+  @Category(RunnableOnService.class)
+  public void testParDoKeyedState2() {
+    Pipeline p = TestPipeline.create();
+
+    List<String> inputs = Arrays.asList(
+        "A", "A", "B", "C", "B", "A", "D", "D", "D", "D");
+
+    PCollection<String> output =
+        p.apply(Create.of(inputs))
+         .apply(ParDo.named("ToKv")
+                     .of(new DoFn<String, KV<String, Integer>>() {
+                         @Override
+                         public void processElement(ProcessContext c) {
+                           c.output(KV.of(c.element(), 1));
+                         }
+                     }))
+     .apply(ParDo.of(new DoFnWithContext<KV<String, Integer>, String>() {
+       @ProcessElement
+       public void processElement(ProcessContext c, KeyedState keyedState) throws IOException {
+         String key = c.element().getKey();
+         CodedTupleTag<Long> tag = CodedTupleTag.of(key, BigEndianLongCoder.of());
+         Long result = keyedState.lookup(tag);
+         long count = result == null ? 0 : result;
+         keyedState.store(tag, ++count);
+         if (count == 3) {
+           c.output(key);
+         }
+       }
+     }));
+
+    DataflowAssert.that(output).containsInAnyOrder("A", "D");
+    p.run();
+  }
+
   @Test
   public void testParDoWithUnexpectedKeyedState() {
     Pipeline p = TestPipeline.create();
@@ -710,13 +711,9 @@ public class ParDoTest implements Serializable {
     input
         .apply(ParDo.of(new TestUnexpectedKeyedStateDoFn()));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(),
-                 containsString("Keyed state is only available"));
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("Keyed state is only available");
+    p.run();
   }
 
   @Test
@@ -727,15 +724,32 @@ public class ParDoTest implements Serializable {
 
     PCollection<Integer> input = createInts(p, inputs);
 
-    try {
-      input.apply(ParDo.of(new TestKeyedStateDoFnWithNonKvInput()))
-          .finishSpecifying();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      assertThat(exn.toString(), containsString(
-          "KeyedState is only available in DoFn's with keyed inputs, but "
-          + "input coder BigEndianIntegerCoder is not keyed."));
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage(
+        "KeyedState is only available in DoFn's with keyed inputs, but "
+        + "input coder BigEndianIntegerCoder is not keyed.");
+
+    input.apply(ParDo.of(new TestKeyedStateDoFnWithNonKvInput())).finishSpecifying();
+  }
+
+  @Test
+  public void testParDoKeyedStateDoFnWithContextWithNonKvInput() {
+    Pipeline p = TestPipeline.create();
+
+    List<Integer> inputs = Arrays.asList(3, -42, 666);
+
+    PCollection<Integer> input = createInts(p, inputs);
+
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage(
+        "KeyedState is only available in DoFn's with keyed inputs, but "
+            + "input coder BigEndianIntegerCoder is not keyed.");
+
+    input.apply(ParDo.of(new DoFnWithContext<Integer, String>() {
+      @SuppressWarnings("unused")
+      @ProcessElement
+      public void process(ProcessContext c, KeyedState keyedState) {}
+    })).finishSpecifying();
   }
 
   @Test
@@ -837,7 +851,7 @@ public class ParDoTest implements Serializable {
     // Test that Coder inference of the result works through
     // user-defined PTransforms.
     DataflowAssert.that(output)
-        .satisfies(TestDoFn.HasExpectedOutput.forInput(inputs));
+        .satisfies(ParDoTest.HasExpectedOutput.forInput(inputs));
 
     p.run();
   }
@@ -906,9 +920,6 @@ public class ParDoTest implements Serializable {
     }
 
     @Override
-    public boolean isDeterministic() { return true; }
-
-    @Override
     public boolean isRegisterByteSizeObserverCheap(TestDummy value, Context context) {
       return true;
     }
@@ -945,25 +956,124 @@ public class ParDoTest implements Serializable {
      }
   }
 
+  /** DataflowAssert "matcher" for expected output. */
+  static class HasExpectedOutput
+      implements SerializableFunction<Iterable<String>, Void>, Serializable {
+    private final List<Integer> inputs;
+    private final List<Integer> sideInputs;
+    private final String sideOutput;
+    private final boolean ordered;
+
+    public static HasExpectedOutput forInput(List<Integer> inputs) {
+      return new HasExpectedOutput(
+          new ArrayList<Integer>(inputs),
+          new ArrayList<Integer>(),
+          "",
+          false);
+    }
+
+    private HasExpectedOutput(List<Integer> inputs,
+                              List<Integer> sideInputs,
+                              String sideOutput,
+                              boolean ordered) {
+      this.inputs = inputs;
+      this.sideInputs = sideInputs;
+      this.sideOutput = sideOutput;
+      this.ordered = ordered;
+    }
+
+    public HasExpectedOutput andSideInputs(Integer... sideInputValues) {
+      List<Integer> sideInputs = new ArrayList<>();
+      for (Integer sideInputValue : sideInputValues) {
+        sideInputs.add(sideInputValue);
+      }
+      return new HasExpectedOutput(inputs, sideInputs, sideOutput, ordered);
+    }
+
+    public HasExpectedOutput fromSideOutput(TupleTag<String> sideOutputTag) {
+      return fromSideOutput(sideOutputTag.getId());
+    }
+    public HasExpectedOutput fromSideOutput(String sideOutput) {
+      return new HasExpectedOutput(inputs, sideInputs, sideOutput, ordered);
+    }
+
+    public HasExpectedOutput inOrder() {
+      return new HasExpectedOutput(inputs, sideInputs, sideOutput, true);
+    }
+
+    @Override
+    public Void apply(Iterable<String> outputs) {
+      List<String> starteds = new ArrayList<>();
+      List<String> processeds = new ArrayList<>();
+      List<String> finisheds = new ArrayList<>();
+      for (String output : outputs) {
+        if (output.contains("started")) {
+          starteds.add(output);
+        } else if (output.contains("finished")) {
+          finisheds.add(output);
+        } else {
+          processeds.add(output);
+        }
+      }
+
+      String sideInputsSuffix;
+      if (sideInputs.isEmpty()) {
+        sideInputsSuffix = "";
+      } else {
+        sideInputsSuffix = ": " + sideInputs;
+      }
+
+      String sideOutputPrefix;
+      if (sideOutput.isEmpty()) {
+        sideOutputPrefix = "";
+      } else {
+        sideOutputPrefix = sideOutput + ": ";
+      }
+
+      List<String> expectedProcesseds = new ArrayList<>();
+      for (Integer input : inputs) {
+        expectedProcesseds.add(
+            sideOutputPrefix + "processing: " + input + sideInputsSuffix);
+      }
+      String[] expectedProcessedsArray =
+          expectedProcesseds.toArray(new String[expectedProcesseds.size()]);
+      if (!ordered || expectedProcesseds.isEmpty()) {
+        assertThat(processeds, containsInAnyOrder(expectedProcessedsArray));
+      } else {
+        assertThat(processeds, contains(expectedProcessedsArray));
+      }
+
+      assertEquals(starteds.size(), finisheds.size());
+      assertTrue(starteds.size() > 0);
+      for (String started : starteds) {
+        assertEquals(sideOutputPrefix + "started", started);
+      }
+      for (String finished : finisheds) {
+        assertEquals(sideOutputPrefix + "finished", finished);
+      }
+
+      return null;
+    }
+  }
+
   @Test
-  public void testSideOutputUnknownCoder() {
+  public void testSideOutputUnknownCoder() throws Exception {
     Pipeline pipeline = TestPipeline.create();
     PCollection<Integer> input = pipeline
         .apply(Create.of(Arrays.asList(1, 2, 3)));
 
-    // Expect a fail, but it should be a NoCoderException
     final TupleTag<Integer> mainTag = new TupleTag<Integer>();
     final TupleTag<TestDummy> sideTag = new TupleTag<TestDummy>();
     input.apply(ParDo.of(new SideOutputDummyFn(sideTag))
         .withOutputTags(mainTag, TupleTagList.of(sideTag)));
 
     thrown.expect(IllegalStateException.class);
-    thrown.expectMessage("unable to infer a default Coder");
+    thrown.expectMessage("Unable to infer a default Coder");
     pipeline.run();
   }
 
   @Test
-  public void testSideOutputUnregisteredExplicitCoder() {
+  public void testSideOutputUnregisteredExplicitCoder() throws Exception {
     Pipeline pipeline = TestPipeline.create();
     PCollection<Integer> input = pipeline
         .apply(Create.of(Arrays.asList(1, 2, 3)));
@@ -972,8 +1082,6 @@ public class ParDoTest implements Serializable {
     final TupleTag<TestDummy> sideTag = new TupleTag<TestDummy>();
     PCollectionTuple outputTuple = input.apply(ParDo.of(new SideOutputDummyFn(sideTag))
         .withOutputTags(mainTag, TupleTagList.of(sideTag)));
-
-    assertNull(pipeline.getCoderRegistry().getDefaultCoder(TestDummy.class));
 
     outputTuple.get(sideTag).setCoder(new TestDummyCoder());
 
@@ -1127,16 +1235,13 @@ public class ParDoTest implements Serializable {
                                                    Duration.millis(-1001))))
         .apply(ParDo.of(new TestFormatTimestampDoFn()));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (RuntimeException exn) {
-      // expected
-    }
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("allowed maximum skew");
+    p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testWindowingInStartAndFinishBundle() {
     Pipeline p = TestPipeline.create();
 
@@ -1188,12 +1293,7 @@ public class ParDoTest implements Serializable {
                   }
                 }));
 
-    try {
-      p.run();
-      fail("should have failed");
-    } catch (Exception e) {
-      assertThat(e.toString(), containsString(
-          "WindowFn attemped to access input timestamp when none was available"));
-    }
+    thrown.expectMessage("WindowFn attempted to access input timestamp when none was available");
+    p.run();
   }
 }

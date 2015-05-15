@@ -40,8 +40,9 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * A Pipeline manages a DAG of PTransforms, and the PCollections
- * that the PTransforms consume and produce.
+ * A {@code Pipeline} manages a DAG of {@link PTransform}s, and the
+ * {@link com.google.cloud.dataflow.sdk.values.PCollection}s
+ * that the {@link PTransform}s consume and produce.
  *
  * <p> After a {@code Pipeline} has been constructed, it can be executed,
  * using a default or an explicit {@link PipelineRunner}.
@@ -128,11 +129,10 @@ public class Pipeline {
    * {@code TextIO.Read} or
    * {@link com.google.cloud.dataflow.sdk.transforms.Create}.
    *
-   * <P>
-   * Alias for {@code begin().apply(root)}.
+   * <p> Alias for {@code begin().apply(root)}.
    */
-  public <Output extends POutput> Output apply(
-      PTransform<? super PBegin, Output> root) {
+  public <OutputT extends POutput> OutputT apply(
+      PTransform<? super PBegin, OutputT> root) {
     return begin().apply(root);
   }
 
@@ -175,7 +175,7 @@ public class Pipeline {
   }
 
   /**
-   * A PipelineVisitor can be passed into
+   * A {@link PipelineVisitor} can be passed into
    * {@link Pipeline#traverseTopologically} to be called for each of the
    * transforms and values in the Pipeline.
    */
@@ -210,14 +210,14 @@ public class Pipeline {
   }
 
   /**
-   * Applies the given PTransform to the given Input,
-   * and returns its Output.
+   * Applies the given {@link PTransform} to the given {@code InputT},
+   * and returns its {@code OutputT}.
    *
-   * <p> Called by PInput subclasses in their {@code apply} methods.
+   * <p> Called by {@link PInput} subclasses in their {@code apply} methods.
    */
-  public static <Input extends PInput, Output extends POutput>
-  Output applyTransform(Input input,
-                        PTransform<? super Input, Output> transform) {
+  public static <InputT extends PInput, OutputT extends POutput>
+  OutputT applyTransform(InputT input,
+                        PTransform<? super InputT, OutputT> transform) {
     return input.getPipeline().applyInternal(input, transform);
   }
 
@@ -231,6 +231,9 @@ public class Pipeline {
   private Set<String> usedFullNames = new HashSet<>();
   private CoderRegistry coderRegistry;
 
+  /**
+   * @deprecated replaced by {@link #Pipeline(PipelineRunner, PipelineOptions)}
+   */
   @Deprecated
   protected Pipeline(PipelineRunner<?> runner) {
     this(runner, PipelineOptionsFactory.create());
@@ -242,16 +245,18 @@ public class Pipeline {
   }
 
   @Override
-  public String toString() { return "Pipeline#" + hashCode(); }
+  public String toString() {
+    return "Pipeline#" + hashCode();
+  }
 
   /**
    * Applies a transformation to the given input.
    *
    * @see Pipeline#apply
    */
-  private <Input extends PInput, Output extends POutput>
-  Output applyInternal(Input input,
-      PTransform<? super Input, Output> transform) {
+  private <InputT extends PInput, OutputT extends POutput>
+  OutputT applyInternal(InputT input,
+      PTransform<? super InputT, OutputT> transform) {
     input.finishSpecifying();
 
     TransformTreeNode parent = transforms.getCurrent();
@@ -278,11 +283,11 @@ public class Pipeline {
     try {
       transforms.pushNode(child);
       transform.validate(input);
-      Output output = runner.apply(transform, input);
+      OutputT output = runner.apply(transform, input);
       transforms.setOutput(child, output);
 
       // recordAsOutput is a NOOP if already called;
-      output.recordAsOutput(this, child.getTransform());
+      output.recordAsOutput(child.getTransform());
       verifyOutputState(output, child);
       return output;
     } finally {
@@ -310,16 +315,39 @@ public class Pipeline {
    *
    * <p> A non-composite transform must have all
    * of its outputs registered as produced by the transform.
+   *
+   * <p> A composite transform must have all of its outputs
+   * registered as produced by the contains primitive transforms.
+   * They have each had the above check performed already, when
+   * they were applied, so the only possible failure state is
+   * that the composite transform has returned a primitive output.
    */
   private void verifyOutputState(POutput output, TransformTreeNode node) {
     if (!node.isCompositeNode()) {
       PTransform<?, ?> thisTransform = node.getTransform();
       List<PTransform<?, ?>> producingTransforms = getProducingTransforms(output);
       for (PTransform<?, ?> producingTransform : producingTransforms) {
+
+        // Using != because object identity indicates that the transforms
+        // are the same node in the pipeline
         if (thisTransform != producingTransform) {
           throw new IllegalArgumentException("Output of non-composite transform "
               + thisTransform + " is registered as being produced by"
               + " a different transform: " + producingTransform);
+        }
+      }
+    } else {
+      PTransform<?, ?> thisTransform = node.getTransform();
+      List<PTransform<?, ?>> producingTransforms = getProducingTransforms(output);
+      for (PTransform<?, ?> producingTransform : producingTransforms) {
+
+        // Using == because object identity indicates that the transforms
+        // are the same node in the pipeline
+        if (thisTransform == producingTransform) {
+          throw new IllegalStateException("Output of composite transform "
+              + thisTransform + " is registered as being produced by it,"
+              + " but the output of every composite transform should be"
+              + " produced by a primitive transform contained therein.");
         }
       }
     }
@@ -410,7 +438,6 @@ public class Pipeline {
    */
   public void addValueInternal(PValue value) {
     this.values.add(value);
-    value.setPipelineInternal(this);
     LOG.debug("Adding {} to {}", value, this);
   }
 }

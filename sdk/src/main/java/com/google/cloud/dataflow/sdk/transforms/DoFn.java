@@ -16,23 +16,28 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
-import com.google.cloud.dataflow.sdk.coders.CoderException;
+import com.google.cloud.dataflow.sdk.annotations.Experimental.Kind;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
+import com.google.cloud.dataflow.sdk.transforms.Combine.CombineFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.util.WindowingInternals;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTagMap;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * The argument to {@link ParDo} providing the code to use to process
@@ -50,11 +55,16 @@ import java.util.List;
  * separately from any {@code ParDo} transform or {@code Pipeline},
  * can be done via the {@link DoFnTester} harness.
  *
- * @param <I> the type of the (main) input elements
- * @param <O> the type of the (main) output elements
+ * <p> {@link DoFnWithContext} (currently experimental) offers an alternative
+ * mechanism for accessing {@link ProcessContext#keyedState} and
+ * {@link ProcessContext#window()} without the need to implement
+ * {@link RequiresKeyedState} or {@link RequiresWindowAccess}.
+ *
+ * @param <InputT> the type of the (main) input elements
+ * @param <OutputT> the type of the (main) output elements
  */
 @SuppressWarnings("serial")
-public abstract class DoFn<I, O> implements Serializable {
+public abstract class DoFn<InputT, OutputT> implements Serializable {
 
   /** Information accessible to all methods in this {@code DoFn}. */
   public abstract class Context {
@@ -82,7 +92,7 @@ public abstract class DoFn<I, O> implements Serializable {
      * to access any information about the input element. The output element
      * will have a timestamp of negative infinity.
      */
-    public abstract void output(O output);
+    public abstract void output(OutputT output);
 
     /**
      * Adds the given element to the main output {@code PCollection},
@@ -101,7 +111,7 @@ public abstract class DoFn<I, O> implements Serializable {
      * to access any information about the input element except for the
      * timestamp.
      */
-    public abstract void outputWithTimestamp(O output, Instant timestamp);
+    public abstract void outputWithTimestamp(OutputT output, Instant timestamp);
 
     /**
      * Adds the given element to the side output {@code PCollection} with the
@@ -154,42 +164,42 @@ public abstract class DoFn<I, O> implements Serializable {
         TupleTag<T> tag, T output, Instant timestamp);
 
     /**
-     * Returns an aggregator with aggregation logic specified by the CombineFn
-     * argument. The name provided should be unique across aggregators created
-     * within the containing ParDo transform application.
+     * Creates an {@link Aggregator} in the {@link DoFn} context with the
+     * specified name and aggregation logic specified by {@link CombineFn}.
      *
-     * <p> All instances of this DoFn in the containing ParDo
-     * transform application should define aggregators consistently,
-     * i.e., an aggregator with a given name always specifies the same
-     * combiner in all DoFn instances in the containing ParDo
-     * transform application.
+     * <p>For internal use only.
      *
-     * @throws IllegalArgumentException if the given CombineFn is not
-     * supported as aggregator's combiner, or if the given name collides
-     * with another aggregator or system-provided counter.
+     * @param name the name of the aggregator
+     * @param combiner the {@link CombineFn} to use in the aggregator
+     * @return an aggregator for the provided name and {@link CombineFn} in this
+     *         context
      */
-    @Experimental(Experimental.Kind.AGGREGATOR)
-    public abstract <AI, AA, AO> Aggregator<AI> createAggregator(
-        String name, Combine.CombineFn<? super AI, AA, AO> combiner);
+    @Experimental(Kind.AGGREGATOR)
+    protected abstract <AggInputT, AggOutputT> Aggregator<AggInputT, AggOutputT>
+        createAggregatorInternal(String name, CombineFn<AggInputT, ?, AggOutputT> combiner);
 
     /**
-     * Returns an aggregator with aggregation logic specified by the
-     * SerializableFunction argument. The name provided should be unique across
-     * aggregators created within the containing ParDo transform application.
+     * Sets up {@link Aggregator}s created by the {@link DoFn} so they are
+     * usable within this context.
      *
-     * <p> All instances of this DoFn in the containing ParDo
-     * transform application should define aggregators consistently,
-     * i.e., an aggregator with a given name always specifies the same
-     * combiner in all DoFn instances in the containing ParDo
-     * transform application.
-     *
-     * @throws IllegalArgumentException if the given SerializableFunction is
-     * not supported as aggregator's combiner, or if the given name collides
-     * with another aggregator or system-provided counter.
+     * <p>This method should be called by runners before {@link DoFn#startBundle}
+     * is executed.
      */
-    @Experimental(Experimental.Kind.AGGREGATOR)
-    public abstract <AI, AO> Aggregator<AI> createAggregator(
-        String name, SerializableFunction<Iterable<AI>, AO> combiner);
+    @Experimental(Kind.AGGREGATOR)
+    protected final void setupDelegateAggregators() {
+      for (DelegatingAggregator<?, ?> aggregator : aggregators.values()) {
+        setupDelegateAggregator(aggregator);
+      }
+    }
+
+    private final <AggInputT, AggOutputT> void setupDelegateAggregator(
+        DelegatingAggregator<AggInputT, AggOutputT> aggregator) {
+
+      Aggregator<AggInputT, AggOutputT> delegate = createAggregatorInternal(
+          aggregator.getName(), aggregator.getCombineFn());
+
+      aggregator.setDelegate(delegate);
+    }
   }
 
   /**
@@ -200,18 +210,18 @@ public abstract class DoFn<I, O> implements Serializable {
     /**
      * Returns the input element to be processed.
      */
-    public abstract I element();
+    public abstract InputT element();
 
     /**
      * Returns the value of the side input for the window corresponding to the
      * window of the main input element.
      *
      * <p> See
-     * {@link com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn#getSideInputWindow}
+     * {@link com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn#getSideInputTWindow}
      * for how this corresponding window is determined.
      *
      * @throws IllegalArgumentException if this is not a side input
-     * @see ParDo#withSideInputs
+     * @see ParDo#withSideInputTs
      */
     public abstract <T> T sideInput(PCollectionView<T> view);
 
@@ -259,7 +269,7 @@ public abstract class DoFn<I, O> implements Serializable {
      * Returns the process context to use for implementing windowing.
      */
     @Experimental
-    public abstract WindowingInternals<I, O> windowingInternals();
+    public abstract WindowingInternals<InputT, OutputT> windowingInternals();
   }
 
   /**
@@ -291,13 +301,14 @@ public abstract class DoFn<I, O> implements Serializable {
   public interface RequiresWindowAccess {}
 
   /**
-   * Interface for interacting with keyed state.
+   * A {@code KeyedState} is a mutable mapping
+   * from {@link CodedTupleTag CodedTupleTag<T>}
+   * to {@code T}.
    */
   @Experimental
   public interface KeyedState {
     /**
-     * Updates this {@code KeyedState} in place so that the given tag
-     * maps to the given value.
+     * Updates this {@code KeyedState} in place so that the given tag maps to the given value.
      *
      * @throws IOException if encoding the given value fails
      */
@@ -313,7 +324,7 @@ public abstract class DoFn<I, O> implements Serializable {
      * {@code KeyedState}, or {@code null} if the tag has no asssociated
      * value.
      *
-     * <p> See {@link #lookup(List)} to look up multiple tags at
+     * <p> See {@link #lookup(Iterable)} to look up multiple tags at
      * once.  It is significantly more efficient to look up multiple
      * tags all at once rather than one at a time.
      *
@@ -329,12 +340,23 @@ public abstract class DoFn<I, O> implements Serializable {
      * <p> See {@link #lookup(CodedTupleTag)} to look up a single
      * tag.
      *
-     * @throws CoderException if decoding any of the requested values fails
+     * @throws IOException if decoding any of the requested values fails, often
+     * a {@link com.google.cloud.dataflow.sdk.coders.CoderException}.
      */
-    public CodedTupleTagMap lookup(List<? extends CodedTupleTag<?>> tags) throws IOException;
+    public CodedTupleTagMap lookup(Iterable<? extends CodedTupleTag<?>> tags) throws IOException;
+  }
+
+  public DoFn() {
+    this(new HashMap<String, DelegatingAggregator<?, ?>>());
+  }
+
+  DoFn(Map<String, DelegatingAggregator<?, ?>> aggregators) {
+    this.aggregators = aggregators;
   }
 
   /////////////////////////////////////////////////////////////////////////////
+
+  private final Map<String, DelegatingAggregator<?, ?>> aggregators;
 
   /**
    * Prepares this {@code DoFn} instance for processing a batch of elements.
@@ -362,28 +384,131 @@ public abstract class DoFn<I, O> implements Serializable {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * Returns a {@link TypeToken} capturing what is known statically
+   * Returns a {@link TypeDescriptor} capturing what is known statically
    * about the input type of this {@code DoFn} instance's most-derived
    * class.
    *
-   * <p> See {@link #getOutputTypeToken} for more discussion.
+   * <p> See {@link #getOutputTypeDescriptor} for more discussion.
    */
-  TypeToken<I> getInputTypeToken() {
-    return new TypeToken<I>(getClass()) {};
+  protected TypeDescriptor<InputT> getInputTypeDescriptor() {
+    return new TypeDescriptor<InputT>(getClass()) {};
   }
 
   /**
-   * Returns a {@link TypeToken} capturing what is known statically
+   * Returns a {@link TypeDescriptor} capturing what is known statically
    * about the output type of this {@code DoFn} instance's
    * most-derived class.
    *
    * <p> In the normal case of a concrete {@code DoFn} subclass with
    * no generic type parameters of its own (including anonymous inner
    * classes), this will be a complete non-generic type, which is good
-   * for choosing a default output {@code Coder<O>} for the output
-   * {@code PCollection<O>}.
+   * for choosing a default output {@code Coder<OutputT>} for the output
+   * {@code PCollection<OutputT>}.
    */
-  TypeToken<O> getOutputTypeToken() {
-    return new TypeToken<O>(getClass()) {};
+  protected TypeDescriptor<OutputT> getOutputTypeDescriptor() {
+    return new TypeDescriptor<OutputT>(getClass()) {};
+  }
+
+  /**
+   * Returns an {@link Aggregator} with aggregation logic specified by the
+   * {@link CombineFn} argument. The name provided must be unique across
+   * {@link Aggregator}s created within the DoFn.
+   *
+   * @param name the name of the aggregator
+   * @param combiner the {@link CombineFn} to use in the aggregator
+   * @return an aggregator for the provided name and combiner in the scope of
+   *         this DoFn
+   * @throws NullPointerException if the name or combiner is null
+   * @throws IllegalArgumentException if the given name collides with another
+   *         aggregator in this scope
+   */
+  protected final <AggInputT, AggOutputT> Aggregator<AggInputT, AggOutputT>
+      createAggregator(String name, CombineFn<? super AggInputT, ?, AggOutputT> combiner) {
+    checkNotNull(name, "name cannot be null");
+    checkNotNull(combiner, "combiner cannot be null");
+    checkArgument(!aggregators.containsKey(name),
+        "Cannot create aggregator with name %s."
+        + " An Aggregator with that name already exists within this scope.",
+        name);
+    DelegatingAggregator<AggInputT, AggOutputT> aggregator =
+        new DelegatingAggregator<>(name, combiner);
+    aggregators.put(name, aggregator);
+    return aggregator;
+  }
+
+  /**
+   * Returns an {@link Aggregator} with the aggregation logic specified by the
+   * {@link SerializableFunction} argument. The name provided must be unique
+   * across {@link Aggregator}s created within the DoFn.
+   *
+   * @param name the name of the aggregator
+   * @param combiner the {@link SerializableFunction} to use in the aggregator
+   * @return an aggregator for the provided name and combiner in the scope of
+   *         this DoFn
+   * @throws NullPointerException if the name or combiner is null
+   * @throws IllegalArgumentException if the given name collides with another
+   *         aggregator in this scope
+   */
+  protected final <AggInputT> Aggregator<AggInputT, AggInputT> createAggregator(String name,
+      SerializableFunction<Iterable<AggInputT>, AggInputT> combiner) {
+    checkNotNull(combiner, "combiner cannot be null.");
+    return createAggregator(name, Combine.SimpleCombineFn.of(combiner));
+  }
+
+  /**
+   * An {@link Aggregator} that delegates calls to addValue to another
+   * aggregator.
+   *
+   * @param <AggInputT> the type of input element
+   * @param <AggOutputT> the type of output element
+   */
+  static class DelegatingAggregator<AggInputT, AggOutputT> implements
+      Aggregator<AggInputT, AggOutputT>, Serializable {
+    private static final long serialVersionUID = 0L;
+
+    private final String name;
+
+    private final CombineFn<AggInputT, ?, AggOutputT> combineFn;
+
+    private Aggregator<AggInputT, ?> delegate;
+
+    public DelegatingAggregator(String name,
+        CombineFn<? super AggInputT, ?, AggOutputT> combiner) {
+      this.name = name;
+      // Safe contravariant cast
+      @SuppressWarnings("unchecked")
+      CombineFn<AggInputT, ?, AggOutputT> specificCombiner =
+          (CombineFn<AggInputT, ?, AggOutputT>) combiner;
+      this.combineFn = specificCombiner;
+    }
+
+    @Override
+    public void addValue(AggInputT value) {
+      if (delegate == null) {
+        throw new IllegalStateException(
+            "addValue cannot be called on Aggregator outside of the execution of a DoFn.");
+      } else {
+        delegate.addValue(value);
+      }
+    }
+
+    @Override
+    public String getName() {
+      return name;
+    }
+
+    @Override
+    public CombineFn<AggInputT, ?, AggOutputT> getCombineFn() {
+      return combineFn;
+    }
+
+    /**
+     * Sets the current delegate of the Aggregator.
+     *
+     * @param delegate the delegate to set in this aggregator
+     */
+    public void setDelegate(Aggregator<AggInputT, ?> delegate) {
+      this.delegate = delegate;
+    }
   }
 }

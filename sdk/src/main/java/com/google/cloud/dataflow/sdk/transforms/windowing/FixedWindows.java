@@ -28,7 +28,7 @@ import org.joda.time.Instant;
  * <pre> {@code
  * PCollection<Integer> items = ...;
  * PCollection<Integer> windowedItems = items.apply(
- *   Window.<Integer>by(FixedWindows.of(Duration.standardMinutes(10))));
+ *   Window.<Integer>into(FixedWindows.of(Duration.standardMinutes(10))));
  * } </pre>
  */
 @SuppressWarnings("serial")
@@ -91,4 +91,13 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
         && (size.equals(((FixedWindows) other).size))
         && (offset.equals(((FixedWindows) other).offset));
   }
+
+  public Duration getSize() {
+    return size;
+  }
+
+  public Duration getOffset() {
+    return offset;
+  }
+
 }

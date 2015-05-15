@@ -17,6 +17,7 @@
 package com.google.cloud.dataflow.sdk.transforms.windowing;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
+import com.google.cloud.dataflow.sdk.annotations.Experimental.Kind;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
@@ -28,6 +29,7 @@ import com.google.cloud.dataflow.sdk.util.DoFnRunner;
 import com.google.cloud.dataflow.sdk.util.PTuple;
 import com.google.cloud.dataflow.sdk.util.StringUtils;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 
@@ -62,8 +64,8 @@ import java.util.List;
  *
  * <pre> {@code
  * PCollection<String> items = ...;
- * PCollection<String> windowed_items = item.apply(
- *   Window.<String>into(FixedWindows.of(1, TimeUnit.MINUTES)));
+ * PCollection<String> windowed_items = items.apply(
+ *   Window.<String>into(FixedWindows.of(Duration.standardMinutes(1))));
  * PCollection<KV<String, Long>> windowed_counts = windowed_items.apply(
  *   Count.<String>perElement());
  * } </pre>
@@ -92,9 +94,8 @@ import java.util.List;
  * behavior is to trigger first when the watermark passes the end of the window, and then trigger
  * again every time there is late arriving data.
  *
- * <p> All of the elements in a window since the last time a trigger fired are
- * part of the current pane. When a trigger fires, new output is produced
- * based on the elements in the current pane.
+ * <p> Elements are added to the current window pane as they arrive. When the root trigger fires,
+ * output is produced based on the elements in the current pane.
  *
  * <p>Depending on the trigger, this can be used both to output partial results
  * early during the processing of the whole window, and to deal with late
@@ -108,8 +109,8 @@ import java.util.List;
  *
  * <pre> {@code
  * PCollection<String> items = ...;
- * PCollection<String> windowed_items = item.apply(
- *   Window.<String>into(FixedWindows.of(1, TimeUnit.MINUTES)
+ * PCollection<String> windowed_items = items.apply(
+ *   Window.<String>into(FixedWindows.of(Duration.standardMinutes(1))
  *      .triggering(AfterEach.inOrder(
  *          AfterWatermark.pastEndOfWindow(),
  *          Repeatedly
@@ -125,13 +126,17 @@ import java.util.List;
  * time (for which there were new elements in the given window) we could do the following:
  *
  * <pre> {@code
- * PCollection<String> windowed_items = item.apply(
- *   Window.<String>into(FixedWindows.of(1, TimeUnit.MINUTES)
+ * PCollection<String> windowed_items = items.apply(
+ *   Window.<String>into(FixedWindows.of(Duration.standardMinutes(1))
  *      .triggering(Repeatedly
  *              .forever(AfterProcessingTime
  *                  .pastFirstElementInPane().plusDelay(Duration.standardMinutes(1)))
  *              .until(AfterWatermark.pastEndOfWindow())));
  * } </pre>
+ *
+ * <p> After a {@link com.google.cloud.dataflow.sdk.transforms.GroupByKey} the trigger is reset to
+ * the default trigger. If you want to produce early results from a pipeline consisting of multiple
+ * {@code GroupByKey}s, you must set a trigger before <i>each</i> {@code GroupByKey}.
  *
  * <p> See {@link Trigger} for details on the available triggers.
  */
@@ -201,17 +206,8 @@ public class Window {
      * but more properties can still be specified.
      */
     public <T> Bound<T> into(WindowFn<? super T, ?> fn) {
-      return new Bound<>(name, createWindowingStrategy(fn, DefaultTrigger.of()));
+      return new Bound<>(name, WindowingStrategy.of(fn));
     }
-  }
-
-  private static <T, W extends BoundedWindow> WindowingStrategy<? super T, ?>
-    createWindowingStrategy(WindowFn<? super T, ?> fn, Trigger<?> trigger) {
-    @SuppressWarnings("unchecked")
-    WindowFn<? super T, W> typedFn = (WindowFn<? super T, W>) fn;
-    @SuppressWarnings("unchecked")
-    Trigger<W> typedTrigger = (Trigger<W>) trigger;
-    return WindowingStrategy.of(typedFn, typedTrigger);
   }
 
   /**
@@ -253,13 +249,12 @@ public class Window {
      */
     @Experimental(Experimental.Kind.TRIGGER)
     public Triggering<T> triggering(Trigger<?> trigger) {
-      return new Triggering<T>(name,
-          createWindowingStrategy(windowingStrategy.getWindowFn(), trigger));
+      return new Triggering<T>(name, windowingStrategy.withTrigger(trigger));
     }
 
     @Override
     public PCollection<T> apply(PCollection<T> input) {
-      return PCollection.<T>createPrimitiveOutputInternal(windowingStrategy);
+      return PCollection.<T>createPrimitiveOutputInternal(input.getPipeline(), windowingStrategy);
     }
 
     @Override
@@ -276,8 +271,9 @@ public class Window {
       return "Window.Into("
           + StringUtils.approximateSimpleName(windowingStrategy.getWindowFn().getClass())
           + ", "
-          // TODO: Add support for describing triggers.
-          + StringUtils.approximateSimpleName(windowingStrategy.getTrigger().getClass())
+          + windowingStrategy.getTrigger()
+          + ", "
+          + windowingStrategy.getMode()
           + ")";
     }
   }
@@ -313,7 +309,21 @@ public class Window {
      * specified to be applied, but more properties can still be specified.
      */
     public Bound<T> discardingFiredPanes() {
-      return new Bound<>(name, windowingStrategy);
+      return new Bound<>(
+          name, windowingStrategy.withMode(AccumulationMode.DISCARDING_FIRED_PANES));
+    }
+
+    /**
+     * Returns a new {@code Window} {@code PTransform} that uses the registered WindowFn and
+     * Triggering behavior, and that accumulates elements in a pane after they are triggered.
+     *
+     * <p> Does not modify this transform.  The resulting {@code PTransform} is sufficiently
+     * specified to be applied, but more properties can still be specified.
+     */
+    @Experimental(Kind.TRIGGER)
+    public Bound<T> accumulatingFiredPanes() {
+      return new Bound<>(
+          name, windowingStrategy.withMode(AccumulationMode.ACCUMULATING_FIRED_PANES));
     }
   }
 
@@ -352,8 +362,7 @@ public class Window {
       if (inputStrategy.getWindowFn() instanceof InvalidWindows) {
         @SuppressWarnings("unchecked")
         InvalidWindows<W> invalidWindows = (InvalidWindows<W>) inputStrategy.getWindowFn();
-        return WindowingStrategy.of(
-            invalidWindows.getOriginalWindowFn(), inputStrategy.getTrigger());
+        return inputStrategy.withWindowFn(invalidWindows.getOriginalWindowFn());
       } else {
         return inputStrategy;
       }

@@ -29,12 +29,12 @@ import com.google.cloud.dataflow.sdk.values.POutput;
 import com.google.common.base.Preconditions;
 
 /**
- * A PipelineRunner can execute, translate, or otherwise process a
- * Pipeline.
+ * A {@link PipelineRunner} can execute, translate, or otherwise process a
+ * {@link Pipeline}.
  *
- * @param <Results> the type of the result of {@link #run}.
+ * @param <ResultT> the type of the result of {@link #run}.
  */
-public abstract class PipelineRunner<Results extends PipelineResult> {
+public abstract class PipelineRunner<ResultT extends PipelineResult> {
 
   /**
    * Constructs a runner from the provided options.
@@ -61,7 +61,7 @@ public abstract class PipelineRunner<Results extends PipelineResult> {
   /**
    * Processes the given Pipeline, returning the results.
    */
-  public abstract Results run(Pipeline pipeline);
+  public abstract ResultT run(Pipeline pipeline);
 
   /**
    * Applies a transform to the given input, returning the output.
@@ -69,8 +69,8 @@ public abstract class PipelineRunner<Results extends PipelineResult> {
    * <p> The default implementation calls PTransform.apply(input), but can be overridden
    * to customize behavior for a particular runner.
    */
-  public <Output extends POutput, Input extends PInput> Output apply(
-      PTransform<Input, Output> transform, Input input) {
+  public <OutputT extends POutput, InputT extends PInput> OutputT apply(
+      PTransform<InputT, OutputT> transform, InputT input) {
     return transform.apply(input);
   }
 }

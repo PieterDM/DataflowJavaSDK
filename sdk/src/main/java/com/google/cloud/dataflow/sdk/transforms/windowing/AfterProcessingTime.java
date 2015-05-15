@@ -20,9 +20,10 @@ import com.google.cloud.dataflow.sdk.annotations.Experimental;
 import com.google.cloud.dataflow.sdk.coders.InstantCoder;
 import com.google.cloud.dataflow.sdk.transforms.SerializableFunction;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
-import com.google.common.collect.ImmutableList;
 
 import org.joda.time.Instant;
+
+import java.util.List;
 
 /**
  * {@code AfterProcessingTime} triggers fire based on the current processing time. They operate in
@@ -39,7 +40,7 @@ public class AfterProcessingTime<W extends BoundedWindow>
   private static final CodedTupleTag<Instant> DELAYED_UNTIL_TAG =
       CodedTupleTag.of("delayed-until", InstantCoder.of());
 
-  private AfterProcessingTime(ImmutableList<SerializableFunction<Instant, Instant>> transforms) {
+  private AfterProcessingTime(List<SerializableFunction<Instant, Instant>> transforms) {
     super(transforms);
   }
 
@@ -53,7 +54,7 @@ public class AfterProcessingTime<W extends BoundedWindow>
 
   @Override
   protected AfterProcessingTime<W> newWith(
-      ImmutableList<SerializableFunction<Instant, Instant>> transforms) {
+      List<SerializableFunction<Instant, Instant>> transforms) {
     return new AfterProcessingTime<W>(transforms);
   }
 
@@ -71,8 +72,15 @@ public class AfterProcessingTime<W extends BoundedWindow>
   }
 
   @Override
-  public TriggerResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
-    // To have gotten here, we must not have fired in any of the oldWindows.
+  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+    // If the processing time timer has fired in any of the windows being merged, it would have
+    // fired at the same point if it had been added to the merged window. So, we just report it as
+    // finished.
+    if (e.finishedInAnyMergingWindow(c.current())) {
+      return MergeResult.ALREADY_FINISHED;
+    }
+
+    // Otherwise, determine the earliest delay for all of the windows, and delay to that point.
     Instant earliestTimer = BoundedWindow.TIMESTAMP_MAX_VALUE;
     for (Instant delayedUntil : c.lookup(DELAYED_UNTIL_TAG, e.oldWindows()).values()) {
       if (delayedUntil != null && delayedUntil.isBefore(earliestTimer)) {
@@ -85,7 +93,7 @@ public class AfterProcessingTime<W extends BoundedWindow>
       c.setTimer(e.newWindow(), earliestTimer, TimeDomain.PROCESSING_TIME);
     }
 
-    return TriggerResult.CONTINUE;
+    return MergeResult.CONTINUE;
   }
 
   @Override
@@ -97,11 +105,6 @@ public class AfterProcessingTime<W extends BoundedWindow>
   public void clear(TriggerContext<W> c, W window) throws Exception {
     c.remove(DELAYED_UNTIL_TAG, window);
     c.deleteTimer(window, TimeDomain.PROCESSING_TIME);
-  }
-
-  @Override
-  public boolean willNeverFinish() {
-    return false;
   }
 
   @Override

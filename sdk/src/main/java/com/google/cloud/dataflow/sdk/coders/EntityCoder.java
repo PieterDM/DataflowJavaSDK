@@ -25,7 +25,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * An EntityCoder encodes/decodes Datastore Entity objects.
+ * An {@code EntityCoder} is a {@link Coder} for {@link Entity} objects.
  */
 @SuppressWarnings("serial")
 public class EntityCoder extends AtomicCoder<Entity> {
@@ -76,12 +76,6 @@ public class EntityCoder extends AtomicCoder<Entity> {
    * A datastore kind can hold arbitrary Object instances, which
    * makes the encoding non-deterministic.
    */
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
-  }
-
   @Override
   public void verifyDeterministic() throws NonDeterministicException {
     throw new NonDeterministicException(this,

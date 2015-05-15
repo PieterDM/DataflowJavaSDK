@@ -18,20 +18,19 @@ package com.google.cloud.dataflow.sdk.coders;
 
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.cloud.dataflow.sdk.transforms.SerializableFunction;
+import com.google.cloud.dataflow.sdk.util.CoderUtils;
 import com.google.cloud.dataflow.sdk.util.InstanceBuilder;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.TimestampedValue;
-import com.google.common.base.Optional;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
@@ -45,8 +44,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A CoderRegistry allows registering the default Coder to use for a Java class,
- * and looking up and instantiating the default Coder for a Java type.
+ * A {@code CoderRegistry} allows registering the
+ * default {@link Coder} to use for a Java class,
+ * and looking up and instantiating the default
+ * {@link Coder} for a Java type.
  *
  * <p> {@code CoderRegistry} uses the following mechanisms to determine a
  * default {@link Coder} for a Java class, in order of precedence:
@@ -62,25 +63,6 @@ import java.util.Map;
  */
 public class CoderRegistry implements CoderProvider {
   private static final Logger LOG = LoggerFactory.getLogger(CoderRegistry.class);
-
-  /** A factory that always returns the coder with which it is instantiated. */
-  public class ConstantCoderFactory implements CoderFactory {
-    private Coder<?> coder;
-
-    public ConstantCoderFactory(Coder<?> coder) {
-      this.coder = coder;
-    }
-
-    @Override
-    public Coder<?> create(List<? extends Coder<?>> typeArgumentCoders) {
-      return this.coder;
-    }
-
-    @Override
-    public List<Object> getInstanceComponents(Object value) {
-      return Collections.emptyList();
-    }
-  }
 
   public CoderRegistry() {
     setFallbackCoderProvider(SerializableCoder.PROVIDER);
@@ -134,65 +116,7 @@ public class CoderRegistry implements CoderProvider {
    */
   public void registerCoder(Class<?> clazz,
                             Class<?> coderClazz) {
-    int numTypeParameters = clazz.getTypeParameters().length;
-
-    // Find the static factory method of coderClazz named 'of' with
-    // the appropriate number of type parameters.
-
-    Class<?>[] factoryMethodArgTypes = new Class<?>[numTypeParameters];
-    Arrays.fill(factoryMethodArgTypes, Coder.class);
-
-    Method factoryMethod;
-    try {
-      factoryMethod =
-          coderClazz.getDeclaredMethod("of", factoryMethodArgTypes);
-    } catch (NoSuchMethodException | SecurityException exn) {
-      throw new IllegalArgumentException(
-          "Cannot register Coder " + coderClazz + ": "
-          + "does not have an accessible method named 'of' with "
-          + numTypeParameters + " arguments of Coder type",
-          exn);
-    }
-    if (!Modifier.isStatic(factoryMethod.getModifiers())) {
-      throw new IllegalArgumentException(
-          "Cannot register Coder " + coderClazz + ": "
-          + "method named 'of' with " + numTypeParameters
-          + " arguments of Coder type is not static");
-    }
-    if (!coderClazz.isAssignableFrom(factoryMethod.getReturnType())) {
-      throw new IllegalArgumentException(
-          "Cannot register Coder " + coderClazz + ": "
-          + "method named 'of' with " + numTypeParameters
-          + " arguments of Coder type does not return a " + coderClazz);
-    }
-    try {
-      if (!factoryMethod.isAccessible()) {
-        factoryMethod.setAccessible(true);
-      }
-    } catch (SecurityException exn) {
-      throw new IllegalArgumentException(
-          "Cannot register Coder " + coderClazz + ": "
-          + "method named 'of' with " + numTypeParameters
-          + " arguments of Coder type is not accessible",
-          exn);
-    }
-
-    // Find the static method to decompose values when inferring a coder,
-    // if there are type parameters for which we also need an example
-    // value
-    Method getComponentsMethod = null;
-    if (clazz.getTypeParameters().length > 0) {
-      try {
-        getComponentsMethod = coderClazz.getDeclaredMethod(
-            "getInstanceComponents",
-            clazz);
-      } catch (NoSuchMethodException | SecurityException exn) {
-        LOG.warn("Cannot find getInstanceComponents for class {}. This may limit the ability to"
-            + " infer a Coder for values of this type.", coderClazz, exn);
-      }
-    }
-
-    registerCoder(clazz, defaultCoderFactory(coderClazz, factoryMethod, getComponentsMethod));
+    registerCoder(clazz, CoderFactories.fromStaticMethods(coderClazz));
   }
 
   public void registerCoder(Class<?> rawClazz,
@@ -204,44 +128,51 @@ public class CoderRegistry implements CoderProvider {
   }
 
   public void registerCoder(Class<?> rawClazz, Coder<?> coder) {
-    CoderFactory factory = new ConstantCoderFactory(coder);
+    CoderFactory factory = CoderFactories.forCoder(coder);
     registerCoder(rawClazz, factory);
   }
 
   /**
-   * Returns the Coder to use by default for values of the given type,
-   * or null if there is no default Coder.
+   * Returns the Coder to use by default for values of the given type.
+   *
+   * @throws CannotProvideCoderException if there is no default Coder.
    */
-  public <T> Coder<T> getDefaultCoder(TypeToken<T> typeToken) {
-    return getDefaultCoder(typeToken, Collections.<Type, Coder<?>>emptyMap());
+  public <T> Coder<T> getDefaultCoder(TypeDescriptor<T> typeDescriptor)
+      throws CannotProvideCoderException {
+    return getDefaultCoder(typeDescriptor, Collections.<Type, Coder<?>>emptyMap());
   }
 
   /**
-   * See {@link #getDefaultCoder(TypeToken)}.
+   * See {@link #getDefaultCoder(TypeDescriptor)}.
    */
   @Override
-  public <T> Optional<Coder<T>> getCoder(TypeToken<T> typeToken) {
-    return Optional.fromNullable(getDefaultCoder(typeToken));
+  public <T> Coder<T> getCoder(TypeDescriptor<T> typeDescriptor)
+      throws CannotProvideCoderException {
+    return getDefaultCoder(typeDescriptor);
   }
 
   /**
    * Returns the Coder to use by default for values of the given type,
-   * where the given context type uses the given context coder,
-   * or null if there is no default Coder.
+   * where the given context type uses the given context coder.
+   *
+   * @throws CannotProvideCoderException if there is no default Coder.
    */
-  public <I, O> Coder<O> getDefaultCoder(TypeToken<O> typeToken,
-                                         TypeToken<I> contextTypeToken,
-                                         Coder<I> contextCoder) {
-    return getDefaultCoder(typeToken,
-                           createTypeBindings(contextTypeToken, contextCoder));
+  public <InputT, OutputT> Coder<OutputT> getDefaultCoder(
+      TypeDescriptor<OutputT> typeDescriptor,
+      TypeDescriptor<InputT> contextTypeDescriptor,
+      Coder<InputT> contextCoder)
+      throws CannotProvideCoderException {
+    return getDefaultCoder(typeDescriptor,
+                           getTypeToCoderBindings(contextTypeDescriptor.getType(), contextCoder));
   }
 
   /**
    * Returns the Coder to use on elements produced by this function, given
    * the coder used for its input elements.
    */
-  public <I, O> Coder<O> getDefaultOutputCoder(
-      SerializableFunction<I, O> fn, Coder<I> inputCoder) {
+  public <InputT, OutputT> Coder<OutputT> getDefaultOutputCoder(
+      SerializableFunction<InputT, OutputT> fn, Coder<InputT> inputCoder)
+      throws CannotProvideCoderException {
     return getDefaultCoder(
         fn.getClass(), SerializableFunction.class, inputCoder);
   }
@@ -250,17 +181,19 @@ public class CoderRegistry implements CoderProvider {
    * Returns the Coder to use for the last type parameter specialization
    * of the subclass given Coders to use for all other type parameters
    * specializations (if any).
+   *
+   * @throws CannotProvideCoderException if there is no default Coder.
    */
-  public <T, O> Coder<O> getDefaultCoder(
+  public <T, OutputT> Coder<OutputT> getDefaultCoder(
       Class<? extends T> subClass,
       Class<T> baseClass,
-      Coder<?>... knownCoders) {
+      Coder<?>... knownCoders) throws CannotProvideCoderException {
     Coder<?>[] allCoders = new Coder<?>[knownCoders.length + 1];
     // Last entry intentionally left null.
     System.arraycopy(knownCoders, 0, allCoders, 0, knownCoders.length);
     allCoders = getDefaultCoders(subClass, baseClass, allCoders);
     @SuppressWarnings("unchecked") // trusted
-    Coder<O> coder = (Coder<O>) allCoders[knownCoders.length];
+    Coder<OutputT> coder = (Coder<OutputT>) allCoders[knownCoders.length];
     return coder;
   }
 
@@ -268,25 +201,37 @@ public class CoderRegistry implements CoderProvider {
    * Returns the Coder to use for the specified type parameter specialization
    * of the subclass, given Coders to use for all other type parameters
    * (if any).
+   *
+   * @throws CannotProvideCoderException if there is no default Coder.
    */
-  @SuppressWarnings("unchecked")
-  public <T, O> Coder<O> getDefaultCoder(
+  public <T, OutputT> Coder<OutputT> getDefaultCoder(
       Class<? extends T> subClass,
       Class<T> baseClass,
-      Map<String, ? extends Coder<?>> knownCoders,
-      String paramName) {
-    // TODO: Don't infer unneeded params.
-    return (Coder<O>) getDefaultCoders(subClass, baseClass, knownCoders)
-        .get(paramName);
+      Map<Type, ? extends Coder<?>> knownCoders,
+      TypeVariable<?> param)
+      throws CannotProvideCoderException {
+
+    Map<Type, Coder<?>> inferredCoders = getDefaultCoders(subClass, baseClass, knownCoders);
+
+    @SuppressWarnings("unchecked")
+    Coder<OutputT> paramCoderOrNull = (Coder<OutputT>) inferredCoders.get(param);
+    if (paramCoderOrNull != null) {
+      return paramCoderOrNull;
+    } else {
+      throw new CannotProvideCoderException(
+          "Cannot infer coder for type parameter " + param.getName());
+    }
   }
 
   /**
    * Returns the Coder to use for the provided example value, if it can
-   * be determined, otherwise returns {@code null}. If more than one
-   * default coder matches, this will raise an exception.
+   * be determined.
+   *
+   * @throws CannotProvideCoderException if there is no default Coder or
+   * more than one coder matches
    */
-  public <T> Coder<T> getDefaultCoder(T exampleValue) {
-    Class<?> clazz = exampleValue.getClass();
+  public <T> Coder<T> getDefaultCoder(T exampleValue) throws CannotProvideCoderException {
+    Class<?> clazz = exampleValue == null ? Void.class : exampleValue.getClass();
 
     if (clazz.getTypeParameters().length == 0) {
       // Trust that getDefaultCoder returns a valid
@@ -296,23 +241,25 @@ public class CoderRegistry implements CoderProvider {
       return coder;
     } else {
       CoderFactory factory = getDefaultCoderFactory(clazz);
-      if (factory == null) {
-        return null;
-      }
 
       List<Object> components = factory.getInstanceComponents(exampleValue);
       if (components == null) {
-        return null;
+        throw new CannotProvideCoderException(
+            "Cannot provide coder based on value with class "
+            + clazz + ": The registered CoderFactory with class "
+            + factory.getClass() + " failed to decompose the value, "
+            + "which is required in order to provide coders for the components.");
       }
 
       // componentcoders = components.map(this.getDefaultCoder)
       List<Coder<?>> componentCoders = new ArrayList<>();
       for (Object component : components) {
-        Coder<?> componentCoder = getDefaultCoder(component);
-        if (componentCoder == null) {
-          return null;
-        } else {
+        try {
+          Coder<?> componentCoder = getDefaultCoder(component);
           componentCoders.add(componentCoder);
+        } catch (CannotProvideCoderException exc) {
+          throw new CannotProvideCoderException(
+              "Cannot provide coder based on value with class " + clazz, exc);
         }
       }
 
@@ -324,53 +271,81 @@ public class CoderRegistry implements CoderProvider {
     }
   }
 
-
   /**
    * Returns a Map from each of baseClass's type parameters to the Coder to
    * use by default for it, in the context of subClass's specialization of
    * baseClass.
    *
-   * <P> For example, if baseClass is Map.class and subClass extends
+   * <p> If no coder can be inferred for a particular type parameter,
+   * then that type variable will be absent from the returned map.
+   *
+   * <p> For example, if baseClass is Map.class and subClass extends
    * {@code Map<String, Integer>} then this will return the registered Coders
    * to use for String and Integer as a {"K": stringCoder, "V": intCoder} Map.
    * The knownCoders parameter can be used to provide known coders for any of
    * the parameters that will be used to infer the others.
+   *
+   * <p> Note that inference is attempted for every type variable.
+   * For a type {@code MyType<One, Two, Three>} inference will will be
+   * attempted for all of {@code One}, {@code Two}, {@code Three},
+   * even if the requester only wants a coder for {@code Two}.
+   *
+   * <p> For this reason, {@code getDefaultCoders} (plural) does not throw
+   * an exception if a coder for a particular type variable cannot be
+   * inferred. Instead, it is left absent from the map. It is the responsibility
+   * of the caller (usually {@link #getDefaultCoder} to extract the
+   * desired coder or throw a {@link CannotProvideCoderException} when appropriate.
    *
    * @param subClass the concrete type whose specializations are being inferred
    * @param baseClass the base type, a parameterized class
    * @param knownCoders a map corresponding to the set of known coders indexed
    *        by parameter name
    */
-  public <T> Map<String, Coder<?>> getDefaultCoders(
+  public <T> Map<Type, Coder<?>> getDefaultCoders(
       Class<? extends T> subClass,
       Class<T> baseClass,
-      Map<String, ? extends Coder<?>> knownCoders) {
+      Map<Type, ? extends Coder<?>> knownCoders) {
     TypeVariable<Class<T>>[] typeParams = baseClass.getTypeParameters();
     Coder<?>[] knownCodersArray = new Coder<?>[typeParams.length];
     for (int i = 0; i < typeParams.length; i++) {
-      knownCodersArray[i] = knownCoders.get(typeParams[i].getName());
+      knownCodersArray[i] = knownCoders.get(typeParams[i]);
     }
     Coder<?>[] resultArray = getDefaultCoders(
       subClass, baseClass, knownCodersArray);
-    Map<String, Coder<?>> result = new HashMap<>();
+    Map<Type, Coder<?>> result = new HashMap<>();
     for (int i = 0; i < typeParams.length; i++) {
-      result.put(typeParams[i].getName(), resultArray[i]);
+      if (resultArray[i] != null) {
+        result.put(typeParams[i], resultArray[i]);
+      }
     }
     return result;
   }
 
   /**
-   * Returns an array listing, for each of baseClass's type parameters, the
-   * Coder to use by default for it, in the context of subClass's specialization
-   * of baseClass.
+   * Returns an array listing, for each of {@code baseClass}'s type parameters, the
+   * Coder to use by default for it, in the context of {@code subClass}'s specialization
+   * of {@code baseClass}.
    *
-   * <P> For example, if baseClass is Map.class and subClass extends
-   * {@code Map<String, Integer>} then this will return the registered Coders
-   * to use for String and Integer in that order.  The knownCoders parameter
-   * can be used to provide known coders for any of the parameters that will
-   * be used to infer the others.
+   * <p> If a coder cannot be inferred for a type variable, its slot in the
+   * resulting array will be {@code null}.
    *
-   * <P> If a type cannot be inferred, null is returned.
+   * <p> For example, if {@code baseClass} is {@code Map.class} and {@code subClass}
+   * extends {@code Map<String, Integer>} then this will return the registered Coders
+   * to use for {@code String} and {@code Integer}, in that order.
+   * The {@code knownCoders} parameter can be used to provide known coders
+   * for any of the parameters that will be used to infer the others.
+   *
+   * <p> Note that inference is attempted for every type variable.
+   * For a type {@code MyType<One, Two, Three>} inference will will be
+   * attempted for all of {@code One}, {@code Two}, {@code Three},
+   * even if the requester only wants a coder for {@code Two}.
+   *
+   * <p> For this reason {@code getDefaultCoders} (plural) does not throw
+   * an exception if a coder for a particular type variable cannot be
+   * inferred. Instead, it results in a {@code null} in the array.
+   * It is the responsibility of the caller (usually {@link #getDefaultCoder}
+   * to extract the desired coder or throw a {@link CannotProvideCoderException}
+   * when appropriate.
    *
    * @param subClass the concrete type whose specializations are being inferred
    * @param baseClass the base type, a parameterized class
@@ -387,7 +362,7 @@ public class CoderRegistry implements CoderProvider {
       Class<? extends T> subClass,
       Class<T> baseClass,
       Coder<?>[] knownCoders) {
-    Type type = TypeToken.of(subClass).getSupertype(baseClass).getType();
+    Type type = TypeDescriptor.of(subClass).getSupertype(baseClass).getType();
     if (!(type instanceof ParameterizedType)) {
       throw new IllegalArgumentException(type + " is not a ParameterizedType");
     }
@@ -400,6 +375,7 @@ public class CoderRegistry implements CoderProvider {
           "Class " + baseClass + " has " + typeArgs.length + " parameters, "
           + "but " + knownCoders.length + " coders are requested.");
     }
+
     Map<Type, Coder<?>> context = new HashMap<>();
     for (int i = 0; i < knownCoders.length; i++) {
       if (knownCoders[i] != null) {
@@ -408,15 +384,20 @@ public class CoderRegistry implements CoderProvider {
               "Cannot encode elements of type " + typeArgs[i]
                   + " with " + knownCoders[i]);
         }
-        fillTypeBindings(typeArgs[i], knownCoders[i], context);
+        context.putAll(getTypeToCoderBindings(typeArgs[i], knownCoders[i]));
       }
     }
+
     Coder<?>[] result = new Coder<?>[typeArgs.length];
     for (int i = 0; i < knownCoders.length; i++) {
       if (knownCoders[i] != null) {
         result[i] = knownCoders[i];
       } else {
-        result[i] = getDefaultCoder(typeArgs[i], context);
+        try {
+          result[i] = getDefaultCoder(typeArgs[i], context);
+        } catch (CannotProvideCoderException exc) {
+          result[i] = null;
+        }
       }
     }
     return result;
@@ -426,38 +407,67 @@ public class CoderRegistry implements CoderProvider {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * Returns whether the given coder can possibly encode elements
+   * Returns {@code true} if the given coder can possibly encode elements
    * of the given type.
    */
-  static boolean isCompatible(Coder<?> coder, Type type) {
-    Type coderType =
-        ((ParameterizedType)
-            TypeToken.of(coder.getClass()).getSupertype(Coder.class).getType())
-        .getActualTypeArguments()[0];
-    if (type instanceof TypeVariable) {
-      return true; // Can't rule it out.
+  static <T, CoderT extends Coder<T>, CandidateT> boolean
+      isCompatible(CoderT coder, Type candidateType) {
+
+    // Various representations of the coder's class
+    @SuppressWarnings("unchecked")
+    Class<CoderT> coderClass = (Class<CoderT>) coder.getClass();
+    TypeDescriptor<CoderT> coderDescriptor = TypeDescriptor.of(coderClass);
+
+    // Various representations of the actual coded type
+    @SuppressWarnings("unchecked")
+    TypeDescriptor<T> codedDescriptor = CoderUtils.getCodedType(coderDescriptor);
+    @SuppressWarnings("unchecked")
+    Class<T> codedClass = (Class<T>) codedDescriptor.getRawType();
+    Type codedType = codedDescriptor.getType();
+
+    // Various representations of the candidate type
+    @SuppressWarnings("unchecked")
+    TypeDescriptor<CandidateT> candidateDescriptor =
+        (TypeDescriptor<CandidateT>) TypeDescriptor.<CandidateT>of(candidateType);
+    @SuppressWarnings("unchecked")
+    Class<CandidateT> candidateClass = (Class<CandidateT>) candidateDescriptor.getRawType();
+
+    // If coder has type Coder<T> where the actual value of T is lost
+    // to erasure, then we cannot rule it out.
+    if (candidateType instanceof TypeVariable) {
+      return true;
     }
-    Class<?> coderClass = TypeToken.of(coderType).getRawType();
-    if (!coderClass.isAssignableFrom(TypeToken.of(type).getRawType())) {
+
+    // If the raw types are not compatible, we can certainly rule out
+    // coder compatibility
+    if (!codedClass.isAssignableFrom(candidateClass)) {
       return false;
     }
-    if (coderType instanceof ParameterizedType
-        && !isNullOrEmpty(coder.getCoderArguments())) {
+    // we have established that this is a covariant upcast... though
+    // coders are invariant, we are just checking one direction
+    @SuppressWarnings("unchecked")
+    TypeDescriptor<T> candidateOkDescriptor = (TypeDescriptor<T>) candidateDescriptor;
+
+    // If the coded type is a parameterized type where any of the actual
+    // type parameters are not compatible, then the whole thing is certainly not
+    // compatible.
+    if ((codedType instanceof ParameterizedType) && !isNullOrEmpty(coder.getCoderArguments())) {
       @SuppressWarnings("unchecked")
       Type[] typeArguments =
           ((ParameterizedType)
-           TypeToken.of(type).getSupertype((Class) coderClass).getType())
+           candidateOkDescriptor.getSupertype(codedClass).getType())
           .getActualTypeArguments();
       List<? extends Coder<?>> typeArgumentCoders = coder.getCoderArguments();
       assert typeArguments.length == typeArgumentCoders.size();
       for (int i = 0; i < typeArguments.length; i++) {
         if (!isCompatible(
                 typeArgumentCoders.get(i),
-                TypeToken.of(type).resolveType(typeArguments[i]).getType())) {
+                candidateDescriptor.resolveType(typeArguments[i]).getType())) {
           return false;
         }
       }
     }
+
     return true; // For all we can tell.
   }
 
@@ -477,109 +487,64 @@ public class CoderRegistry implements CoderProvider {
    private CoderProvider fallbackCoderProvider;
 
   /**
-   * Returns a CoderFactory that invokes the given static factory method
-   * to create the Coder.
-   */
-  static CoderFactory defaultCoderFactory(
-      final Class<?> coderClazz,
-      final Method coderFactoryMethod,
-      final Method getComponentsMethod) {
-
-    return new CoderFactory() {
-      @Override
-      public Coder<?> create(List<? extends Coder<?>> typeArgumentCoders) {
-        try {
-          return (Coder) coderFactoryMethod.invoke(
-              null /* static */, typeArgumentCoders.toArray());
-        } catch (IllegalAccessException |
-                 IllegalArgumentException |
-                 InvocationTargetException |
-                 NullPointerException |
-                 ExceptionInInitializerError exn) {
-          throw new IllegalStateException(
-              "Error when invoking Coder factory method " + coderFactoryMethod,
-              exn);
-        }
-      }
-
-      @Override
-      public List<Object> getInstanceComponents(Object value) {
-        if (getComponentsMethod == null) {
-          throw new IllegalStateException(
-              "No suitable static getInstanceComponents method available for "
-              + "Coder " + coderClazz);
-        }
-
-        try {
-          @SuppressWarnings("unchecked")
-          List<Object> result = (List<Object>) (getComponentsMethod.invoke(
-              null /* static */, value));
-          return result;
-        } catch (IllegalAccessException
-            | IllegalArgumentException
-            | InvocationTargetException
-            | NullPointerException
-            | ExceptionInInitializerError exn) {
-          throw new IllegalStateException(
-              "Error when invoking Coder getComponents method " + getComponentsMethod,
-              exn);
-        }
-      }
-    };
-  }
-
-  static CoderFactory defaultCoderFactory(Class<?> coderClazz, final Method coderFactoryMethod) {
-    return defaultCoderFactory(coderClazz, coderFactoryMethod, null);
-  }
-
-  /**
    * Returns the CoderFactory to use to create default Coders for
    * instances of the given class, or null if there is no default
    * CoderFactory registered.
    */
-  CoderFactory getDefaultCoderFactory(Class<?> clazz) {
-    CoderFactory coderFactory = coderFactoryMap.get(clazz);
-    if (coderFactory == null) {
-      LOG.info("No Coder registered for {}", clazz);
+  CoderFactory getDefaultCoderFactory(Class<?> clazz) throws CannotProvideCoderException {
+    CoderFactory coderFactoryOrNull = coderFactoryMap.get(clazz);
+    if (coderFactoryOrNull != null) {
+      return coderFactoryOrNull;
+    } else {
+      throw new CannotProvideCoderException(
+          "Cannot provide coder based on value with class "
+          + clazz + ": No CoderFactory has been registered for the class.");
     }
-    return coderFactory;
   }
 
   /**
-   * Returns the Coder to use by default for values of the given type,
-   * in a context where the given types use the given coders,
-   * or null if there is no default Coder.
+   * Returns the {@link Coder} to use by default for values of the given type,
+   * in a context where the given types use the given coders.
+   *
+   * @throws CannotProvideCoderException if a coder cannot be provided
    */
-  <T> Coder<T> getDefaultCoder(TypeToken<T> typeToken,
-                               Map<Type, Coder<?>> typeCoderBindings) {
-    Coder<?> defaultCoder = getDefaultCoder(typeToken.getType(),
+  <T> Coder<T> getDefaultCoder(
+      TypeDescriptor<T> typeDescriptor,
+      Map<Type, Coder<?>> typeCoderBindings)
+      throws CannotProvideCoderException {
+
+    Coder<?> defaultCoder = getDefaultCoder(typeDescriptor.getType(),
                                             typeCoderBindings);
-    LOG.debug("Default Coder for {}: {}", typeToken, defaultCoder);
+    LOG.debug("Default Coder for {}: {}", typeDescriptor, defaultCoder);
     @SuppressWarnings("unchecked")
     Coder<T> result = (Coder<T>) defaultCoder;
     return result;
   }
 
   /**
-   * Returns the Coder to use by default for values of the given type,
-   * in a context where the given types use the given coders,
-   * or null if there is no default Coder.
+   * Returns the {@link Coder} to use by default for values of the given type,
+   * in a context where the given types use the given coders.
+   *
+   * @throws CannotProvideCoderException if a coder cannot be provided
    */
-  Coder<?> getDefaultCoder(Type type, Map<Type, Coder<?>> typeCoderBindings) {
+  Coder<?> getDefaultCoder(Type type, Map<Type, Coder<?>> typeCoderBindings)
+      throws CannotProvideCoderException {
     Coder<?> coder = typeCoderBindings.get(type);
     if (coder != null) {
       return coder;
     }
     if (type instanceof Class<?>) {
-      return getDefaultCoder((Class) type);
+      @SuppressWarnings("unchecked")
+      Class<?> clazz = (Class<?>) type;
+      return getDefaultCoder(clazz);
     } else if (type instanceof ParameterizedType) {
-      return this.getDefaultCoder((ParameterizedType) type,
-                                  typeCoderBindings);
+      return getDefaultCoder((ParameterizedType) type, typeCoderBindings);
     } else if (type instanceof TypeVariable
         || type instanceof WildcardType) {
       // No default coder for an unknown generic type.
-      LOG.debug("No Coder for unknown generic type {}", type);
-      return null;
+      throw new CannotProvideCoderException(
+          "Cannot provide a Coder for type variable "
+          + type + " because the actual type is unknown due to erasure.");
     } else {
       throw new RuntimeException(
           "Internal error: unexpected kind of Type: " + type);
@@ -587,9 +552,8 @@ public class CoderRegistry implements CoderProvider {
   }
 
   /**
-   * Returns the Coder to use by default for values of the given
-   * class, or null if there is no default Coder. The following
-   * possibilities are tried, in this order:
+   * Returns the {@link Coder} to use by default for values of the given
+   * class.
    *
    * <ol>
    * <li>A {@link Coder} class registered explicitly via
@@ -597,36 +561,53 @@ public class CoderRegistry implements CoderProvider {
    * <li>A {@link DefaultCoder} annotation on the class,
    * <li>This registry's fallback {@link CoderProvider}, which
    * may be able to generate a coder for an arbitrary class.
+   * </ol>
+   *
+   * @throws CannotProvideCoderException if a coder cannot be provided
    */
-  Coder<?> getDefaultCoder(Class<?> clazz) {
-    CoderFactory coderFactory = getDefaultCoderFactory(clazz);
-    if (coderFactory != null) {
+  <T> Coder<T> getDefaultCoder(Class<T> clazz) throws CannotProvideCoderException {
+    try {
+      CoderFactory coderFactory = getDefaultCoderFactory(clazz);
       LOG.debug("Default Coder for {} found by factory", clazz);
-      return coderFactory.create(Collections.<Coder<?>>emptyList());
+      @SuppressWarnings("unchecked")
+      Coder<T> coder = (Coder<T>) coderFactory.create(Collections.<Coder<?>>emptyList());
+      return coder;
+    } catch (CannotProvideCoderException exc) {
+      // try other ways of finding one
     }
 
     DefaultCoder defaultAnnotation = clazz.getAnnotation(
         DefaultCoder.class);
     if (defaultAnnotation != null) {
       LOG.debug("Default Coder for {} found by DefaultCoder annotation", clazz);
-      return InstanceBuilder.ofType(Coder.class)
+      @SuppressWarnings("unchecked")
+      Coder<T> coder = (Coder<T>) InstanceBuilder.ofType(Coder.class)
           .fromClass(defaultAnnotation.value())
           .fromFactoryMethod("of")
           .withArg(Class.class, clazz)
           .build();
+      return coder;
     }
 
     if (getFallbackCoderProvider() != null) {
-      @SuppressWarnings({"unchecked", "rawtypes"})
-      Optional<Coder<?>> coder =
-          (Optional) getFallbackCoderProvider().getCoder(TypeToken.of(clazz));
-      if (coder.isPresent()) {
-        return coder.get();
+      try {
+        return getFallbackCoderProvider().getCoder(TypeDescriptor.<T>of(clazz));
+      } catch (CannotProvideCoderException exc) {
+        throw new CannotProvideCoderException(
+            "Cannot provide coder for class " + clazz + " because "
+            + "it has no " + CoderFactory.class.getSimpleName() + " registered, "
+            + "it has no " + DefaultCoder.class.getSimpleName() + " annotation, "
+            + "and the fallback " + CoderProvider.class.getSimpleName()
+            + " could not automatically create a Coder.",
+            exc);
       }
+    } else {
+      throw new CannotProvideCoderException(
+            "Cannot provide coder for class " + clazz + " because "
+            + "it has no " + CoderFactory.class.getSimpleName() + " registered, "
+            + "it has no " + DefaultCoder.class.getSimpleName() + " annotation, "
+            + "and there is no fallback CoderProvider configured.");
     }
-
-    LOG.debug("No default Coder for {}", clazz);
-    return null;
   }
 
   public void setFallbackCoderProvider(CoderProvider coderProvider) {
@@ -640,76 +621,73 @@ public class CoderRegistry implements CoderProvider {
   /**
    * Returns the Coder to use by default for values of the given
    * parameterized type, in a context where the given types use the
-   * given coders, or null if there is no default Coder.
+   * given coders.
+   *
+   * @throws CannotProvideCoderException if no coder can be provided
    */
   Coder<?> getDefaultCoder(
       ParameterizedType type,
-      Map<Type, Coder<?>> typeCoderBindings) {
-    Class<?> rawClazz = (Class) type.getRawType();
+      Map<Type, Coder<?>> typeCoderBindings)
+      throws CannotProvideCoderException {
+    Class<?> rawClazz = (Class<?>) type.getRawType();
     CoderFactory coderFactory = getDefaultCoderFactory(rawClazz);
-    if (coderFactory == null) {
-      return null;
-    }
     List<Coder<?>> typeArgumentCoders = new ArrayList<>();
     for (Type typeArgument : type.getActualTypeArguments()) {
-      Coder<?> typeArgumentCoder = getDefaultCoder(typeArgument,
-                                                   typeCoderBindings);
-      if (typeArgumentCoder == null) {
-        return null;
+      try {
+        Coder<?> typeArgumentCoder = getDefaultCoder(typeArgument,
+                                                     typeCoderBindings);
+        typeArgumentCoders.add(typeArgumentCoder);
+      } catch (CannotProvideCoderException exc) {
+         throw new CannotProvideCoderException(
+          "Cannot provide coder for parameterized type " + type,
+          exc);
       }
-      typeArgumentCoders.add(typeArgumentCoder);
     }
     return coderFactory.create(typeArgumentCoders);
   }
 
   /**
-   * Returns a Map where each of the type variables embedded in the
-   * given type are mapped to the corresponding Coders in the given
-   * coder.
+   * Returns an immutable {@code Map} from each of the type variables
+   * embedded in the given type to the corresponding types
+   * in the given coder.
    */
-  Map<Type, Coder<?>> createTypeBindings(TypeToken<?> typeToken,
-                                         Coder<?> coder) {
-    Map<Type, Coder<?>> typeCoderBindings = new HashMap<>();
-    fillTypeBindings(typeToken.getType(), coder, typeCoderBindings);
-    return typeCoderBindings;
-  }
-
-  /**
-   * Adds to the given map bindings from each of the type variables
-   * embedded in the given type to the corresponding Coders in the
-   * given coder.
-   */
-  void fillTypeBindings(Type type,
-                        Coder<?> coder,
-                        Map<Type, Coder<?>> typeCoderBindings) {
+  private Map<Type, Coder<?>> getTypeToCoderBindings(Type type, Coder<?> coder) {
     if (type instanceof TypeVariable || type instanceof Class) {
-      LOG.debug("Binding type {} to Coder {}", type, coder);
-      typeCoderBindings.put(type, coder);
+      return ImmutableMap.<Type, Coder<?>>of(type, coder);
     } else if (type instanceof ParameterizedType) {
-      fillTypeBindings((ParameterizedType) type,
-                       coder,
-                       typeCoderBindings);
+      return getTypeToCoderBindings((ParameterizedType) type, coder);
+    } else {
+      return ImmutableMap.of();
     }
   }
 
   /**
-   * Adds to the given map bindings from each of the type variables
-   * embedded in the given parameterized type to the corresponding
-   * Coders in the given coder.
+   * Returns an immutable {@code Map} from the type arguments of the
+   * parameterized type to their corresponding coders, and so on recursively
+   * for their type parameters.
+   *
+   * <p>This method is simply a specialization to break out the most
+   * elaborate case of {@link #getTypeToCoderBindings(Type, Coder)}.
    */
-  void fillTypeBindings(ParameterizedType type,
-                        Coder<?> coder,
-                        Map<Type, Coder<?>> typeCoderBindings) {
-    Type[] typeArguments = type.getActualTypeArguments();
+  private Map<Type, Coder<?>> getTypeToCoderBindings(ParameterizedType type, Coder<?> coder) {
+    List<Type> typeArguments = Arrays.asList(type.getActualTypeArguments());
     List<? extends Coder<?>> coderArguments = coder.getCoderArguments();
-    if (coderArguments == null
-        || typeArguments.length != coderArguments.size()) {
-      return;
+
+    if ((coderArguments == null) || (typeArguments.size() != coderArguments.size())) {
+      return ImmutableMap.of();
+    } else {
+      Map<Type, Coder<?>> typeToCoder = Maps.newHashMap();
+
+      typeToCoder.put(type, coder);
+
+      for (int i = 0; i < typeArguments.size(); i++) {
+        Type typeArgument = typeArguments.get(i);
+        Coder<?> coderArgument = coderArguments.get(i);
+        typeToCoder.putAll(getTypeToCoderBindings(typeArgument, coderArgument));
+      }
+
+      return ImmutableMap.<Type, Coder<?>>builder().putAll(typeToCoder).build();
     }
-    for (int i = 0; i < typeArguments.length; i++) {
-      fillTypeBindings(typeArguments[i],
-                       coderArguments.get(i),
-                       typeCoderBindings);
-    }
+
   }
 }

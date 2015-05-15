@@ -34,7 +34,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * A KvCoder encodes KVs.
+ * A {@code KvCoder} encodes {@link KV}s.
  *
  * @param <K> the type of the keys of the KVs being transcoded
  * @param <V> the type of the values of the KVs being transcoded
@@ -63,8 +63,13 @@ public class KvCoder<K, V> extends KvCoderBase<KV<K, V>> {
         exampleValue.getValue());
   }
 
-  public Coder<K> getKeyCoder() { return keyCoder; }
-  public Coder<V> getValueCoder() { return valueCoder; }
+  public Coder<K> getKeyCoder() {
+    return keyCoder;
+  }
+
+  public Coder<V> getValueCoder() {
+    return valueCoder;
+  }
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -99,12 +104,6 @@ public class KvCoder<K, V> extends KvCoderBase<KV<K, V>> {
   @Override
   public List<? extends Coder<?>> getCoderArguments() {
     return Arrays.asList(keyCoder, valueCoder);
-  }
-
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return getKeyCoder().isDeterministic() && getValueCoder().isDeterministic();
   }
 
   @Override

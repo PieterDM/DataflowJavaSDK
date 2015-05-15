@@ -43,7 +43,9 @@ import java.io.OutputStream;
 @SuppressWarnings("serial")
 public class CoderUtilsTest {
   static class TestCoder extends AtomicCoder<Integer> {
-    public static TestCoder of() { return new TestCoder(); }
+    public static TestCoder of() {
+      return new TestCoder();
+    }
 
     @Override
     public void encode(Integer value, OutputStream outStream, Context context) {
@@ -56,8 +58,9 @@ public class CoderUtilsTest {
     }
 
     @Override
-    public boolean isDeterministic() {
-      return false;
+    public void verifyDeterministic() throws NonDeterministicException {
+      throw new NonDeterministicException(this,
+        "TestCoder does not actually encode or decode.");
     }
   }
 

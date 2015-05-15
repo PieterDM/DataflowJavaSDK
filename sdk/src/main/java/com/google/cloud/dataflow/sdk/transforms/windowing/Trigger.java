@@ -18,15 +18,23 @@ package com.google.cloud.dataflow.sdk.transforms.windowing;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState;
+import com.google.cloud.dataflow.sdk.util.ExecutableTrigger;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
+import com.google.common.base.Predicate;
+import com.google.common.collect.Maps;
 
 import org.joda.time.Instant;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.Arrays;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
+
+import javax.annotation.Nullable;
 
 /**
  * {@code Trigger}s control when the elements for a specific key and window are output. As elements
@@ -38,9 +46,10 @@ import java.util.Map;
  * for more information about how grouping with windows works.
  *
  * <p>The elements that are assigned to a window since the last time it was fired (or since the
- * window was created) are placed into a pane. Triggers are evaluated against the elements in the
- * current pane, and when fired, will output those elements. Depending on the trigger, this will
- * either finish the trigger (and the window) or start a new pane.
+ * window was created) are placed into the current window pane. Triggers are evaluated against the
+ * elements as they are added. When the root trigger fires, the elements in the current pane will be
+ * output. When the root trigger finishes (indicating it will never fire again), the window is
+ * closed and any new elements assigned to that window are discarded.
  *
  * <p>Several predefined {@code Trigger}s are provided:
  * <ul>
@@ -94,9 +103,8 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
   private static final long serialVersionUID = 0L;
 
   /**
-   * Triggers operate on both timestamps of elements that are being processed and the current
-   * (real-world) time as reported while processing. {@code TimeDomain} specifies which of these
-   * domains are applicable to a given operation.
+   * {@code TimeDomain} specifies whether an operation is based on
+   * timestamps of elements or current "real-world" time as reported while processing.
    */
   public enum TimeDomain {
     /**
@@ -158,10 +166,50 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
   }
 
   /**
-   * Information accessible to all of the callbacks that are executed on a trigger.
+   * {@code TriggerResult} enumerates the possible result a trigger can have when it is merged.
+   */
+  public enum MergeResult {
+    FIRE(true, false, TriggerResult.FIRE),
+    CONTINUE(false, false, TriggerResult.CONTINUE),
+    FIRE_AND_FINISH(true, true, TriggerResult.FIRE_AND_FINISH),
+
+    /**
+     * A trigger can only return {@code ALREADY_FINISHED} from {@code onMerge}, and it should only
+     * be returned if the trigger was previously finished in at least one window.
+     *
+     * <p> Returning this indicates that the sub-trigger should be treated as finished in the output
+     * window.
+     */
+    ALREADY_FINISHED(false, true, null);
+
+    private boolean finish;
+    private boolean fire;
+    private TriggerResult triggerResult;
+
+    private MergeResult(boolean fire, boolean finish, TriggerResult triggerResult) {
+      this.fire = fire;
+      this.finish = finish;
+      this.triggerResult = triggerResult;
+    }
+
+    public boolean isFire() {
+      return fire;
+    }
+
+    public boolean isFinish() {
+      return finish;
+    }
+
+    public TriggerResult getTriggerResult() {
+      return triggerResult;
+    }
+  }
+
+  /**
+   * Information accessible to all of the callbacks that are executed on a {@link Trigger}.
    *
    * @param <W> {@link BoundedWindow} subclass used to represent the windows used by this
-   *            {@code TriggerContext}
+   *            {@link com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TriggerContext}.
    */
   public interface TriggerContext<W extends BoundedWindow>  {
 
@@ -211,9 +259,72 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
     <T> Map<W, T> lookup(CodedTupleTag<T> tag, Iterable<W> windows) throws IOException;
 
     /**
-     * Create a {@code TriggerContext} for executing a given sub-trigger.
+     * Create a {@code TriggerContext} for executing the given trigger.
      */
-    TriggerContext<W> forChild(int childIndex);
+    TriggerContext<W> forTrigger(ExecutableTrigger<W> trigger);
+
+    /**
+     * Access the executable version of the trigger currently being executed.
+     */
+    ExecutableTrigger<W> current();
+
+    /**
+     * Access the executable versions of the sub-triggers of the current trigger.
+     */
+    Iterable<ExecutableTrigger<W>> subTriggers();
+
+    /**
+     * Access the executable version of the specified sub-trigger.
+     */
+    ExecutableTrigger<W> subTrigger(int subtriggerIndex);
+
+    /**
+     * Returns true if the given trigger index corresponds to the current trigger.
+     */
+    boolean isCurrentTrigger(int triggerIndex);
+
+    /**
+     * Returns the sub-trigger of the current trigger that is the next step towards the destination.
+     */
+    ExecutableTrigger<W> nextStepTowards(int destinationIndex);
+
+    /**
+     * Returns true if the current trigger is marked finished.
+     */
+    boolean isFinished();
+
+    /**
+     * Returns true if all the sub-triggers of the current trigger are marked finished.
+     */
+    boolean areAllSubtriggersFinished();
+
+    /**
+     * Returns an iterable over the unfinished sub-triggers of the current trigger.
+     */
+    Iterable<ExecutableTrigger<W>> unfinishedSubTriggers();
+
+    /**
+     * Returns the first unfinished sub-trigger.
+     */
+    ExecutableTrigger<W> firstUnfinishedSubTrigger();
+
+    /**
+     * Clears all keyed state for triggers in the current sub-tree and unsets all the associated
+     * finished bits.
+     */
+    void resetTree(W window) throws Exception;
+
+    /**
+     * Sets the finished bit for the current trigger.
+     */
+    void setFinished(boolean finished);
+  }
+
+  @Nullable
+  protected final List<Trigger<W>> subTriggers;
+
+  protected Trigger(@Nullable List<Trigger<W>> subTriggers) {
+    this.subTriggers = subTriggers;
   }
 
   /**
@@ -222,11 +333,11 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
    * @param <W> {@link BoundedWindow} subclass used to represent the windows used by this
    *            {@code OnElementEvent}
    */
-  public static class OnElementEvent<W> {
-    private Object value;
-    private Instant timestamp;
-    private W window;
-    private WindowStatus status;
+  public static class OnElementEvent<W extends BoundedWindow> {
+    private final Object value;
+    private final Instant timestamp;
+    private final W window;
+    private final WindowStatus status;
 
     public OnElementEvent(Object value, Instant timestamp, W window, WindowStatus status) {
       this.value = value;
@@ -279,13 +390,15 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
    * @param <W> {@link BoundedWindow} subclass used to represent the windows used by this
    *            {@code OnMergeEvent}
    */
-  public static class OnMergeEvent<W> {
-    private Iterable<W> oldWindows;
-    private W newWindow;
+  public static class OnMergeEvent<W extends BoundedWindow> {
+    private final Iterable<W> oldWindows;
+    private final W newWindow;
+    private final Map<W, BitSet> finishedSets;
 
-    public OnMergeEvent(Iterable<W> oldWindows, W newWindow) {
+    public OnMergeEvent(Iterable<W> oldWindows, W newWindow, Map<W, BitSet> finishedSets) {
       this.oldWindows = oldWindows;
       this.newWindow = newWindow;
+      this.finishedSets = finishedSets;
     }
 
     /**
@@ -301,21 +414,54 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
     public W newWindow() {
       return newWindow;
     }
+
+    /** Return true if the trigger is finished in any window being merged. */
+    public boolean finishedInAnyMergingWindow(ExecutableTrigger<W> trigger) {
+      for (BitSet bitSet : finishedSets.values()) {
+        if (bitSet.get(trigger.getTriggerIndex())) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** Return true if the trigger is finished in all the windows being merged. */
+    public boolean finishedInAllMergingWindows(ExecutableTrigger<W> trigger) {
+      for (BitSet bitSet : finishedSets.values()) {
+        if (!bitSet.get(trigger.getTriggerIndex())) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /** Return the merging windows in which the trigger is finished. */
+    public Iterable<W> getFinishedMergingWindows(final ExecutableTrigger<W> trigger) {
+      return Maps.filterValues(finishedSets, new Predicate<BitSet>() {
+        @Override
+        public boolean apply(BitSet input) {
+          return input.get(trigger.getTriggerIndex());
+        }
+      }).keySet();
+    }
   }
 
   /**
    * Called immediately after windows have been merged.
    *
-   * <p>This will only be called if the trigger hasn't finished in any of the {@code oldWindows}.
-   * If it had finished, we assume that it is also finished in the resulting window.
+   * <p> Leaf triggers should determine their result by inspecting their status and any state
+   * in the merging windows. Composite triggers should determine their result by calling
+   * {@link ExecutableTrigger#invokeMerge} on their sub-triggers, and applying appropriate logic.
+   *
+   * <p> A trigger can only return {@link MergeResult#FINISHED} if it is marked as finished in
+   * at least one of the windows being merged.
    *
    * <p>The implementation does not need to clear out any state associated with the old windows.
-   * That will automatically be done by the trigger execution layer.
    *
    * @param c the context to interact with
    * @param e an event describnig the cause of this callback being executed
    */
-  public abstract TriggerResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception;
+  public abstract MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception;
 
   /**
    * Details about an invocation of {@link Trigger#onTimer}.
@@ -325,7 +471,7 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
    */
   public static class OnTimerEvent<W extends BoundedWindow> {
 
-    private TriggerId<W> triggerId;
+    private final TriggerId<W> triggerId;
 
     public OnTimerEvent(TriggerId<W> triggerId) {
       this.triggerId = triggerId;
@@ -335,35 +481,13 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
       return triggerId.window;
     }
 
-    public TriggerId<W> triggerId() {
-      return triggerId;
-    }
-
-    /**
-     * Remove the outer layer from the path to the desired timer. This produces an
-     * {@code OnTimerEvent} suitable for passing to a subtrigger.
-     */
-    public OnTimerEvent<W> withoutOuterTrigger() {
-      return new OnTimerEvent<W>(triggerId.withoutOuterTrigger());
-    }
-
-    /**
-     * Return the index of the child this trigger ID is for.
-     */
-    public int getChildIndex() {
-      return triggerId.getPath().iterator().next();
-    }
-
-    /**
-     * Return true if the timer event is for the current layer.
-     */
-    public boolean isForCurrentLayer() {
-      return !triggerId.getPath().iterator().hasNext();
+    public int getDestinationIndex() {
+      return triggerId.getTriggerIdx();
     }
   }
 
   /**
-   * Called when a timer has fired for the trigger or one of it’s sub-triggers.
+   * Called when a timer has fired for the trigger or one of its sub-triggers.
    *
    * @param c the context to interact with
    * @param e identifier for the trigger that the timer is for.
@@ -380,13 +504,16 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
    * @param c the context to interact with
    * @param window the window that is being cleared
    */
-  public abstract void clear(TriggerContext<W> c, W window) throws Exception;
+  public void clear(TriggerContext<W> c, W window) throws Exception {
+    if (subTriggers != null) {
+      for (ExecutableTrigger<W> trigger : c.subTriggers()) {
+        trigger.invokeClear(c, window);
+      }
+    }
+  }
 
-  /**
-   * Return true if the trigger is guaranteed to never finish.
-   */
-  public boolean willNeverFinish() {
-    return false;
+  public Iterable<Trigger<W>> subTriggers() {
+    return subTriggers;
   }
 
   /**
@@ -402,37 +529,63 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
   /**
    * Returns whether this performs the same triggering as the given {@code Trigger}.
    */
-  public abstract boolean isCompatible(Trigger<?> other);
+  public boolean isCompatible(Trigger<?> other) {
+    if (!getClass().equals(other.getClass())) {
+      return false;
+    }
+
+    if (subTriggers == null) {
+      return other.subTriggers == null;
+    } else if (other.subTriggers == null) {
+      return false;
+    } else if (subTriggers.size() != other.subTriggers.size()) {
+      return false;
+    }
+
+    for (int i = 0; i < subTriggers.size(); i++) {
+      if (!subTriggers.get(i).isCompatible(other.subTriggers.get(i))) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  @Override
+  public String toString() {
+    String simpleName = getClass().getSimpleName();
+    if (getClass().getEnclosingClass() != null) {
+      simpleName = getClass().getEnclosingClass().getSimpleName() + "." + simpleName;
+    }
+    if (subTriggers == null || subTriggers.size() == 0) {
+      return simpleName;
+    } else {
+      return simpleName + "(" + Joiner.on(", ").join(subTriggers) + ")";
+    }
+  }
 
   /**
-   * Identifies a unique trigger instance, by the window it is in and the path through the trigger
-   * tree.
+   * Identifies a unique {@link Trigger} instance, by the window it is in and the identifier of the
+   * trigger within the trigger tree.
    *
    * @param <W> {@link BoundedWindow} subclass used to represent the windows used by this
    *            {@code TriggerId}
    */
   public static class TriggerId<W extends BoundedWindow> {
     private final W window;
-    private final List<Integer> subTriggers;
+    private final int triggerId;
 
-    public TriggerId(W window, List<Integer> subTriggers) {
+    public TriggerId(W window, int triggerId) {
       this.window = window;
-      this.subTriggers = subTriggers;
-    }
-
-    /**
-     * Return a trigger ID that is applicable for the sub-trigger.
-     */
-    public TriggerId<W> withoutOuterTrigger() {
-      return new TriggerId<>(window, subTriggers.subList(1, subTriggers.size()));
+      this.triggerId = triggerId;
     }
 
     public W window() {
       return window;
     }
 
-    public Iterable<Integer> getPath() {
-      return subTriggers;
+    public int getTriggerIdx() {
+      return triggerId;
     }
   }
 
@@ -442,7 +595,15 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
    *
    * <p> The expression {@code t1.orFinally(t2)} fires every time {@code t1} fires, and finishes
    * as soon as either {@code t1} finishes or {@code t2} fires, in which case it fires one last time
-   * for {@code t2}.
+   * for {@code t2}. Both {@code t1} and {@code t2} are executed in parallel. This means that
+   * {@code t1} may have fired since {@code t2} started, so not all of the elements that {@code t2}
+   * has seen are necessarily in the current pane.
+   *
+   * <p>For example the final firing of the following trigger may only have 1 element:
+   * <pre> {@code
+   * Repeatedly.forever(AfterPane.elementCountAtLeast(2))
+   *     .orFinally(AfterPane.elementCountAtLeast(5))
+   * } </pre>
    *
    * <p> Note that if {@code t1} is {@link OnceTrigger}, then {@code t1.orFinally(t2)} is the same
    * as {@code AfterFirst.of(t1, t2)}.
@@ -452,16 +613,18 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
   }
 
   /**
-   * Triggers that are guaranteed to fire at most once should extend from this, rather than the
-   * general {@link Trigger} class to indicate that behavior.
-   *
-   * <p> TODO: Add checks that an AtMostOnceTrigger never returns TriggerResult.FIRE.
+   * {@link Trigger}s that are guaranteed to fire at most once should extend from this, rather
+   * than the general {@link Trigger} class to indicate that behavior.
    *
    * @param <W> {@link BoundedWindow} subclass used to represent the windows used by this
    *            {@code AtMostOnceTrigger}
    */
   public abstract static class OnceTrigger<W extends BoundedWindow> extends Trigger<W> {
     private static final long serialVersionUID = 0L;
+
+    protected OnceTrigger(List<Trigger<W>> subTriggers) {
+      super(subTriggers);
+    }
   }
 
   /**
@@ -471,80 +634,56 @@ public abstract class Trigger<W extends BoundedWindow> implements Serializable {
 
     private static final int ACTUAL = 0;
     private static final int UNTIL = 1;
+
     private static final long serialVersionUID = 0L;
 
-    private Trigger<W> actual;
-    private OnceTrigger<W> until;
-
     @VisibleForTesting OrFinallyTrigger(Trigger<W> actual, OnceTrigger<W> until) {
-      this.actual = actual;
-      this.until = until;
+      super(Arrays.asList(actual, until));
     }
 
     @Override
     public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e) throws Exception {
-      TriggerResult untilResult = until.onElement(c.forChild(UNTIL), e);
+      TriggerResult untilResult = c.subTrigger(UNTIL).invokeElement(c, e);
       if (untilResult != TriggerResult.CONTINUE) {
         return TriggerResult.FIRE_AND_FINISH;
       }
 
-      return actual.onElement(c.forChild(ACTUAL), e);
+      return c.subTrigger(ACTUAL).invokeElement(c, e);
     }
 
     @Override
-    public TriggerResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
-      TriggerResult untilResult = until.onMerge(c.forChild(UNTIL), e);
-      if (untilResult != TriggerResult.CONTINUE) {
-        return TriggerResult.FIRE_AND_FINISH;
+    public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+      MergeResult untilResult = c.subTrigger(UNTIL).invokeMerge(c, e);
+      if (untilResult == MergeResult.ALREADY_FINISHED) {
+        return MergeResult.ALREADY_FINISHED;
+      } else if (untilResult.isFire()) {
+        return MergeResult.FIRE_AND_FINISH;
+      } else {
+        // was CONTINUE -- so merge the underlying trigger
+        return c.subTrigger(ACTUAL).invokeMerge(c, e);
       }
-
-      return actual.onMerge(c.forChild(ACTUAL), e);
     }
 
     @Override
     public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) throws Exception {
-
-      if (e.isForCurrentLayer()) {
-        throw new IllegalStateException("Until shouldn't receive any timers.");
-      } else if (e.getChildIndex() == ACTUAL) {
-        return actual.onTimer(c.forChild(ACTUAL), e.withoutOuterTrigger());
-      } else {
-        if (until.onTimer(c.forChild(UNTIL), e.withoutOuterTrigger()) != TriggerResult.CONTINUE) {
-          return TriggerResult.FIRE_AND_FINISH;
-        }
+      if (c.isCurrentTrigger(e.getDestinationIndex())) {
+        throw new IllegalStateException("OrFinally shouldn't receive any timers.");
       }
 
-      return TriggerResult.CONTINUE;
-    }
-
-    @Override
-    public void clear(TriggerContext<W> c, W window) throws Exception {
-      actual.clear(c.forChild(ACTUAL), window);
-      until.clear(c.forChild(UNTIL), window);
-    }
-
-    @Override
-    public boolean willNeverFinish() {
-      return false;
+      ExecutableTrigger<W> destination = c.nextStepTowards(e.getDestinationIndex());
+      TriggerResult result = destination.invokeTimer(c, e);
+      if (destination == c.subTrigger(UNTIL) && result.isFire()) {
+        return TriggerResult.FIRE_AND_FINISH;
+      }
+      return result;
     }
 
     @Override
     public Instant getWatermarkCutoff(W window) {
       // This trigger fires once either the trigger or the until trigger fires.
-      Instant actualDeadline = actual.getWatermarkCutoff(window);
-      Instant untilDeadline = until.getWatermarkCutoff(window);
+      Instant actualDeadline = subTriggers.get(ACTUAL).getWatermarkCutoff(window);
+      Instant untilDeadline = subTriggers.get(UNTIL).getWatermarkCutoff(window);
       return actualDeadline.isBefore(untilDeadline) ? actualDeadline : untilDeadline;
-    }
-
-    @Override
-    public boolean isCompatible(Trigger<?> other) {
-      if (!(other instanceof OrFinallyTrigger)) {
-        return false;
-      }
-
-      OrFinallyTrigger<?> that = (OrFinallyTrigger<?>) other;
-      return actual.isCompatible(that.actual)
-          && until.isCompatible(that.until);
     }
   }
 }

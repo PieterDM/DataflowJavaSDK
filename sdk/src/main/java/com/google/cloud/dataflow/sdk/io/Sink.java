@@ -23,8 +23,9 @@ import com.google.cloud.dataflow.sdk.values.PCollection;
 import java.io.Serializable;
 
 /**
- * A Sink represents a resource that can be written to using the {@link Write} transform. A parallel
- * write to a Sink consists of three phases:
+ * A {@code Sink} represents a resource that can be written to using the {@link Write} transform.
+ *
+ * <p>A parallel write to a {@code Sink} consists of three phases:
  * <ol>
  * <li>A sequential <i>initialization</i> phase (e.g., creating a temporary output directory, etc.)
  * <li>A <i>parallel write</i> phase where workers write bundles of records
@@ -37,16 +38,18 @@ import java.io.Serializable;
  *
  * <p>{@code p.apply(Write.to(new MySink()));}
  *
- * <p>Implementing a Sink and the corresponding write operations requires extending three abstract
- * classes:
+ * <p>Implementing a {@link Sink} and the corresponding write operations requires extending three
+ * abstract classes:
+ *
  * <ul>
- * <li>{@link Sink}: A Sink describes a location/resource to write to. It may contain fields like a
- * URI or other metadata about the sink. Implementors of {@link Sink} must implement two methods:
- * {@link Sink#validate} and {@link Sink#createWriteOperation}. {@link Sink#validate Validate} is
- * called by the Write transform at pipeline creation, and should validate that the Sink can be
- * written to. The createWriteOperation method is also called at pipeline creation, and should
- * return a WriteOperation object that defines how to write to the Sink.  Note that implementations
- * of Sink must be serializable and Sinks must be immutable.
+ * <li>{@link Sink}: an immutable logical description of the location/resource to write to.
+ * Depending on the type of sink, it may contain fields such as the path to an output directory
+ * on a filesystem, a database table name, etc. Implementors of {@link Sink} must
+ * implement two methods: {@link Sink#validate} and {@link Sink#createWriteOperation}.
+ * {@link Sink#validate Validate} is called by the Write transform at pipeline creation, and should
+ * validate that the Sink can be written to. The createWriteOperation method is also called at
+ * pipeline creation, and should return a WriteOperation object that defines how to write to the
+ * Sink. Note that implementations of Sink must be serializable and Sinks must be immutable.
  *
  * <li>{@link WriteOperation}: The WriteOperation implements the <i>initialization</i> and
  * <i>finalization</i> phases of a write. Implementors of {@link WriteOperation} must implement
@@ -131,26 +134,27 @@ public abstract class Sink<T> implements Serializable {
   public abstract WriteOperation<T, ?> createWriteOperation(PipelineOptions options);
 
   /**
-   * A WriteOperation defines the process of a parallel write of objects to a Sink.
+   * A {@link WriteOperation} defines the process of a parallel write of objects to a Sink.
    *
-   * <p>The WriteOperation defines how to perform initialization and finalization of a parallel
-   * write to a sink as well as how to create a {@link Sink.Writer} object that can write a bundle
-   * to the sink.
+   * <p>The {@code WriteOperation} defines how to perform initialization and finalization of a
+   * parallel write to a sink as well as how to create a {@link Sink.Writer} object that can write
+   * a bundle to the sink.
    *
    * <p>Since operations in Dataflow may be run multiple times for redundancy or fault-tolerance,
    * the initialization and finalization defined by a WriteOperation <b>must be idempotent</b>.
    *
-   * <p>WriteOperations may be mutable; a WriteOperation is serialized after the call to initialize
-   * method and deserialized before calls to createWriter and finalized.  However, it is not
-   * reserialized after createWriter, so createWriter should not mutate the state of the
-   * WriteOperation.
+   * <p>{@code WriteOperation}s may be mutable; a {@code WriteOperation} is serialized after the
+   * call to {@code initialize} method and deserialized before calls to
+   * {@code createWriter} and {@code finalized}. However, it is not
+   * reserialized after {@code createWriter}, so {@code createWriter} should not mutate the
+   * state of the {@code WriteOperation}.
    *
    * <p>See {@link Sink} for more detailed documentation about the process of writing to a Sink.
    *
    * @param <T> The type of objects to write
-   * @param <WR> The result of a per-bundle write
+   * @param <WriteT> The result of a per-bundle write
    */
-  public abstract static class WriteOperation<T, WR> implements Serializable {
+  public abstract static class WriteOperation<T, WriteT> implements Serializable {
     private static final long serialVersionUID = 0;
 
     /**
@@ -178,7 +182,7 @@ public abstract class Sink<T> implements Serializable {
      *
      * @param writerResults an Iterable of results from successful bundle writes.
      */
-    public abstract void finalize(Iterable<WR> writerResults, PipelineOptions options)
+    public abstract void finalize(Iterable<WriteT> writerResults, PipelineOptions options)
         throws Exception;
 
     /**
@@ -189,7 +193,7 @@ public abstract class Sink<T> implements Serializable {
      *
      * <p>Must not mutate the state of the WriteOperation.
      */
-    public abstract Writer<T, WR> createWriter(PipelineOptions options) throws Exception;
+    public abstract Writer<T, WriteT> createWriter(PipelineOptions options) throws Exception;
 
     /**
      * Returns the Sink that this write operation writes to.
@@ -199,7 +203,7 @@ public abstract class Sink<T> implements Serializable {
     /**
      * Returns a coder for the writer result type.
      */
-    public Coder<WR> getWriterResultCoder() {
+    public Coder<WriteT> getWriterResultCoder() {
       return null;
     }
   }
@@ -215,9 +219,9 @@ public abstract class Sink<T> implements Serializable {
    * <p>See {@link Sink} for more detailed documentation about the process of writing to a Sink.
    *
    * @param <T> The type of object to write
-   * @param <WR> The writer results type (e.g., the bundle's output filename, as String)
+   * @param <WriteT> The writer results type (e.g., the bundle's output filename, as String)
    */
-  public abstract static class Writer<T, WR> {
+  public abstract static class Writer<T, WriteT> {
     /**
      * Performs bundle initialization. For example, creates a temporary file for writing or
      * initializes any state that will be used across calls to {@link Writer#write}.
@@ -243,11 +247,11 @@ public abstract class Sink<T> implements Serializable {
      *
      * @return the writer result
      */
-    public abstract WR close() throws Exception;
+    public abstract WriteT close() throws Exception;
 
     /**
      * Returns the write operation this writer belongs to.
      */
-    public abstract WriteOperation<T, WR> getWriteOperation();
+    public abstract WriteOperation<T, WriteT> getWriteOperation();
   }
 }

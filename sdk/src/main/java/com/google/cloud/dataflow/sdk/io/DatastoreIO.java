@@ -55,7 +55,6 @@ import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.RetryHttpRequestInitializer;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,11 +67,11 @@ import java.util.List;
 import java.util.NoSuchElementException;
 
 /**
- * Transforms for reading and writing
+ * {@link com.google.cloud.dataflow.sdk.transforms.PTransform}s for reading and writing
  * <a href="https://developers.google.com/datastore/">Google Cloud Datastore</a>
  * entities.
  *
- * <p> The DatastoreIO class provides an API to Read and Write a
+ * <p> The {@link DatastoreIO} class provides an API to Read and Write a
  * {@link PCollection} of Datastore Entity.  This API currently requires an
  * authentication workaround described below.
  *
@@ -81,11 +80,9 @@ import java.util.NoSuchElementException;
  * database table.  DatastoreIO supports Read/Write from/to Datastore within
  * Dataflow SDK service.
  *
- * <p> To use DatastoreIO, users must set up the environment and use gcloud
- * to get credential for Datastore:
+ * <p> To use {@link DatastoreIO}, users must use gcloud to get credential for Datastore:
  * <pre>
- * $ export CLOUDSDK_EXTRA_SCOPES=https://www.googleapis.com/auth/datastore
- * $ gcloud auth login
+  * $ gcloud auth login
  * </pre>
  *
  * <p> Note that the environment variable CLOUDSDK_EXTRA_SCOPES must be set
@@ -184,7 +181,7 @@ public class DatastoreIO {
   }
 
   /**
-   * A source that reads the result rows of a Datastore query as {@code Entity} objects.
+   * A {@link Source} that reads the result rows of a Datastore query as {@code Entity} objects.
    */
   public static class Source extends BoundedSource<Entity> {
     private static final Logger LOG = LoggerFactory.getLogger(Source.class);
@@ -196,7 +193,7 @@ public class DatastoreIO {
 
     /** For testing only. */
     private QuerySplitter mockSplitter;
-    private Supplier<Long> mockEstimateSizeBytes;
+    private Long mockEstimateSizeBytes;
 
     private Source(String host, String datasetId, Query query) {
       this.host = host;
@@ -228,7 +225,7 @@ public class DatastoreIO {
       // entity kind being queried, using the __Stat_Kind__ system table, assuming exactly 1 kind
       // is specified in the query.
       if (mockEstimateSizeBytes != null) {
-        return mockEstimateSizeBytes.get();
+        return mockEstimateSizeBytes;
       }
 
       Datastore datastore = getDatastore(options);
@@ -352,7 +349,7 @@ public class DatastoreIO {
     }
 
     /** For testing only. */
-    public Source withMockEstimateSizeBytes(Supplier<Long> estimateSizeBytes) {
+    public Source withMockEstimateSizeBytes(Long estimateSizeBytes) {
       Source res = new Source(host, datasetId, query);
       res.mockSplitter = mockSplitter;
       res.mockEstimateSizeBytes = estimateSizeBytes;
@@ -398,7 +395,7 @@ public class DatastoreIO {
   }
 
   /**
-   * A {@link Sink} that writes a {@code PCollection<Entity>} containing
+   * A {@link Sink} that writes a {@link PCollection PCollection<Entity>} containing
    * entities to a Datastore kind.
    *
    */
@@ -409,14 +406,14 @@ public class DatastoreIO {
     final String datasetId;
 
     /**
-     * Returns a Sink that is like this one, but will write to the specified dataset.
+     * Returns a {@link Sink} that is like this one, but will write to the specified dataset.
      */
     public Sink withDataset(String datasetId) {
       return new Sink(host, datasetId);
     }
 
     /**
-     * Returns a Sink that is like this one, but will use the given host.  If not specified,
+     * Returns a {@link Sink} that is like this one, but will use the given host.  If not specified,
      * the {@link DatastoreIO#DEFAULT_HOST default host} will be used.
      */
     public Sink withHost(String host) {
@@ -656,10 +653,10 @@ public class DatastoreIO {
   }
 
   /**
-   * A reader over the records from a query of the datastore.
-   * <p>
-   * Timestamped records are currently not supported. All records implicitly have the timestamp
-   * of {@code BoundedWindow.TIMESTAMP_MIN_VALUE}.
+   * A {@link Source.Reader} over the records from a query of the datastore.
+
+   * <p> Timestamped records are currently not supported.
+   * All records implicitly have the timestamp of {@code BoundedWindow.TIMESTAMP_MIN_VALUE}.
    */
   public static class DatastoreReader extends BoundedSource.AbstractBoundedReader<Entity> {
     private final Source source;
@@ -690,7 +687,7 @@ public class DatastoreIO {
      * <p> Must be set, or it may result in an I/O error when querying
      * Cloud Datastore.
      */
-    private static final int QUERY_LIMIT = 5000;
+    private static final int QUERY_LIMIT = 500;
 
     private Entity currentEntity;
 

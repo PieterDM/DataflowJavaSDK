@@ -39,7 +39,6 @@ import com.google.common.collect.Iterators;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Queues;
 import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
 
@@ -68,7 +67,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Queue;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.SortedMap;
@@ -167,7 +165,7 @@ public class PipelineOptionsFactory {
     return new Builder().withValidation();
   }
 
-  /** A fluent PipelineOptions builder. */
+  /** A fluent {@link PipelineOptions} builder. */
   public static class Builder {
     private final String defaultAppName;
     private final String[] args;
@@ -560,9 +558,7 @@ public class PipelineOptionsFactory {
               combinedPipelineOptionsInterfaces.toArray(EMPTY_CLASS_ARRAY));
       try {
         List<PropertyDescriptor> propertyDescriptors =
-            getPropertyDescriptors(allProxyClass);
-        validateClass(iface, validatedPipelineOptionsInterfaces,
-            allProxyClass, propertyDescriptors);
+            validateClass(iface, validatedPipelineOptionsInterfaces, allProxyClass);
         COMBINED_CACHE.put(combinedPipelineOptionsInterfaces,
             new Registration<T>(allProxyClass, propertyDescriptors));
       } catch (IntrospectionException e) {
@@ -577,8 +573,7 @@ public class PipelineOptionsFactory {
           PipelineOptionsFactory.class.getClassLoader(), new Class[] {iface});
       try {
         List<PropertyDescriptor> propertyDescriptors =
-            getPropertyDescriptors(proxyClass);
-        validateClass(iface, validatedPipelineOptionsInterfaces, proxyClass, propertyDescriptors);
+            validateClass(iface, validatedPipelineOptionsInterfaces, proxyClass);
         INTERFACE_CACHE.put(iface,
             new Registration<T>(proxyClass, propertyDescriptors));
       } catch (IntrospectionException e) {
@@ -635,7 +630,7 @@ public class PipelineOptionsFactory {
     Preconditions.checkNotNull(iface);
     validateWellFormed(iface, REGISTERED_OPTIONS);
 
-    Iterable<Method> methods = getClosureOfMethodsOnInterface(iface);
+    Iterable<Method> methods = ReflectHelpers.getClosureOfMethodsOnInterface(iface);
     ListMultimap<Class<?>, Method> ifaceToMethods = ArrayListMultimap.create();
     for (Method method : methods) {
       // Process only methods that are not marked as hidden.
@@ -764,8 +759,24 @@ public class PipelineOptionsFactory {
    * properties. This is meant to only be used from the {@link DataflowWorkerHarness} as a method to
    * bootstrap the worker harness.
    *
+   * <p>For internal use only.
+   *
    * @return A {@link DataflowWorkerHarnessOptions} object configured for the
    *         {@link DataflowWorkerHarness}.
+   */
+  public static DataflowWorkerHarnessOptions createFromSystemPropertiesInternal()
+      throws IOException {
+    return createFromSystemProperties();
+  }
+
+  /**
+   * Creates a set of {@link DataflowWorkerHarnessOptions} based of a set of known system
+   * properties. This is meant to only be used from the {@link DataflowWorkerHarness} as a method to
+   * bootstrap the worker harness.
+   *
+   * @return A {@link DataflowWorkerHarnessOptions} object configured for the
+   *         {@link DataflowWorkerHarness}.
+   * @deprecated for internal use only
    */
   @Deprecated
   public static DataflowWorkerHarnessOptions createFromSystemProperties() throws IOException {
@@ -788,80 +799,7 @@ public class PipelineOptionsFactory {
       options.setJobId(System.getProperty("job_id"));
     }
 
-    // TODO: Remove setting these options once we have migrated to passing
-    // through the pipeline options.
-    if (System.getProperties().containsKey("root_url")) {
-      options.setApiRootUrl(System.getProperty("root_url"));
-    }
-    if (System.getProperties().containsKey("service_path")) {
-      options.setDataflowEndpoint(System.getProperty("service_path"));
-    }
-    if (System.getProperties().containsKey("temp_gcs_directory")) {
-      options.setTempLocation(System.getProperty("temp_gcs_directory"));
-    }
-    if (System.getProperties().containsKey("service_account_name")) {
-      options.setServiceAccountName(System.getProperty("service_account_name"));
-    }
-    if (System.getProperties().containsKey("service_account_keyfile")) {
-      options.setServiceAccountKeyfile(System.getProperty("service_account_keyfile"));
-    }
-    if (System.getProperties().containsKey("project_id")) {
-      options.setProject(System.getProperty("project_id"));
-    }
-    if (System.getProperties().containsKey("path_validator_class")) {
-      try {
-        options.setPathValidatorClass((Class) Class.forName(
-            System.getProperty("path_validator_class")));
-      } catch (ClassNotFoundException e) {
-        throw new RuntimeException("Unable to find validator class", e);
-      }
-    }
-    if (System.getProperties().containsKey("credential_factory_class")) {
-      try {
-        options.setCredentialFactoryClass((Class) Class.forName(
-            System.getProperty("credential_factory_class")));
-      } catch (ClassNotFoundException e) {
-        throw new RuntimeException("Unable to find credential factory class", e);
-      }
-    }
     return options;
-  }
-
-  /**
-   * Returns all the methods visible from the provided interfaces.
-   *
-   * @param interfaces The interfaces to use when searching for all their methods.
-   * @return An iterable of {@link Method}s that interfaces expose.
-   */
-  static Iterable<Method> getClosureOfMethodsOnInterfaces(
-      Iterable<Class<? extends PipelineOptions>> interfaces) {
-    return FluentIterable.from(interfaces).transformAndConcat(
-        new Function<Class<? extends PipelineOptions>, Iterable<Method>>() {
-          @Override
-          public Iterable<Method> apply(Class<? extends PipelineOptions> input) {
-            return getClosureOfMethodsOnInterface(input);
-          }
-    });
-  }
-
-  /**
-   * Returns all the methods visible from {@code iface}.
-   *
-   * @param iface The interface to use when searching for all its methods.
-   * @return An iterable of {@link Method}s that {@code iface} exposes.
-   */
-  static Iterable<Method> getClosureOfMethodsOnInterface(Class<? extends PipelineOptions> iface) {
-    Preconditions.checkNotNull(iface);
-    Preconditions.checkArgument(iface.isInterface());
-    ImmutableSet.Builder<Method> builder = ImmutableSet.builder();
-    Queue<Class<?>> interfacesToProcess = Queues.newArrayDeque();
-    interfacesToProcess.add(iface);
-    while (!interfacesToProcess.isEmpty()) {
-      Class<?> current = interfacesToProcess.remove();
-      builder.add(current.getMethods());
-      interfacesToProcess.addAll(Arrays.asList(current.getInterfaces()));
-    }
-    return builder.build();
   }
 
   /**
@@ -890,8 +828,20 @@ public class PipelineOptionsFactory {
         continue;
       }
       String propertyName = Introspector.decapitalize(methodName.substring(3));
+      Method getterMethod = propertyNamesToGetters.remove(propertyName);
+
+      // Validate that the getter and setter property types are the same.
+      if (getterMethod != null) {
+        Class<?> getterPropertyType = getterMethod.getReturnType();
+        Class<?> setterPropertyType = method.getParameterTypes()[0];
+        Preconditions.checkArgument(getterPropertyType == setterPropertyType,
+            "Type mismatch between getter and setter methods for property [%s]. "
+            + "Getter is of type [%s] whereas setter is of type [%s].",
+            propertyName, getterPropertyType.getName(), setterPropertyType.getName());
+      }
+
       descriptors.add(new PropertyDescriptor(
-          propertyName, propertyNamesToGetters.remove(propertyName), method));
+          propertyName, getterMethod, method));
     }
 
     // Add the remaining getters with missing setters.
@@ -941,11 +891,13 @@ public class PipelineOptionsFactory {
    * @param validatedPipelineOptionsInterfaces The set of validated pipeline options interfaces to
    *        validate against.
    * @param klass The proxy class representing the interface.
-   * @param descriptors A list of {@link PropertyDescriptor}s to use when validating.
+   * @return A list of {@link PropertyDescriptor}s representing all valid bean properties of
+   *         {@code iface}.
+   * @throws IntrospectionException if invalid property descriptors.
    */
-  private static void validateClass(Class<? extends PipelineOptions> iface,
+  private static List<PropertyDescriptor> validateClass(Class<? extends PipelineOptions> iface,
       Set<Class<? extends PipelineOptions>> validatedPipelineOptionsInterfaces,
-      Class<?> klass, List<PropertyDescriptor> descriptors) {
+      Class<?> klass) throws IntrospectionException {
     Set<Method> methods = Sets.newHashSet(IGNORED_METHODS);
     // Ignore static methods, "equals", "hashCode", "toString" and "as" on the generated class.
     for (Method method : klass.getMethods()) {
@@ -965,7 +917,7 @@ public class PipelineOptionsFactory {
 
     // Verify that there are no methods with the same name with two different return types.
     Iterable<Method> interfaceMethods = FluentIterable
-        .from(getClosureOfMethodsOnInterface(iface))
+        .from(ReflectHelpers.getClosureOfMethodsOnInterface(iface))
         .toSortedSet(MethodComparator.INSTANCE);
     SetMultimap<Equivalence.Wrapper<Method>, Method> methodNameToMethodMap =
         HashMultimap.create();
@@ -988,14 +940,17 @@ public class PipelineOptionsFactory {
     // Verify that there is no getter with a mixed @JsonIgnore annotation and verify
     // that no setter has @JsonIgnore.
     Iterable<Method> allInterfaceMethods = FluentIterable
-        .from(getClosureOfMethodsOnInterfaces(validatedPipelineOptionsInterfaces))
-        .append(getClosureOfMethodsOnInterface(iface))
+        .from(ReflectHelpers.getClosureOfMethodsOnInterfaces(validatedPipelineOptionsInterfaces))
+        .append(ReflectHelpers.getClosureOfMethodsOnInterface(iface))
         .toSortedSet(MethodComparator.INSTANCE);
     SetMultimap<Equivalence.Wrapper<Method>, Method> methodNameToAllMethodMap =
         HashMultimap.create();
     for (Method method : allInterfaceMethods) {
       methodNameToAllMethodMap.put(MethodNameEquivalence.INSTANCE.wrap(method), method);
     }
+
+    List<PropertyDescriptor> descriptors = getPropertyDescriptors(klass);
+
     for (PropertyDescriptor descriptor : descriptors) {
       if (IGNORED_METHODS.contains(descriptor.getReadMethod())
           || IGNORED_METHODS.contains(descriptor.getWriteMethod())) {
@@ -1060,6 +1015,8 @@ public class PipelineOptionsFactory {
         "Methods %s on [%s] do not conform to being bean properties.",
         FluentIterable.from(unknownMethods).transform(ReflectHelpers.METHOD_FORMATTER),
         iface.getName());
+
+    return descriptors;
   }
 
   /** A {@link Comparator} that uses the classes name to compare them. */

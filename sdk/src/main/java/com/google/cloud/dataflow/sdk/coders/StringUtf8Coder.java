@@ -16,8 +16,9 @@
 
 package com.google.cloud.dataflow.sdk.coders;
 
+import com.google.cloud.dataflow.sdk.util.ExposedByteArrayOutputStream;
+import com.google.cloud.dataflow.sdk.util.StreamUtils;
 import com.google.cloud.dataflow.sdk.util.VarInt;
-import com.google.common.io.ByteStreams;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
@@ -29,11 +30,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UTFDataFormatException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 
 /**
- * A StringUtf8Coder encodes Java Strings in UTF-8 encoding.
- * If in a nested context, prefixes the string with a VarInt length field.
+ * A {@code StringUtf8Coder} encodes Java Strings in UTF-8 encoding.
+ * If in a nested context, prefixes the string with an integer length field,
+ * encoded via the {@link VarIntCoder}.
  */
 @SuppressWarnings("serial")
 public class StringUtf8Coder extends AtomicCoder<String> {
@@ -47,14 +49,10 @@ public class StringUtf8Coder extends AtomicCoder<String> {
 
   private static final StringUtf8Coder INSTANCE = new StringUtf8Coder();
 
-  private static class Singletons {
-    private static final Charset UTF8 = Charset.forName("UTF-8");
-  }
-
   // Writes a string with VarInt size prefix, supporting large strings.
   private static void writeString(String value, DataOutputStream dos)
       throws IOException {
-    byte[] bytes = value.getBytes(Singletons.UTF8);
+    byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
     VarInt.encode(bytes.length, dos);
     dos.write(bytes);
   }
@@ -67,7 +65,7 @@ public class StringUtf8Coder extends AtomicCoder<String> {
     }
     byte[] bytes = new byte[len];
     dis.readFully(bytes);
-    return new String(bytes, Singletons.UTF8);
+    return new String(bytes, StandardCharsets.UTF_8);
   }
 
   private StringUtf8Coder() {}
@@ -79,7 +77,12 @@ public class StringUtf8Coder extends AtomicCoder<String> {
       throw new CoderException("cannot encode a null String");
     }
     if (context.isWholeStream) {
-      outStream.write(value.getBytes(Singletons.UTF8));
+      byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+      if (outStream instanceof ExposedByteArrayOutputStream) {
+        ((ExposedByteArrayOutputStream) outStream).writeAndOwn(bytes);
+      } else {
+        outStream.write(bytes);
+      }
     } else {
       writeString(value, new DataOutputStream(outStream));
     }
@@ -89,10 +92,8 @@ public class StringUtf8Coder extends AtomicCoder<String> {
   public String decode(InputStream inStream, Context context)
       throws IOException {
     if (context.isWholeStream) {
-      ByteArrayOutputStream outStream = new ByteArrayOutputStream();
-      ByteStreams.copy(inStream, outStream);
-      // ByteArrayOutputStream.toString provides no Charset overloads.
-      return outStream.toString("UTF-8");
+      byte[] bytes = StreamUtils.getBytes(inStream);
+      return new String(bytes, StandardCharsets.UTF_8);
     } else {
       try {
         return readString(new DataInputStream(inStream));
@@ -105,12 +106,6 @@ public class StringUtf8Coder extends AtomicCoder<String> {
   }
 
   @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return true;
-  }
-
-  @Override
   public void verifyDeterministic() { }
 
   @Override
@@ -118,13 +113,14 @@ public class StringUtf8Coder extends AtomicCoder<String> {
     return true;
   }
 
+  @Override
   protected long getEncodedElementByteSize(String value, Context context)
       throws Exception {
     if (value == null) {
       throw new CoderException("cannot encode a null String");
     }
     if (context.isWholeStream) {
-      return value.getBytes(Singletons.UTF8).length;
+      return value.getBytes(StandardCharsets.UTF_8).length;
     } else {
       DataOutputStream stream = new DataOutputStream(new ByteArrayOutputStream());
       writeString(value, stream);

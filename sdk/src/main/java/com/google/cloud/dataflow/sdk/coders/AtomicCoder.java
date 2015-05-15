@@ -20,18 +20,24 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * An AtomicCoder is one that has no component Coders or other state.
- * All instances of its class are equal.
+ * An {@code AtomicCoder} is a {@link Coder} that has no component
+ * {@link Coder}s or other state.
+ *
+ * <p> Note that, unless the behavior is overriden,
+ * atomic coders are presumed to be deterministic
+ * and all instances are considered equal.
  *
  * @param <T> the type of the values being transcoded
  */
-public abstract class AtomicCoder<T> extends StandardCoder<T> {
+public abstract class AtomicCoder<T> extends DeterministicStandardCoder<T> {
   private static final long serialVersionUID = 0;
 
-  protected AtomicCoder() {}
+  protected AtomicCoder() { }
 
   @Override
-  public List<Coder<?>> getCoderArguments() { return null; }
+  public List<Coder<?>> getCoderArguments() {
+    return null;
+  }
 
   /**
    * Returns a list of values contained in the provided example

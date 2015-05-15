@@ -45,7 +45,7 @@ import java.util.regex.Pattern;
 import javax.annotation.Nullable;
 
 /**
- * Transforms for reading and writing Avro files.
+ * {@link PTransform}s for reading and writing Avro files.
  *
  * <p> To read a {@link PCollection} from one or more Avro files, use
  * {@link AvroIO.Read}, specifying {@link AvroIO.Read#from} to specify
@@ -116,8 +116,8 @@ import javax.annotation.Nullable;
  */
 public class AvroIO {
   /**
-   * A root PTransform that reads from an Avro file (or multiple Avro
-   * files matching a pattern) and returns a PCollection containing
+   * A root {@link PTransform} that reads from an Avro file (or multiple Avro
+   * files matching a pattern) and returns a {@link PCollection} containing
    * the decoding of each record.
    */
   public static class Read {
@@ -183,8 +183,8 @@ public class AvroIO {
     }
 
     /**
-     * A PTransform that reads from an Avro file (or multiple Avro
-     * files matching a pattern) and returns a bounded PCollection containing
+     * A {@link PTransform} that reads from an Avro file (or multiple Avro
+     * files matching a pattern) and returns a bounded {@link PCollection} containing
      * the decoding of each record.
      *
      * @param <T> the type of each of the elements of the resulting
@@ -239,10 +239,10 @@ public class AvroIO {
        * that reads Avro file(s) containing records whose type is the
        * specified Avro-generated class.  Does not modify this object.
        *
-       * @param <T1> the type of the decoded elements, and the elements of
+       * @param <X> the type of the decoded elements, and the elements of
        * the resulting PCollection
        */
-      public <T1> Bound<T1> withSchema(Class<T1> type) {
+      public <X> Bound<X> withSchema(Class<X> type) {
         return new Bound<>(name, filepattern, type, ReflectData.get().getSchema(type), validate);
       }
 
@@ -290,7 +290,9 @@ public class AvroIO {
         // Force the output's Coder to be what the read is using, and
         // unchangeable later, to ensure that we read the input in the
         // format specified by the Read transform.
-        return PCollection.<T>createPrimitiveOutputInternal(WindowingStrategy.globalDefault())
+        return PCollection.<T>createPrimitiveOutputInternal(
+            input.getPipeline(),
+            WindowingStrategy.globalDefault())
             .setCoder(getDefaultOutputCoder());
       }
 
@@ -332,7 +334,7 @@ public class AvroIO {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * A root PTransform that writes a PCollection to an Avro file (or
+   * A root {@link PTransform} that writes a {@link PCollection} to an Avro file (or
    * multiple Avro files matching a sharding pattern).
    */
   public static class Write {
@@ -442,7 +444,7 @@ public class AvroIO {
     }
 
     /**
-     * A PTransform that writes a bounded PCollection to an Avro file (or
+     * A {@link PTransform} that writes a bounded {@link PCollection} to an Avro file (or
      * multiple Avro files matching a sharding pattern).
      *
      * @param <T> the type of each of the elements of the input PCollection
@@ -571,9 +573,9 @@ public class AvroIO {
        * that writes to Avro file(s) containing records whose type is the
        * specified Avro-generated class.  Does not modify this object.
        *
-       * @param <T1> the type of the elements of the input PCollection
+       * @param <X> the type of the elements of the input PCollection
        */
-      public <T1> Bound<T1> withSchema(Class<T1> type) {
+      public <X> Bound<X> withSchema(Class<X> type) {
         return new Bound<>(name, filenamePrefix, filenameSuffix, numShards, shardTemplate, type,
             ReflectData.get().getSchema(type), validate);
       }
@@ -621,7 +623,7 @@ public class AvroIO {
           throw new IllegalStateException("need to set the schema of an AvroIO.Write transform");
         }
 
-        return new PDone();
+        return PDone.in(input.getPipeline());
       }
 
       /**

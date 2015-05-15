@@ -27,7 +27,7 @@ import java.io.OutputStream;
 import java.io.UTFDataFormatException;
 
 /**
- * A BigEndianIntegerCoder encodes Integers in 4 bytes, big-endian.
+ * A {@code BigEndianIntegerCoder} encodes {@code Integer}s in 4 bytes, big-endian.
  */
 @SuppressWarnings("serial")
 public class BigEndianIntegerCoder extends AtomicCoder<Integer> {
@@ -63,11 +63,6 @@ public class BigEndianIntegerCoder extends AtomicCoder<Integer> {
       // what kind of exception they're branded as.
       throw new CoderException(exn);
     }
-  }
-
-  @Override
-  public boolean isDeterministic() {
-    return true;
   }
 
   @Override

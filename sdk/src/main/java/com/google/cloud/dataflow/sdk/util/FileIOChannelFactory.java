@@ -31,6 +31,7 @@ import java.nio.channels.WritableByteChannel;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.PathMatcher;
+import java.nio.file.Paths;
 import java.util.Collection;
 import java.util.LinkedList;
 import java.util.List;
@@ -91,8 +92,14 @@ public class FileIOChannelFactory implements IOChannelFactory {
   public WritableByteChannel create(String spec, String mimeType)
       throws IOException {
     LOG.debug("creating file {}", spec);
+    File file = new File(spec);
+    if (file.getAbsoluteFile().getParentFile() != null
+        && !file.getAbsoluteFile().getParentFile().exists()
+        && !file.getAbsoluteFile().getParentFile().mkdirs()) {
+      throw new IOException("Unable to create parent directories for '" + spec + "'");
+    }
     return Channels.newChannel(
-        new BufferedOutputStream(new FileOutputStream(spec)));
+        new BufferedOutputStream(new FileOutputStream(file)));
   }
 
   @Override
@@ -103,5 +110,10 @@ public class FileIOChannelFactory implements IOChannelFactory {
   @Override
   public boolean isReadSeekEfficient(String spec) throws IOException {
     return true;
+  }
+
+  @Override
+  public String resolve(String path, String other) throws IOException {
+    return Paths.get(path).resolve(other).toString();
   }
 }

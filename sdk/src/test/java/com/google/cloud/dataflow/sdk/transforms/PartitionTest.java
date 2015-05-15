@@ -17,19 +17,19 @@
 package com.google.cloud.dataflow.sdk.transforms;
 
 import static com.google.cloud.dataflow.sdk.TestUtils.createInts;
-import static com.google.cloud.dataflow.sdk.transforms.Partition.PartitionFn;
-import static org.hamcrest.Matchers.containsString;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
+import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
+import com.google.cloud.dataflow.sdk.transforms.Partition.PartitionFn;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PCollectionList;
 
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
@@ -44,6 +44,8 @@ import java.util.List;
 @RunWith(JUnit4.class)
 @SuppressWarnings("serial")
 public class PartitionTest implements Serializable {
+  @Rule public ExpectedException expectedException = ExpectedException.none();
+
   static class ModFn implements PartitionFn<Integer> {
     @Override
     public int partitionFor(Integer elem, int numPartitions) {
@@ -59,7 +61,7 @@ public class PartitionTest implements Serializable {
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testEvenOddPartition() {
     TestPipeline p = TestPipeline.create();
 
@@ -97,12 +99,10 @@ public class PartitionTest implements Serializable {
 
     input.apply(Partition.of(5, new IdentityFn()));
 
-    try {
-      p.run();
-    } catch (RuntimeException e) {
-      assertThat(e.toString(), containsString(
-          "Partition function returned out of bounds index: -1 not in [0..5)"));
-    }
+    expectedException.expect(RuntimeException.class);
+    expectedException.expectMessage(
+        "Partition function returned out of bounds index: -1 not in [0..5)");
+    p.run();
   }
 
   @Test
@@ -111,12 +111,9 @@ public class PartitionTest implements Serializable {
 
     PCollection<Integer> input = createInts(p, Arrays.asList(591));
 
-    try {
-      input.apply(Partition.of(0, new IdentityFn()));
-      fail("should have failed");
-    } catch (IllegalArgumentException exn) {
-      assertThat(exn.toString(), containsString("numPartitions must be > 0"));
-    }
+    expectedException.expect(IllegalArgumentException.class);
+    expectedException.expectMessage("numPartitions must be > 0");
+    input.apply(Partition.of(0, new IdentityFn()));
   }
 
   @Test
@@ -135,7 +132,7 @@ public class PartitionTest implements Serializable {
     outputs = PCollectionList.of(outputsList);
     assertTrue(outputs.size() == 2);
 
-    PCollection<Integer> output = outputs.apply(Flatten.<Integer>create());
+    PCollection<Integer> output = outputs.apply(Flatten.<Integer>pCollections());
     DataflowAssert.that(output).containsInAnyOrder(2, 4, 5, 7, 8, 10, 11);
     p.run();
   }

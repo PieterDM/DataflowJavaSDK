@@ -20,9 +20,10 @@ import com.google.cloud.dataflow.sdk.annotations.Experimental;
 import com.google.cloud.dataflow.sdk.coders.InstantCoder;
 import com.google.cloud.dataflow.sdk.transforms.SerializableFunction;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
-import com.google.common.collect.ImmutableList;
 
 import org.joda.time.Instant;
+
+import java.util.List;
 
 /**
  * <p>{@code AfterWatermark} triggers fire based on progress of the system watermark. This time is a
@@ -57,13 +58,13 @@ public abstract class AfterWatermark<W extends BoundedWindow>
 
   private static final long serialVersionUID = 0L;
 
-  protected AfterWatermark(ImmutableList<SerializableFunction<Instant, Instant>> transforms) {
+  protected AfterWatermark(List<SerializableFunction<Instant, Instant>> transforms) {
     super(transforms);
   }
 
   /**
-   * Creates a trigger that fires when the watermark passes timestamp of the first element in the
-   * pane.
+   * Creates a trigger that fires when the watermark passes timestamp of the first element added to
+   * the pane.
    */
   static <W extends BoundedWindow> AfterWatermark<W> pastFirstElementInPane() {
     return new FromFirstElementInPane<W>(IDENTITY);
@@ -84,7 +85,7 @@ public abstract class AfterWatermark<W extends BoundedWindow>
         CodedTupleTag.of("delayed-until", InstantCoder.of());
 
     private FromFirstElementInPane(
-        ImmutableList<SerializableFunction<Instant, Instant>> delayFunction) {
+        List<SerializableFunction<Instant, Instant>> delayFunction) {
       super(delayFunction);
     }
 
@@ -101,8 +102,17 @@ public abstract class AfterWatermark<W extends BoundedWindow>
     }
 
     @Override
-    public TriggerResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
-      // To have gotten here, we must not have fired in any of the oldWindows.
+    public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+      // If the watermark time timer has fired in any of the windows being merged, it would have
+      // fired at the same point if it had been added to the merged window. So, we just record it as
+      // finished.
+      if (e.finishedInAnyMergingWindow(c.current())) {
+        return MergeResult.ALREADY_FINISHED;
+      }
+
+      // To have gotten here, we must not have fired in any of the oldWindows. Determine the event
+      // timestamp from the minimum (we could also just pick one, or try to record the arrival times
+      // of this first element in each pane).
       Instant earliestTimer = BoundedWindow.TIMESTAMP_MAX_VALUE;
       for (Instant delayedUntil : c.lookup(DELAYED_UNTIL_TAG, e.oldWindows()).values()) {
         if (delayedUntil != null && delayedUntil.isBefore(earliestTimer)) {
@@ -115,7 +125,7 @@ public abstract class AfterWatermark<W extends BoundedWindow>
         c.setTimer(e.newWindow(), earliestTimer, TimeDomain.EVENT_TIME);
       }
 
-      return TriggerResult.CONTINUE;
+      return MergeResult.CONTINUE;
     }
 
     @Override
@@ -130,18 +140,13 @@ public abstract class AfterWatermark<W extends BoundedWindow>
     }
 
     @Override
-    public boolean willNeverFinish() {
-      return false;
-    }
-
-    @Override
     public Instant getWatermarkCutoff(W window) {
       return computeTargetTimestamp(window.maxTimestamp());
     }
 
     @Override
     protected AfterWatermark<W> newWith(
-        ImmutableList<SerializableFunction<Instant, Instant>> transforms) {
+        List<SerializableFunction<Instant, Instant>> transforms) {
       return new FromFirstElementInPane<W>(transforms);
     }
   }
@@ -151,7 +156,7 @@ public abstract class AfterWatermark<W extends BoundedWindow>
     private static final long serialVersionUID = 0L;
 
     private FromEndOfWindow(
-        ImmutableList<SerializableFunction<Instant, Instant>> composed) {
+        List<SerializableFunction<Instant, Instant>> composed) {
       super(composed);
     }
 
@@ -163,13 +168,20 @@ public abstract class AfterWatermark<W extends BoundedWindow>
     }
 
     @Override
-    public TriggerResult onMerge(Trigger.TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
-      for (W oldWindow : e.oldWindows()) {
-        c.deleteTimer(oldWindow, TimeDomain.EVENT_TIME);
+    public MergeResult onMerge(Trigger.TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+      // If the watermark was past the end of a window that is past the end of the new window,
+      // then the watermark must also be past the end of this window. What's more, we've already
+      // fired some elements for that trigger firing, so we report FINISHED (without firing).
+      for (W finishedWindow : e.getFinishedMergingWindows(c.current())) {
+        if (finishedWindow.maxTimestamp().isAfter(e.newWindow().maxTimestamp())) {
+          return MergeResult.ALREADY_FINISHED;
+        }
       }
 
-      c.setTimer(e.newWindow(), e.newWindow().maxTimestamp(), TimeDomain.EVENT_TIME);
-      return TriggerResult.CONTINUE;
+      // Otherwise, set a timer for this window, and return.
+      c.setTimer(e.newWindow(),
+          computeTargetTimestamp(e.newWindow().maxTimestamp()), TimeDomain.EVENT_TIME);
+      return MergeResult.CONTINUE;
     }
 
     @Override
@@ -183,18 +195,13 @@ public abstract class AfterWatermark<W extends BoundedWindow>
     }
 
     @Override
-    public boolean willNeverFinish() {
-      return false;
-    }
-
-    @Override
     public Instant getWatermarkCutoff(W window) {
       return computeTargetTimestamp(window.maxTimestamp());
     }
 
     @Override
     protected AfterWatermark<W> newWith(
-        ImmutableList<SerializableFunction<Instant, Instant>> transforms) {
+        List<SerializableFunction<Instant, Instant>> transforms) {
       return new FromEndOfWindow<>(transforms);
     }
   }

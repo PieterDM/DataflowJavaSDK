@@ -39,10 +39,10 @@ import com.google.cloud.dataflow.sdk.io.DatastoreIO.DatastoreWriter;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.runners.DirectPipeline;
+import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.transforms.Create;
 import com.google.cloud.dataflow.sdk.transforms.Write;
 import com.google.cloud.dataflow.sdk.util.TestCredential;
-import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
 
 import org.junit.Before;
@@ -100,7 +100,7 @@ public class DatastoreIOTest {
    * Test for reading one entity from kind "food".
    */
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testBuildRead() throws Exception {
     DatastoreIO.Source readQuery =
         DatastoreIO.read().withHost(this.host).withDataset(this.datasetId).withQuery(this.query);
@@ -155,12 +155,7 @@ public class DatastoreIOTest {
             .withDataset(dataset)
             .withQuery(query)
             .withMockSplitter(splitter)
-            .withMockEstimateSizeBytes(new Supplier<Long>() {
-              @Override
-              public Long get() {
-                return 8 * 1024L;
-              }
-            });
+            .withMockEstimateSizeBytes(8 * 1024L);
 
     List<DatastoreIO.Source> bundles = io.splitIntoBundles(1024, options);
     assertEquals(8, bundles.size());

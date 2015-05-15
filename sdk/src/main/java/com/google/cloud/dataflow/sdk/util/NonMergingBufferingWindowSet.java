@@ -23,23 +23,16 @@ import com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.WindowStatus;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
-import com.google.cloud.dataflow.sdk.values.TimestampedValue;
-import com.google.common.base.Function;
-import com.google.common.collect.Iterables;
-
-import org.joda.time.Instant;
+import com.google.common.collect.ImmutableList;
 
 import java.util.Collection;
 
 /**
- * A WindowSet where each value is placed in exactly one window,
- * and windows are never merged, deleted, or flushed early, and the
- * WindowSet itself is never exposed to user code, allowing
- * a much simpler (and cheaper) implementation.
- *
- * <p>This WindowSet only works with {@link StreamingGroupAlsoByWindowsDoFn}.
+ * A WindowSet where windows are never merged or deleted. This allows us to improve upon the default
+ * {@link BufferingWindowSet} by not maintaining a merge tree (or the list of active windows at all)
+ * and by blindly using tag lists to store elements.
  */
-class PartitionBufferingWindowSet<K, V, W extends BoundedWindow>
+class NonMergingBufferingWindowSet<K, V, W extends BoundedWindow>
     extends AbstractWindowSet<K, V, Iterable<V>, W> {
 
   public static <K, V, W extends BoundedWindow>
@@ -52,13 +45,13 @@ class PartitionBufferingWindowSet<K, V, W extends BoundedWindow>
       public AbstractWindowSet<K, V, Iterable<V>, W> create(K key,
           Coder<W> windowFn, KeyedState keyedState,
           WindowingInternals<?, ?> windowingInternals) throws Exception {
-        return new PartitionBufferingWindowSet<>(
+        return new NonMergingBufferingWindowSet<>(
             key, windowFn, inputCoder, keyedState, windowingInternals);
       }
     };
   }
 
-  private PartitionBufferingWindowSet(
+  private NonMergingBufferingWindowSet(
       K key,
       Coder<W> windowCoder,
       Coder<V> inputCoder,
@@ -68,9 +61,8 @@ class PartitionBufferingWindowSet<K, V, W extends BoundedWindow>
   }
 
   @Override
-  public WindowStatus put(W window, V value, Instant timestamp) throws Exception {
-    windowingInternals.writeToTagList(
-        bufferTag(window, windowCoder, inputCoder), value, timestamp);
+  public WindowStatus put(W window, V value) throws Exception {
+    windowingInternals.writeToTagList(bufferTag(window, windowCoder, inputCoder), value);
 
     // Adds the window even if it is already present, relying on the streaming backend to
     // de-duplicate. As such, we don't know if this was a genuinely new window.
@@ -94,25 +86,20 @@ class PartitionBufferingWindowSet<K, V, W extends BoundedWindow>
 
   @Override
   public boolean contains(W window) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(
+        "NonMergingBufferingWindowSet does not supporting reading the active window set.");
   }
 
   @Override
-  protected TimestampedValue<Iterable<V>> finalValue(W window) throws Exception {
+  protected Iterable<V> finalValue(W window) throws Exception {
     CodedTupleTag<V> tag = bufferTag(window, windowCoder, inputCoder);
-    Iterable<TimestampedValue<V>> result = windowingInternals.readTagList(tag);
+    Iterable<V> result = windowingInternals.readTagList(tag);
     if (result == null) {
       return null;
     }
 
-    Instant timestamp = result.iterator().next().getTimestamp();
-    return TimestampedValue.of(
-        Iterables.transform(result, new Function<TimestampedValue<V>, V>() {
-              @Override
-              public V apply(TimestampedValue<V> input) {
-                return input.getValue();
-              }
-            }),
-        timestamp);
+    // Create a copy here, since otherwise we may return the same list object from readTagList, and
+    // that may be mutated later, which would lead to mutation of output values.
+    return ImmutableList.copyOf(result);
   }
 }

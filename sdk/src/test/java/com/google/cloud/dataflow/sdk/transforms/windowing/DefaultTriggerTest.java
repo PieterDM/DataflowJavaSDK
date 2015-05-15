@@ -23,6 +23,7 @@ import static org.junit.Assert.assertThat;
 
 import com.google.cloud.dataflow.sdk.util.TriggerTester;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 
 import org.hamcrest.Matchers;
 import org.joda.time.Duration;
@@ -39,9 +40,10 @@ public class DefaultTriggerTest {
 
   @Test
   public void testDefaultTriggerWithFixedWindow() throws Exception {
-    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.buffering(
+    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         FixedWindows.of(Duration.millis(10)),
-        DefaultTrigger.<IntervalWindow>of());
+        DefaultTrigger.<IntervalWindow>of(),
+        AccumulationMode.DISCARDING_FIRED_PANES);
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(9));
@@ -72,9 +74,10 @@ public class DefaultTriggerTest {
 
   @Test
   public void testDefaultTriggerWithSessionWindow() throws Exception {
-    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.buffering(
+    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         Sessions.withGapDuration(Duration.millis(10)),
-        DefaultTrigger.<IntervalWindow>of());
+        DefaultTrigger.<IntervalWindow>of(),
+        AccumulationMode.DISCARDING_FIRED_PANES);
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(9));
@@ -96,10 +99,42 @@ public class DefaultTriggerTest {
   }
 
   @Test
+  public void testDefaultTriggerWithSlidingWindow() throws Exception {
+    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
+        SlidingWindows.of(Duration.millis(10)).every(Duration.millis(5)),
+        DefaultTrigger.<IntervalWindow>of(),
+        AccumulationMode.DISCARDING_FIRED_PANES);
+
+    tester.injectElement(1, new Instant(1));
+    tester.injectElement(2, new Instant(4));
+    tester.injectElement(3, new Instant(9));
+
+    tester.advanceWatermark(new Instant(100));
+    assertThat(tester.extractOutput(), Matchers.contains(
+        isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2), 1, -5, 5),
+        isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2, 3), 1, 0, 10),
+        isSingleWindowedValue(Matchers.containsInAnyOrder(3), 9, 5, 15)));
+
+    tester.injectElement(4, new Instant(8));
+
+    // Late data means the merge tree might be empty
+    tester.advanceWatermark(new Instant(101));
+    assertThat(tester.extractOutput(), Matchers.contains(
+        isSingleWindowedValue(Matchers.containsInAnyOrder(4), 8, 0, 10),
+        isSingleWindowedValue(Matchers.containsInAnyOrder(4), 8, 5, 15)));
+
+    assertFalse(tester.isDone(new IntervalWindow(new Instant(1), new Instant(10))));
+    assertFalse(tester.isDone(new IntervalWindow(new Instant(5), new Instant(15))));
+    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+  }
+
+
+  @Test
   public void testDefaultTriggerWithContainedSessionWindow() throws Exception {
-    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.buffering(
+    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         Sessions.withGapDuration(Duration.millis(10)),
-        DefaultTrigger.<IntervalWindow>of());
+        DefaultTrigger.<IntervalWindow>of(),
+        AccumulationMode.DISCARDING_FIRED_PANES);
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(9));
@@ -116,7 +151,7 @@ public class DefaultTriggerTest {
   public void testFireDeadline() throws Exception {
     assertEquals(new Instant(9), DefaultTrigger.of().getWatermarkCutoff(
         new IntervalWindow(new Instant(0), new Instant(10))));
-    assertEquals(BoundedWindow.TIMESTAMP_MAX_VALUE,
+    assertEquals(GlobalWindow.INSTANCE.maxTimestamp(),
         DefaultTrigger.of().getWatermarkCutoff(GlobalWindow.INSTANCE));
   }
 }

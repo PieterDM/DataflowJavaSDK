@@ -46,7 +46,7 @@ import java.util.zip.GZIPInputStream;
 import javax.annotation.Nullable;
 
 /**
- * Transforms for reading and writing text files.
+ * {@link PTransform}s for reading and writing text files.
  *
  * <p> To read a {@link PCollection} from one or more text files, use
  * {@link TextIO.Read}, specifying {@link TextIO.Read#from} to specify
@@ -101,21 +101,21 @@ public class TextIO {
   public static final Coder<String> DEFAULT_TEXT_CODER = StringUtf8Coder.of();
 
   /**
-   * A root PTransform that reads from a text file (or multiple text
-   * files matching a pattern) and returns a PCollection containing
+   * A {@link PTransform} that reads from a text file (or multiple text
+   * files matching a pattern) and returns a {@link PCollection} containing
    * the decoding of each of the lines of the text file(s).  The
    * default decoding just returns the lines.
    */
   public static class Read {
     /**
-     * Returns a TextIO.Read PTransform with the given step name.
+     * Returns a {@link TextIO.Read} {@link PTransform} with the given step name.
      */
     public static Bound<String> named(String name) {
       return new Bound<>(DEFAULT_TEXT_CODER).named(name);
     }
 
     /**
-     * Returns a TextIO.Read PTransform that reads from the file(s)
+     * Returns a {@link TextIO.Read} {@link PTransform} that reads from the file(s)
      * with the given name or pattern.  This can be a local filename
      * or filename pattern (if running locally), or a Google Cloud
      * Storage filename or filename pattern of the form
@@ -171,7 +171,7 @@ public class TextIO {
     // TODO: strippingNewlines, etc.
 
     /**
-     * A root PTransform that reads from a text file (or multiple text files
+     * A {@link PTransform} that reads from a text file (or multiple text files
      * matching a pattern) and returns a bounded PCollection containing the
      * decoding of each of the lines of the text file(s).  The default
      * decoding just returns the lines.
@@ -229,14 +229,14 @@ public class TextIO {
 
       /**
        * Returns a new TextIO.Read PTransform that's like this one but
-       * that uses the given {@code Coder<T1>} to decode each of the
-       * lines of the file into a value of type {@code T1}.  Does not
+       * that uses the given {@code Coder<X>} to decode each of the
+       * lines of the file into a value of type {@code X}.  Does not
        * modify this object.
        *
-       * @param <T1> the type of the decoded elements, and the
+       * @param <X> the type of the decoded elements, and the
        * elements of the resulting PCollection
        */
-      public <T1> Bound<T1> withCoder(Coder<T1> coder) {
+      public <X> Bound<X> withCoder(Coder<X> coder) {
         return new Bound<>(name, filepattern, coder, validate, compressionType);
       }
 
@@ -278,7 +278,9 @@ public class TextIO {
         // Force the output's Coder to be what the read is using, and
         // unchangeable later, to ensure that we read the input in the
         // format specified by the Read transform.
-        return PCollection.<T>createPrimitiveOutputInternal(WindowingStrategy.globalDefault())
+        return PCollection.<T>createPrimitiveOutputInternal(
+                input.getPipeline(),
+                WindowingStrategy.globalDefault())
             .setCoder(coder);
       }
 
@@ -321,7 +323,7 @@ public class TextIO {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * A PTransform that writes a PCollection to a text file (or
+   * A {@link PTransform} that writes a {@link PCollection} to a text file (or
    * multiple text files matching a sharding pattern), with each
    * PCollection element being encoded into its own line.
    */
@@ -544,13 +546,13 @@ public class TextIO {
 
       /**
        * Returns a new TextIO.Write PTransform that's like this one
-       * but that uses the given {@code Coder<T1>} to encode each of
-       * the elements of the input {@code PCollection<T1>} into an
+       * but that uses the given {@code Coder<X>} to encode each of
+       * the elements of the input {@code PCollection<X>} into an
        * output text line.  Does not modify this object.
        *
-       * @param <T1> the type of the elements of the input PCollection
+       * @param <X> the type of the elements of the input PCollection
        */
-      public <T1> Bound<T1> withCoder(Coder<T1> coder) {
+      public <X> Bound<X> withCoder(Coder<X> coder) {
         return new Bound<>(name, filenamePrefix, filenameSuffix, coder, numShards, shardTemplate,
             validate);
       }
@@ -575,7 +577,7 @@ public class TextIO {
           throw new IllegalStateException(
               "need to set the filename prefix of a TextIO.Write transform");
         }
-        return new PDone();
+        return PDone.in(input.getPipeline());
       }
 
       /**

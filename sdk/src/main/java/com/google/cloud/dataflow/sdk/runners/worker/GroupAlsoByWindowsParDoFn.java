@@ -18,13 +18,16 @@ package com.google.cloud.dataflow.sdk.runners.worker;
 
 import static com.google.cloud.dataflow.sdk.util.Structs.getBytes;
 import static com.google.cloud.dataflow.sdk.util.Structs.getObject;
+import static com.google.cloud.dataflow.sdk.util.Structs.getString;
 
+import com.google.api.client.util.Preconditions;
 import com.google.api.services.dataflow.model.MultiOutputInfo;
 import com.google.api.services.dataflow.model.SideInputInfo;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.options.StreamingOptions;
+import com.google.cloud.dataflow.sdk.runners.worker.CombineValuesFn.CombinePhase;
 import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
@@ -55,6 +58,7 @@ import javax.annotation.Nullable;
  */
 class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
 
+  @SuppressWarnings({"rawtypes", "unchecked"})
   public static GroupAlsoByWindowsParDoFn create(
       PipelineOptions options,
       CloudObject cloudUserFn,
@@ -115,12 +119,17 @@ class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
       isStreamingPipeline = ((StreamingOptions) options).isStreaming();
     }
 
-    boolean isMergingOnly = true;
-    KeyedCombineFn maybeMergingCombineFn;
-    if (isMergingOnly && combineFn != null) {
-      maybeMergingCombineFn = new MergingKeyedCombineFn(combineFn);
-    } else {
-      maybeMergingCombineFn = combineFn;
+    KeyedCombineFn maybeMergingCombineFn = null;
+    if (combineFn != null) {
+      String phase = getString(cloudUserFn, PropertyNames.PHASE, CombinePhase.ALL);
+      Preconditions.checkArgument(
+          phase.equals(CombinePhase.ALL) || phase.equals(CombinePhase.MERGE),
+          "Unexpected phase: " + phase);
+      if (phase.equals(CombinePhase.MERGE)) {
+        maybeMergingCombineFn = new MergingKeyedCombineFn(combineFn);
+      } else {
+        maybeMergingCombineFn = combineFn;
+      }
     }
 
     DoFnInfoFactory fnFactory;
@@ -164,18 +173,20 @@ class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
     }
   }
 
-  static class MergingKeyedCombineFn<K, VA> extends KeyedCombineFn<K, VA, List<VA>, VA> {
+  static class MergingKeyedCombineFn<K, AccumT>
+      extends KeyedCombineFn<K, AccumT, List<AccumT>, AccumT> {
+
     private static final long serialVersionUID = 0;
-    final KeyedCombineFn<K, ?, VA, ?> keyedCombineFn;
-    MergingKeyedCombineFn(KeyedCombineFn<K, ?, VA, ?> keyedCombineFn) {
+    final KeyedCombineFn<K, ?, AccumT, ?> keyedCombineFn;
+    MergingKeyedCombineFn(KeyedCombineFn<K, ?, AccumT, ?> keyedCombineFn) {
       this.keyedCombineFn = keyedCombineFn;
     }
     @Override
-    public List<VA> createAccumulator(K key) {
+    public List<AccumT> createAccumulator(K key) {
       return new ArrayList<>();
     }
     @Override
-    public List<VA> addInput(K key, List<VA> accumulator, VA input) {
+    public List<AccumT> addInput(K key, List<AccumT> accumulator, AccumT input) {
       accumulator.add(input);
       // TODO: Buffer more once we have compaction operation.
       if (accumulator.size() > 1) {
@@ -185,19 +196,19 @@ class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
       }
     }
     @Override
-    public List<VA> mergeAccumulators(K key, Iterable<List<VA>> accumulators) {
+    public List<AccumT> mergeAccumulators(K key, Iterable<List<AccumT>> accumulators) {
       return mergeToSingleton(key, Iterables.concat(accumulators));
     }
     @Override
-    public VA extractOutput(K key, List<VA> accumulator) {
+    public AccumT extractOutput(K key, List<AccumT> accumulator) {
       if (accumulator.size() == 0) {
         return keyedCombineFn.createAccumulator(key);
       } else {
         return keyedCombineFn.mergeAccumulators(key, accumulator);
       }
     }
-    private List<VA> mergeToSingleton(K key, Iterable<VA> accumulators) {
-      List<VA> singleton = new ArrayList<>();
+    private List<AccumT> mergeToSingleton(K key, Iterable<AccumT> accumulators) {
+      List<AccumT> singleton = new ArrayList<>();
       singleton.add(keyedCombineFn.mergeAccumulators(key, accumulators));
       return singleton;
     }

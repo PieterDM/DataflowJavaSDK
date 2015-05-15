@@ -16,6 +16,10 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import com.google.cloud.dataflow.sdk.util.common.Counter;
+import com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind;
+import com.google.cloud.dataflow.sdk.util.common.CounterProvider;
+
 /**
  * {@code PTransform}s for computing the minimum of the elements in a
  * {@code PCollection}, or the minimum of the values associated with
@@ -137,14 +141,14 @@ public class Min {
    * of elements of type {@code N}, useful as an
    * argument to {@link Combine#globally} or {@link Combine#perKey}.
    *
-   * @param <N> the type of the {@code Number}s being compared
+   * @param <NumT> the type of the {@code Number}s being compared
    */
-  public static class MinFn<N extends Comparable<N>>
-      extends Combine.BinaryCombineFn<N> {
+  public static class MinFn<NumT extends Comparable<NumT>>
+      extends Combine.BinaryCombineFn<NumT> {
     private static final long serialVersionUID = 0;
 
-    /** The largest value of type N. */
-    private final N initialValue;
+    /** The largest value of type NumT. */
+    private final NumT initialValue;
 
     /**
      * Constructs a combining function that computes the minimum over
@@ -152,17 +156,17 @@ public class Min {
      * value of type {@code N}, which is the identity value for the
      * minimum operation over {@code N}s.
      */
-    public MinFn(N initialValue) {
+    public MinFn(NumT initialValue) {
       this.initialValue = initialValue;
     }
 
     @Override
-    public N apply(N a, N b) {
+    public NumT apply(NumT a, NumT b) {
       return a.compareTo(b) <= 0 ? a : b;
     }
 
     @Override
-    public N identity() {
+    public NumT identity() {
       return initialValue;
     }
   }
@@ -172,10 +176,18 @@ public class Min {
    * of {@code Integer}s, useful as an argument to
    * {@link Combine#globally} or {@link Combine#perKey}.
    */
-  public static class MinIntegerFn extends MinFn<Integer> {
+  public static class MinIntegerFn extends MinFn<Integer> implements
+      CounterProvider<Integer> {
     private static final long serialVersionUID = 0;
 
-    public MinIntegerFn() { super(Integer.MAX_VALUE); }
+    public MinIntegerFn() {
+      super(Integer.MAX_VALUE);
+    }
+
+    @Override
+    public Counter<Integer> getCounter(String name) {
+      return Counter.ints(name, AggregationKind.MIN);
+    }
   }
 
   /**
@@ -183,10 +195,18 @@ public class Min {
    * of {@code Long}s, useful as an argument to
    * {@link Combine#globally} or {@link Combine#perKey}.
    */
-  public static class MinLongFn extends MinFn<Long> {
+  public static class MinLongFn extends MinFn<Long> implements
+      CounterProvider<Long> {
     private static final long serialVersionUID = 0;
 
-    public MinLongFn() { super(Long.MAX_VALUE); }
+    public MinLongFn() {
+      super(Long.MAX_VALUE);
+    }
+
+    @Override
+    public Counter<Long> getCounter(String name) {
+      return Counter.longs(name, AggregationKind.MIN);
+    }
   }
 
   /**
@@ -194,9 +214,17 @@ public class Min {
    * of {@code Double}s, useful as an argument to
    * {@link Combine#globally} or {@link Combine#perKey}.
    */
-  public static class MinDoubleFn extends MinFn<Double> {
+  public static class MinDoubleFn extends MinFn<Double> implements
+      CounterProvider<Double> {
     private static final long serialVersionUID = 0;
 
-    public MinDoubleFn() { super(Double.POSITIVE_INFINITY); }
+    public MinDoubleFn() {
+      super(Double.POSITIVE_INFINITY);
+    }
+
+    @Override
+    public Counter<Double> getCounter(String name) {
+      return Counter.doubles(name, AggregationKind.MIN);
+    }
   }
 }

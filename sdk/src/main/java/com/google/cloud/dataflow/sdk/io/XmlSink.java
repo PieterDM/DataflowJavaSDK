@@ -33,6 +33,7 @@ import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 import javax.xml.bind.Marshaller;
 
+// JAVADOCSTYLE OFF
 /**
  * A {@link Sink} that outputs records as XML-formatted elements. Writes a {@link PCollection} of
  * records from JAXB-annotated classes to a single file location.
@@ -131,6 +132,8 @@ import javax.xml.bind.Marshaller;
  * }
  * </pre>
  */
+// JAVADOCSTYLE ON
+@SuppressWarnings("checkstyle:javadocstyle")
 public class XmlSink {
   protected static final String XML_EXTENSION = "xml";
 
@@ -159,7 +162,7 @@ public class XmlSink {
   }
 
   /**
-   * A FileBasedSink that writes objects as XML elements.
+   * A {@link FileBasedSink} that writes objects as XML elements.
    */
   public static class Bound<T> extends FileBasedSink<T> {
     private static final long serialVersionUID = 0;
@@ -217,7 +220,7 @@ public class XmlSink {
     }
 
     /**
-     * Creates an XmlWriteOperation.
+     * Creates an {@link XmlWriteOperation}.
      */
     @Override
     public XmlWriteOperation<T> createWriteOperation(PipelineOptions options) {
@@ -226,7 +229,7 @@ public class XmlSink {
   }
 
   /**
-   * WriteOperation for XML Sinks.
+   * {@link Sink.WriteOperation} for XML {@link Sink}s.
    */
   protected static final class XmlWriteOperation<T> extends FileBasedWriteOperation<T> {
     private static final long serialVersionUID = 0;
@@ -236,7 +239,7 @@ public class XmlSink {
     }
 
     /**
-     * Creates a XmlWriter with a marshaller for the type it will write.
+     * Creates a {@link XmlWriter} with a marshaller for the type it will write.
      */
     @Override
     public XmlWriter<T> createWriter(PipelineOptions options) throws Exception {
@@ -260,7 +263,7 @@ public class XmlSink {
   }
 
   /**
-   * Writer that can write objects as XML elements.
+   * A {@link Sink.Writer} that can write objects as XML elements.
    */
   protected static final class XmlWriter<T> extends FileBasedWriter<T> {
     final Marshaller marshaller;

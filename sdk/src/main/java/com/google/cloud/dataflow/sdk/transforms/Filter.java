@@ -47,8 +47,8 @@ public class Filter<T> extends PTransform<PCollection<T>,
    * satisfying various inequalities with the specified value based on
    * the elements' natural ordering.
    */
-  public static <T, C extends SerializableFunction<T, Boolean>>
-      ParDo.Bound<T, T> by(final C filterPred) {
+  public static <T, PredicateT extends SerializableFunction<T, Boolean>>
+      ParDo.Bound<T, T> by(final PredicateT filterPred) {
     return ParDo.named("Filter").of(new DoFn<T, T>() {
             @Override
             public void processElement(ProcessContext c) {
@@ -67,8 +67,8 @@ public class Filter<T> extends PTransform<PCollection<T>,
    *
    * <p> Example of use:
    * <pre> {@code
-   * PCollection<String> listOfNumbers = ...;
-   * PCollection<String> smallNumbers =
+   * PCollection<Integer> listOfNumbers = ...;
+   * PCollection<Integer> smallNumbers =
    *     listOfNumbers.apply(Filter.lessThan(10));
    * } </pre>
    *
@@ -100,8 +100,8 @@ public class Filter<T> extends PTransform<PCollection<T>,
    *
    * <p> Example of use:
    * <pre> {@code
-   * PCollection<String> listOfNumbers = ...;
-   * PCollection<String> largeNumbers =
+   * PCollection<Integer> listOfNumbers = ...;
+   * PCollection<Integer> largeNumbers =
    *     listOfNumbers.apply(Filter.greaterThan(1000));
    * } </pre>
    *
@@ -133,8 +133,8 @@ public class Filter<T> extends PTransform<PCollection<T>,
    *
    * <p> Example of use:
    * <pre> {@code
-   * PCollection<String> listOfNumbers = ...;
-   * PCollection<String> smallOrEqualNumbers =
+   * PCollection<Integer> listOfNumbers = ...;
+   * PCollection<Integer> smallOrEqualNumbers =
    *     listOfNumbers.apply(Filter.lessThanEq(10));
    * } </pre>
    *
@@ -166,8 +166,8 @@ public class Filter<T> extends PTransform<PCollection<T>,
    *
    * <p> Example of use:
    * <pre> {@code
-   * PCollection<String> listOfNumbers = ...;
-   * PCollection<String> largeOrEqualNumbers =
+   * PCollection<Integer> listOfNumbers = ...;
+   * PCollection<Integer> largeOrEqualNumbers =
    *     listOfNumbers.apply(Filter.greaterThanEq(1000));
    * } </pre>
    *

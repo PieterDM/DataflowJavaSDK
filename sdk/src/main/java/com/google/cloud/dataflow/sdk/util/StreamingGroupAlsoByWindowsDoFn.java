@@ -20,10 +20,7 @@ import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
-import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
-import com.google.cloud.dataflow.sdk.transforms.windowing.PartitioningWindowFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
-import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
 import com.google.cloud.dataflow.sdk.util.AbstractWindowSet.Factory;
 import com.google.cloud.dataflow.sdk.util.TriggerExecutor.TimerManager;
 import com.google.cloud.dataflow.sdk.values.KV;
@@ -35,92 +32,83 @@ import org.joda.time.Instant;
  * DoFn that merges windows and groups elements in those windows.
  *
  * @param <K> key type
- * @param <VI> input value element type
- * @param <VO> output value element type
+ * @param <InputT> input value element type
+ * @param <OutputT> output value element type
  * @param <W> window type
  */
 @SuppressWarnings("serial")
-public abstract class StreamingGroupAlsoByWindowsDoFn<K, VI, VO, W extends BoundedWindow>
-    extends DoFn<TimerOrElement<KV<K, VI>>, KV<K, VO>> implements DoFn.RequiresKeyedState {
+public abstract class StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W extends BoundedWindow>
+    extends DoFn<TimerOrElement<KV<K, InputT>>, KV<K, OutputT>> implements DoFn.RequiresKeyedState {
 
-  public static <K, VI, VA, VO, W extends BoundedWindow>
-      StreamingGroupAlsoByWindowsDoFn<K, VI, VO, W> create(
+  public static <K, InputT, AccumT, OutputT, W extends BoundedWindow>
+      StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W> create(
           final WindowingStrategy<?, W> windowingStrategy,
-          final KeyedCombineFn<K, VI, VA, VO> combineFn,
+          final KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn,
           final Coder<K> keyCoder,
-          final Coder<VI> inputValueCoder) {
+          final Coder<InputT> inputValueCoder) {
     Preconditions.checkNotNull(combineFn);
     return new StreamingGABWViaWindowSetDoFn<>(windowingStrategy,
-        CombiningWindowSet.<K, VI, VA, VO, W>factory(combineFn, keyCoder, inputValueCoder));
+        CombiningWindowSet.<K, InputT, AccumT, OutputT, W>factory(
+            combineFn, keyCoder, inputValueCoder));
   }
 
-  public static <K, VI, W extends BoundedWindow>
-  StreamingGroupAlsoByWindowsDoFn<K, VI, Iterable<VI>, W> createForIterable(
+  public static <K, V, W extends BoundedWindow>
+  StreamingGroupAlsoByWindowsDoFn<K, V, Iterable<V>, W> createForIterable(
       final WindowingStrategy<?, W> windowingStrategy,
-      final Coder<VI> inputValueCoder) {
-    if (windowingStrategy.getWindowFn() instanceof PartitioningWindowFn
-        // TODO: Characterize the other kinds of triggers that work with the
-        // PartitioningBufferingWindowSet
-        && windowingStrategy.getTrigger() instanceof DefaultTrigger) {
-      return new StreamingGABWViaWindowSetDoFn<>(windowingStrategy,
-          PartitionBufferingWindowSet.<K, VI, W>factory(inputValueCoder));
-    } else {
-      return new StreamingGABWViaWindowSetDoFn<>(windowingStrategy,
-          BufferingWindowSet.<K, VI, W>factory(inputValueCoder));
-    }
+      final Coder<V> inputCoder) {
+    return new StreamingGABWViaWindowSetDoFn<>(
+        windowingStrategy, AbstractWindowSet.<K, V, W>factoryFor(windowingStrategy, inputCoder));
   }
 
-  private static class StreamingGABWViaWindowSetDoFn<K, VI, VO, W extends BoundedWindow>
-  extends StreamingGroupAlsoByWindowsDoFn<K, VI, VO, W> {
-    private final WindowFn<Object, W> windowFn;
-    private Factory<K, VI, VO, W> windowSetFactory;
-    private Trigger<W> trigger;
+  private static class StreamingGABWViaWindowSetDoFn<K, InputT, OutputT, W extends BoundedWindow>
+  extends StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W> {
+    private final Factory<K, InputT, OutputT, W> windowSetFactory;
+    private final WindowingStrategy<Object, W> windowingStrategy;
+
+    private TriggerExecutor<K, InputT, OutputT, W> executor;
 
     public StreamingGABWViaWindowSetDoFn(WindowingStrategy<?, W> windowingStrategy,
-        AbstractWindowSet.Factory<K, VI, VO, W> windowSetFactory) {
+        AbstractWindowSet.Factory<K, InputT, OutputT, W> windowSetFactory) {
       this.windowSetFactory = windowSetFactory;
       @SuppressWarnings("unchecked")
       WindowingStrategy<Object, W> noWildcard = (WindowingStrategy<Object, W>) windowingStrategy;
-      this.windowFn = noWildcard.getWindowFn();
-      this.trigger = noWildcard.getTrigger();
+      this.windowingStrategy = noWildcard;
+    }
+
+    private void initForKey(ProcessContext c, K key) throws Exception{
+      if (executor == null) {
+        TimerManager timerManager = new StreamingTimerManager(c);
+        executor = TriggerExecutor.create(
+          key, windowingStrategy, timerManager, windowSetFactory,
+          c.keyedState(), c.windowingInternals());
+      }
     }
 
     @Override
-    public void processElement(ProcessContext context) throws Exception {
-      if (!context.element().isTimer()) {
-        KV<K, VI> element = context.element().element();
-        K key = element.getKey();
-        VI value = element.getValue();
-        AbstractWindowSet<K, VI, VO, W> windowSet = windowSetFactory.create(
-                key, windowFn.windowCoder(), context.keyedState(), context.windowingInternals());
-        TriggerExecutor<K, VI, VO, W> executor = new TriggerExecutor<>(
-            windowFn,
-            new StreamingTimerManager(context),
-            trigger,
-            context.keyedState(),
-            context.windowingInternals(),
-            windowSet);
+    public void processElement(ProcessContext c) throws Exception {
+      @SuppressWarnings("unchecked")
+      K key = c.element().isTimer() ? (K) c.element().key() : c.element().element().getKey();
+      initForKey(c, key);
 
-        executor.onElement(WindowedValue.of(
-            value, context.timestamp(), context.windowingInternals().windows()));
-        windowSet.persist();
+      if (c.element().isTimer()) {
+        executor.onTimer(c.element().tag());
       } else {
-        TimerOrElement<KV<K, VI>> timer = context.element();
-        @SuppressWarnings("unchecked")
-        K key = (K) timer.key();
-        AbstractWindowSet<K, VI, VO, W> windowSet = windowSetFactory.create(
-            key, windowFn.windowCoder(), context.keyedState(), context.windowingInternals());
-        TriggerExecutor<K, VI, VO, W> executor = new TriggerExecutor<>(
-            windowFn,
-            new StreamingTimerManager(context),
-            trigger,
-            context.keyedState(),
-            context.windowingInternals(),
-            windowSet);
-
-        executor.onTimer(timer.tag());
-        windowSet.persist();
+        InputT value = c.element().element().getValue();
+        executor.onElement(
+            WindowedValue.of(value, c.timestamp(), c.windowingInternals().windows()));
       }
+    }
+
+    @Override
+    public void finishBundle(Context c) throws Exception {
+      if (executor != null) {
+        // Merge before finishing the bundle in case it causes triggers to fire.
+        executor.merge();
+        executor.persistWindowSet();
+      }
+
+      // Prepare this DoFn for reuse.
+      executor = null;
     }
   }
 

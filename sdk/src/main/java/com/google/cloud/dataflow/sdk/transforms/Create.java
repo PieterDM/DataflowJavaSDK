@@ -18,15 +18,13 @@ package com.google.cloud.dataflow.sdk.transforms;
 
 import com.google.api.client.util.Preconditions;
 import com.google.cloud.dataflow.sdk.Pipeline;
+import com.google.cloud.dataflow.sdk.coders.CannotProvideCoderException;
 import com.google.cloud.dataflow.sdk.coders.Coder;
-import com.google.cloud.dataflow.sdk.coders.CoderException;
 import com.google.cloud.dataflow.sdk.coders.CoderRegistry;
-import com.google.cloud.dataflow.sdk.coders.IterableCoder;
 import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
 import com.google.cloud.dataflow.sdk.io.PubsubIO;
 import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
-import com.google.cloud.dataflow.sdk.util.CoderUtils;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
 import com.google.cloud.dataflow.sdk.values.KV;
@@ -35,7 +33,7 @@ import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PInput;
 import com.google.cloud.dataflow.sdk.values.TimestampedValue;
 import com.google.cloud.dataflow.sdk.values.TimestampedValue.TimestampedValueCoder;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 import org.joda.time.Instant;
 
@@ -198,9 +196,7 @@ public class Create<T> extends PTransform<PInput, PCollection<T>> {
 
   public PCollection<T> applyHelper(PInput input, boolean isStreaming) {
     if (isStreaming) {
-      @SuppressWarnings("unchecked")
-      Coder<T> elemCoder = (Coder<T>) getElementCoder(input.getPipeline().getCoderRegistry());
-      return Pipeline.applyTransform(
+      PCollection<T> output = Pipeline.applyTransform(
           input, PubsubIO.Read.named("StartingSignal").subscription("_starting_signal/"))
           .apply(ParDo.of(new DoFn<String, KV<Void, Void>>() {
             private static final long serialVersionUID = 0;
@@ -211,9 +207,23 @@ public class Create<T> extends PTransform<PInput, PCollection<T>> {
               c.output(KV.of((Void) null, (Void) null));
             }
           }))
-          .apply(ParDo.of(new OutputOnceDoFn<>(elems, elemCoder)));
+          .apply(ParDo.of(new OutputOnceDoFn<>(elems)));
+
+      // Best effort attempt to set the coder for the user on the output of the
+      // "Create". ParDo has a different way in which it attempts to get
+      // the coder which doesn't take a look at the elements.
+      try {
+        @SuppressWarnings("unchecked")
+        Coder<T> coder = (Coder<T>) getDefaultOutputCoder(input);
+        output.setCoder(coder);
+      } catch (CannotProvideCoderException expected) {
+        // The user will need to specify a coder.
+      }
+      return output;
     } else {
-      return PCollection.<T>createPrimitiveOutputInternal(WindowingStrategy.globalDefault());
+      return PCollection.<T>createPrimitiveOutputInternal(
+          input.getPipeline(),
+          WindowingStrategy.globalDefault());
     }
   }
 
@@ -223,24 +233,16 @@ public class Create<T> extends PTransform<PInput, PCollection<T>> {
 
     private final CodedTupleTag<String> outputOnceTag =
         CodedTupleTag.of("outputOnce", StringUtf8Coder.of());
-    private final byte[] encodedBytes;
-    private final IterableCoder<T> iterableCoder;
+    private final Iterable<T> elems;
 
-    public OutputOnceDoFn(Iterable<T> elems, Coder<T> coder) {
-      this.iterableCoder = IterableCoder.of(coder);
-      try {
-        this.encodedBytes = CoderUtils.encodeToByteArray(iterableCoder, elems);
-      } catch (CoderException e) {
-        throw new IllegalArgumentException(
-            "Unable to encode element '" + elems + "' using coder '" + coder + "'.", e);
-      }
+    public OutputOnceDoFn(Iterable<T> elems) {
+      this.elems = elems;
     }
 
     @Override
     public void processElement(ProcessContext c) throws IOException {
       String state = c.keyedState().lookup(outputOnceTag);
       if (state == null || state.isEmpty()) {
-        Iterable<T> elems = CoderUtils.decodeFromByteArray(iterableCoder, encodedBytes);
         for (T t : elems) {
           c.output(t);
         }
@@ -268,26 +270,25 @@ public class Create<T> extends PTransform<PInput, PCollection<T>> {
     return elems;
   }
 
-  private Coder<?> getElementCoder(CoderRegistry coderRegistry) {
+  private Coder<?> getElementCoder(CoderRegistry coderRegistry) throws CannotProvideCoderException {
     // First try to deduce a coder using the types of the elements.
-    Class<?> elementType = null;
+    Class<?> elementClazz = null;
     for (T elem : elems) {
-      Class<?> type = elem.getClass();
-      if (elementType == null) {
-        elementType = type;
-      } else if (!elementType.equals(type)) {
+      Class<?> clazz = elem == null ? Void.class : elem.getClass();
+      if (elementClazz == null) {
+        elementClazz = clazz;
+      } else if (!elementClazz.equals(clazz)) {
         // Elements are not the same type, require a user-specified coder.
-        elementType = null;
-        break;
+        throw new CannotProvideCoderException(
+            "Cannot provide coder for Create: The elements are not all of the same class.");
       }
     }
-    if (elementType == null) {
-      return null;
-    }
-    if (elementType.getTypeParameters().length == 0) {
-      Coder<?> candidate = coderRegistry.getDefaultCoder(TypeToken.of(elementType));
-      if (candidate != null) {
-        return candidate;
+
+    if (elementClazz.getTypeParameters().length == 0) {
+      try {
+        return coderRegistry.getDefaultCoder(TypeDescriptor.of(elementClazz));
+      } catch (CannotProvideCoderException exc) {
+        // let the next stage try
       }
     }
 
@@ -298,15 +299,17 @@ public class Create<T> extends PTransform<PInput, PCollection<T>> {
       if (coder == null) {
         coder = c;
       } else if (!Objects.equals(c, coder)) {
-        coder = null;
-        break;
+        throw new CannotProvideCoderException(
+            "Cannot provide coder for elements of " + Create.class.getSimpleName() + ":"
+            + " For their common class, no coder could be provided."
+            + " Based on their values, they do not all default to the same Coder.");
       }
     }
     return coder;
   }
 
   @Override
-  protected Coder<?> getDefaultOutputCoder(PInput input) {
+  protected Coder<?> getDefaultOutputCoder(PInput input) throws CannotProvideCoderException {
     Coder<?> elemCoder = getElementCoder(input.getPipeline().getCoderRegistry());
     if (elemCoder == null) {
       return super.getDefaultOutputCoder(input);

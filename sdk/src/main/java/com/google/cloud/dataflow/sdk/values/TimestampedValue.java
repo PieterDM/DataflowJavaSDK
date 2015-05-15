@@ -66,7 +66,7 @@ public class TimestampedValue<V> {
     if (!(other instanceof TimestampedValue)) {
       return false;
     }
-    TimestampedValue that = (TimestampedValue) other;
+    TimestampedValue<?> that = (TimestampedValue<?>) other;
     return Objects.equals(value, that.value) && Objects.equals(timestamp, that.timestamp);
   }
 
@@ -83,7 +83,7 @@ public class TimestampedValue<V> {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * Coder for {@code TimestampedValue}.
+   * A {@link Coder} for {@code TimestampedValue}.
    */
   @SuppressWarnings("serial")
   public static class TimestampedValueCoder<T>
@@ -125,12 +125,6 @@ public class TimestampedValue<V> {
       T value = valueCoder.decode(inStream, context.nested());
       Instant timestamp = InstantCoder.of().decode(inStream, context);
       return TimestampedValue.of(value, timestamp);
-    }
-
-    @Override
-    @Deprecated
-    public boolean isDeterministic() {
-      return valueCoder.isDeterministic();
     }
 
     @Override

@@ -19,6 +19,7 @@ package com.google.cloud.dataflow.sdk.coders;
 import com.google.cloud.dataflow.sdk.coders.Proto2CoderTestMessages.MessageA;
 import com.google.cloud.dataflow.sdk.coders.Proto2CoderTestMessages.MessageB;
 import com.google.cloud.dataflow.sdk.coders.Proto2CoderTestMessages.MessageC;
+import com.google.cloud.dataflow.sdk.testing.CoderProperties;
 import com.google.common.collect.ImmutableList;
 
 import org.junit.Ignore;
@@ -82,6 +83,6 @@ public class Proto2CoderTest {
         .build();
     CoderProperties.coderDecodeEncodeEqual(
         Proto2Coder.of(MessageC.class)
-        .withExtensionsFrom(Proto2CoderTestMessages.class), value);
+        .addExtensionsFrom(Proto2CoderTestMessages.class), value);
   }
 }

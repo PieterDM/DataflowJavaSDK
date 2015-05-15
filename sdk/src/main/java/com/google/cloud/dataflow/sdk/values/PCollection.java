@@ -21,7 +21,6 @@ import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
-import com.google.common.reflect.TypeToken;
 
 /**
  * A {@code PCollection<T>} is an immutable collection of values of type
@@ -124,7 +123,7 @@ public class PCollection<T> extends TypedPValue<T> {
    * Applies the given PTransform to this input PCollection, and
    * returns the PTransform's Output.
    */
-  public <Output extends POutput> Output apply(PTransform<? super PCollection<T>, Output> t) {
+  public <OutputT extends POutput> OutputT apply(PTransform<? super PCollection<T>, OutputT> t) {
     return Pipeline.applyTransform(this, t);
   }
 
@@ -146,17 +145,19 @@ public class PCollection<T> extends TypedPValue<T> {
    */
   private WindowingStrategy<?, ?> windowingStrategy;
 
-  private PCollection() {}
+  private PCollection(Pipeline p) {
+    super(p);
+  }
 
   /**
-   * Sets the {@code TypeToken<T>} for this {@code PCollection<T>}, so that
+   * Sets the {@code TypeDescriptor<T>} for this {@code PCollection<T>}, so that
    * the enclosing {@code PCollectionTuple}, {@code PCollectionList<T>},
    * or {@code PTransform<?, PCollection<T>>}, etc., can provide
    * more detailed reflective information.
    */
   @Override
-  public PCollection<T> setTypeTokenInternal(TypeToken<T> typeToken) {
-    super.setTypeTokenInternal(typeToken);
+  public PCollection<T> setTypeDescriptorInternal(TypeDescriptor<T> typeDescriptor) {
+    super.setTypeDescriptorInternal(typeDescriptor);
     return this;
   }
 
@@ -171,23 +172,13 @@ public class PCollection<T> extends TypedPValue<T> {
   }
 
   /**
-   * Sets the {@link Pipeline} for this {@code PCollection}.
-   *
-   * <p> For use by primitive transformations only.
-   */
-  @Override
-  public PCollection<T> setPipelineInternal(Pipeline pipeline) {
-    super.setPipelineInternal(pipeline);
-    return this;
-  }
-
-  /**
    * Creates and returns a new PCollection for a primitive output.
    *
    * <p> For use by primitive transformations only.
    */
   public static <T> PCollection<T> createPrimitiveOutputInternal(
+      Pipeline pipeline,
       WindowingStrategy<?, ?> windowingStrategy) {
-    return new PCollection<T>().setWindowingStrategyInternal(windowingStrategy);
+    return new PCollection<T>(pipeline).setWindowingStrategyInternal(windowingStrategy);
   }
 }

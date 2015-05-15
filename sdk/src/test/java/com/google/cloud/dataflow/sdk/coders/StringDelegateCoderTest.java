@@ -16,10 +16,8 @@
 
 package com.google.cloud.dataflow.sdk.coders;
 
-import static org.hamcrest.Matchers.equalTo;
-import static org.junit.Assert.assertThat;
-
 import com.google.cloud.dataflow.sdk.coders.Coder.NonDeterministicException;
+import com.google.cloud.dataflow.sdk.testing.CoderProperties;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -50,7 +48,6 @@ public class StringDelegateCoderTest {
   @Test
   public void testDeterministic() throws Exception, NonDeterministicException {
     uriCoder.verifyDeterministic();
-    assertThat(uriCoder.isDeterministic(), equalTo(true));
     for (String uriString : TEST_URI_STRINGS) {
       CoderProperties.coderDeterministic(uriCoder, new URI(uriString), new URI(uriString));
     }

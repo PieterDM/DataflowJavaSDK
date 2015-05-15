@@ -31,7 +31,7 @@ import java.util.regex.Pattern;
 import javax.annotation.Nullable;
 
 /**
- * Read and Write transforms for Pub/Sub streams. These transforms create
+ * Read and Write {@link PTransform}s for Pub/Sub streams. These transforms create
  * and consume unbounded {@link com.google.cloud.dataflow.sdk.values.PCollection}s.
  *
  * <p> {@code PubsubIO}  is only usable
@@ -129,7 +129,7 @@ public class PubsubIO {
   }
 
   /**
-   * A PTransform that continuously reads from a Pubsub stream and
+   * A {@link PTransform} that continuously reads from a Pubsub stream and
    * returns a {@code PCollection<String>} containing the items from
    * the stream.
    */
@@ -254,7 +254,7 @@ public class PubsubIO {
     }
 
     /**
-     * A PTransform that reads from a PubSub source and returns
+     * A {@link PTransform} that reads from a PubSub source and returns
      * a unbounded PCollection containing the items from the stream.
      */
     @SuppressWarnings("serial")
@@ -346,13 +346,13 @@ public class PubsubIO {
 
       /**
        * Returns a new PubsubIO.Read PTransform that's like this one but that uses the given
-       * {@code Coder<T1>} to decode each record into a value of type {@code T1}.  Does not modify
+       * {@code Coder<X>} to decode each record into a value of type {@code X}.  Does not modify
        * this object.
        *
-       * @param <T1> the type of the decoded elements, and the
+       * @param <X> the type of the decoded elements, and the
        * elements of the resulting PCollection.
        */
-      public <T1> Bound<T1> withCoder(Coder<T1> coder) {
+      public <X> Bound<X> withCoder(Coder<X> coder) {
         return new Bound<>(name, subscription, topic, timestampLabel, dropLateData, coder, idLabel);
       }
 
@@ -368,7 +368,9 @@ public class PubsubIO {
               "Can't set both the topic and the subscription for a "
               + "PubsubIO.Read transform");
         }
-        return PCollection.<T>createPrimitiveOutputInternal(WindowingStrategy.globalDefault())
+        return PCollection.<T>createPrimitiveOutputInternal(
+                input.getPipeline(),
+                WindowingStrategy.globalDefault())
             .setCoder(coder);
       }
 
@@ -378,7 +380,9 @@ public class PubsubIO {
       }
 
       @Override
-      protected String getKindString() { return "PubsubIO.Read"; }
+      protected String getKindString() {
+        return "PubsubIO.Read";
+      }
 
       public String getTopic() {
         return topic;
@@ -411,7 +415,7 @@ public class PubsubIO {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * A PTransform that continuously writes a
+   * A {@link PTransform} that continuously writes a
    * {@code PCollection<String>} to a Pubsub stream.
    */
   // TODO: Support non-String encodings.
@@ -467,7 +471,7 @@ public class PubsubIO {
     }
 
     /**
-     * A PTransfrom that writes a unbounded {@code PCollection<String>}
+     * A {@link PTransform} that writes a unbounded {@code PCollection<String>}
      * to a PubSub stream.
      */
     @SuppressWarnings("serial")
@@ -527,13 +531,13 @@ public class PubsubIO {
 
      /**
        * Returns a new PubsubIO.Write PTransform that's like this one
-       * but that uses the given {@code Coder<T1>} to encode each of
-       * the elements of the input {@code PCollection<T1>} into an
+       * but that uses the given {@code Coder<X>} to encode each of
+       * the elements of the input {@code PCollection<X>} into an
        * output record.  Does not modify this object.
        *
-       * @param <T1> the type of the elements of the input PCollection
+       * @param <X> the type of the elements of the input PCollection
        */
-      public <T1> Bound<T1> withCoder(Coder<T1> coder) {
+      public <X> Bound<X> withCoder(Coder<X> coder) {
         return new Bound<>(name, topic, timestampLabel, idLabel, coder);
       }
 
@@ -543,7 +547,7 @@ public class PubsubIO {
           throw new IllegalStateException(
               "need to set the topic of a PubsubIO.Write transform");
         }
-        return new PDone();
+        return PDone.in(input.getPipeline());
       }
 
       @Override
@@ -552,7 +556,9 @@ public class PubsubIO {
       }
 
       @Override
-      protected String getKindString() { return "PubsubIO.Write"; }
+      protected String getKindString() {
+        return "PubsubIO.Write";
+      }
 
       public String getTopic() {
         return topic;

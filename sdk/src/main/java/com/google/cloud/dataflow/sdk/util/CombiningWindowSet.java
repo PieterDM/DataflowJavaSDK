@@ -27,12 +27,8 @@ import com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.WindowStatus;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
-import com.google.cloud.dataflow.sdk.values.TimestampedValue;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
-
-import org.joda.time.Instant;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -45,24 +41,24 @@ import java.util.Set;
  * It merges accumulators when windows are added or merged.
  *
  * @param <K> key type
- * @param <VI> value input type
- * @param <VA> accumulator type
- * @param <VO> value output type
+ * @param <InputT> value input type
+ * @param <AccumT> accumulator type
+ * @param <OutputT> value output type
  * @param <W> window type
  */
-public class CombiningWindowSet<K, VI, VA, VO, W extends BoundedWindow>
-    extends AbstractWindowSet<K, VI, VO, W> {
+public class CombiningWindowSet<K, InputT, AccumT, OutputT, W extends BoundedWindow>
+    extends AbstractWindowSet<K, InputT, OutputT, W> {
 
-  public static <K, VI, VA, VO, W extends BoundedWindow>
-  AbstractWindowSet.Factory<K, VI, VO, W> factory(
-      final KeyedCombineFn<K, VI, VA, VO> combineFn,
-      final Coder<K> keyCoder, final Coder<VI> inputCoder) {
-    return new AbstractWindowSet.Factory<K, VI, VO, W>() {
+  public static <K, InputT, AccumT, OutputT, W extends BoundedWindow>
+  AbstractWindowSet.Factory<K, InputT, OutputT, W> factory(
+      final KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn,
+      final Coder<K> keyCoder, final Coder<InputT> inputCoder) {
+    return new AbstractWindowSet.Factory<K, InputT, OutputT, W>() {
 
       private static final long serialVersionUID = 0L;
 
       @Override
-      public AbstractWindowSet<K, VI, VO, W> create(K key,
+      public AbstractWindowSet<K, InputT, OutputT, W> create(K key,
           Coder<W> windowCoder, KeyedState keyedState,
           WindowingInternals<?, ?> windowingInternals) throws Exception {
         return new CombiningWindowSet<>(
@@ -74,24 +70,23 @@ public class CombiningWindowSet<K, VI, VA, VO, W extends BoundedWindow>
   private final CodedTupleTag<Iterable<W>> windowListTag =
       CodedTupleTag.of("liveWindowsList", IterableCoder.of(windowCoder));
 
-  private final KeyedCombineFn<K, VI, VA, VO> combineFn;
+  private final KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn;
   private final Set<W> liveWindows;
-  private final Coder<VA> accumulatorCoder;
+  private final Coder<AccumT> accumulatorCoder;
   private boolean liveWindowsModified;
 
   protected CombiningWindowSet(
       K key,
       Coder<W> windowCoder,
-      KeyedCombineFn<K, VI, VA, VO> combineFn,
+      KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn,
       Coder<K> keyCoder,
-      Coder<VI> inputValueCoder,
+      Coder<InputT> inputValueCoder,
       KeyedState keyedState,
       WindowingInternals<?, ?> windowingInternals) throws Exception {
     super(key, windowCoder, inputValueCoder, keyedState, windowingInternals);
     this.combineFn = combineFn;
     liveWindows = new HashSet<W>();
-    Iterators.addAll(liveWindows,
-                     emptyIfNull(keyedState.lookup(windowListTag)).iterator());
+    Iterators.addAll(liveWindows, emptyIfNull(keyedState.lookup(windowListTag)).iterator());
     liveWindowsModified = false;
     // TODO: Use the pipeline's registry once the TODO in GroupByKey is resolved.
     CoderRegistry coderRegistry = new CoderRegistry();
@@ -105,31 +100,23 @@ public class CombiningWindowSet<K, VI, VA, VO, W extends BoundedWindow>
   }
 
   @Override
-  protected TimestampedValue<VO> finalValue(W window) throws Exception {
-    TimestampedValue<VA> timestampedAccumulator = lookupAccumulator(window);
-
-    if (timestampedAccumulator == null) {
+  protected OutputT finalValue(W window) throws Exception {
+    AccumT accumulator = lookupAccumulator(window);
+    if (accumulator == null) {
       return null;
     }
 
-    return TimestampedValue.of(
-        combineFn.extractOutput(key, timestampedAccumulator.getValue()),
-        timestampedAccumulator.getTimestamp());
+    return combineFn.extractOutput(key, accumulator);
   }
 
   @Override
-  protected WindowStatus put(W window, VI value, Instant timestamp) throws Exception {
-    TimestampedValue<VA> timestampedAccumulator = lookupAccumulator(window);
-    if (timestampedAccumulator == null) {
-      storeAccumulator(
-          window, combineFn.addInput(key, combineFn.createAccumulator(key), value), timestamp);
+  protected WindowStatus put(W window, InputT value) throws Exception {
+    AccumT accumulator = lookupAccumulator(window);
+    if (accumulator == null) {
+      storeAccumulator(window, combineFn.addInput(key, combineFn.createAccumulator(key), value));
       return WindowStatus.NEW;
     } else {
-      VA accumulator = timestampedAccumulator.getValue();
-      if (timestampedAccumulator.getTimestamp().isBefore(timestamp)) {
-        timestamp = timestampedAccumulator.getTimestamp();
-      }
-      storeAccumulator(window, combineFn.addInput(key, accumulator, value), timestamp);
+      storeAccumulator(window, combineFn.addInput(key, accumulator, value));
       return WindowStatus.EXISTING;
     }
   }
@@ -137,49 +124,35 @@ public class CombiningWindowSet<K, VI, VA, VO, W extends BoundedWindow>
   @Override
   protected void remove(W window) throws Exception {
     if (contains(window)) {
-      windowingInternals.deleteTagList(accumulatorTag(window));
+      keyedState.remove(accumulatorTag(window));
       liveWindowsModified = liveWindows.remove(window);
     }
   }
 
   @Override
   protected void merge(Collection<W> toBeMerged, W mergeResult) throws Exception {
-    List<VA> accumulators = Lists.newArrayList();
-    Instant minTimestamp = BoundedWindow.TIMESTAMP_MAX_VALUE;
+    List<AccumT> accumulators = Lists.newArrayList();
     for (W window : toBeMerged) {
-      TimestampedValue<VA> timestampedAccumulator =
-          Preconditions.checkNotNull(lookupAccumulator(window));
-
-      accumulators.add(timestampedAccumulator.getValue());
-      if (timestampedAccumulator.getTimestamp().isBefore(minTimestamp)) {
-        minTimestamp = timestampedAccumulator.getTimestamp();
-      }
+      AccumT accumulator = Preconditions.checkNotNull(lookupAccumulator(window));
+      accumulators.add(accumulator);
       remove(window);
     }
-    VA mergedAccumulator = combineFn.mergeAccumulators(key, accumulators);
-    storeAccumulator(mergeResult, mergedAccumulator, minTimestamp);
+    AccumT mergedAccumulator = combineFn.mergeAccumulators(key, accumulators);
+    storeAccumulator(mergeResult, mergedAccumulator);
   }
 
-  private CodedTupleTag<VA> accumulatorTag(W window) throws Exception {
+  private CodedTupleTag<AccumT> accumulatorTag(W window) throws Exception {
     // TODO: Cache this.
     return bufferTag(window, windowCoder, accumulatorCoder);
   }
 
-  private void storeAccumulator(W window, VA accumulator, Instant timestamp) throws Exception {
-    CodedTupleTag<VA> tag = accumulatorTag(window);
-    windowingInternals.readTagList(tag);
-    windowingInternals.deleteTagList(tag);
-    windowingInternals.writeToTagList(tag, accumulator, timestamp);
+  private void storeAccumulator(W window, AccumT accumulator) throws Exception {
+    keyedState.store(accumulatorTag(window), accumulator);
     liveWindowsModified = liveWindows.add(window);
   }
 
-  private TimestampedValue<VA> lookupAccumulator(W window) throws Exception {
-    CodedTupleTag<VA> tag = accumulatorTag(window);
-    Iterable<TimestampedValue<VA>> data = windowingInternals.readTagList(tag);
-    if (data == null || !data.iterator().hasNext()) {
-      return null;
-    }
-    return Iterables.getOnlyElement(data);
+  private AccumT lookupAccumulator(W window) throws Exception {
+    return keyedState.lookup(accumulatorTag(window));
   }
 
   @Override

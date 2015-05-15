@@ -25,7 +25,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
 /**
- * A ListCoder encodes Lists.
+ * A {@code ListCoder} encodes {@code List}s.
  *
  * @param <T> the type of the elements of the Lists being transcoded
  */
@@ -69,12 +69,6 @@ public class ListCoder<T> extends IterableLikeCoder<T, List<T>> {
    * List sizes are always known, so ListIterable may be deterministic while
    * the general IterableLikeCoder is not.
    */
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return getElemCoder().isDeterministic();
-  }
-
   @Override
   public void verifyDeterministic() throws NonDeterministicException {
     verifyDeterministic(

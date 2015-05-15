@@ -18,8 +18,12 @@ package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.CoderException;
+import com.google.cloud.dataflow.sdk.coders.IterableCoder;
+import com.google.cloud.dataflow.sdk.coders.KvCoder;
+import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.coders.VarIntCoder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
+import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindow;
@@ -27,11 +31,10 @@ import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TimeDomain;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TriggerId;
 import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
-import com.google.cloud.dataflow.sdk.util.TriggerExecutor.TriggerIdCoder;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTagMap;
 import com.google.cloud.dataflow.sdk.values.KV;
-import com.google.cloud.dataflow.sdk.values.TimestampedValue;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
@@ -45,11 +48,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
@@ -61,28 +65,28 @@ import javax.annotation.Nullable;
  * <p>To have all interactions between the trigger and underlying components logged, call
  * {@link #logInteractions(boolean)}.
  *
- * @param <VI> The element types.
- * @param <VO> The final type for elements in the window (for instance, {@code Iterable<VI>})
+ * @param <InputT> The element types.
+ * @param <OutputT> The final type for elements in the window (for instance,
+ *     {@code Iterable<InputT>})
  * @param <W> The type of windows being used.
  */
-public class TriggerTester<VI, VO, W extends BoundedWindow> {
+public class TriggerTester<InputT, OutputT, W extends BoundedWindow> {
 
   private static final Logger LOGGER = Logger.getLogger(TriggerTester.class.getName());
 
   private Instant watermark = BoundedWindow.TIMESTAMP_MIN_VALUE;
   private Instant processingTime = BoundedWindow.TIMESTAMP_MIN_VALUE;
-  private BatchTimerManager timerManager = new LoggingBatchTimerManager(processingTime);
 
-  private TriggerExecutor<String, VI, VO, W> triggerExecutor;
-
-  private WindowFn<Object, W> windowFn;
-  private StubContexts stubContexts;
+  private final BatchTimerManager timerManager = new LoggingBatchTimerManager(processingTime);
+  private final TriggerExecutor<String, InputT, OutputT, W> triggerExecutor;
+  private final WindowFn<Object, W> windowFn;
+  private final StubContexts stubContexts;
+  private final AbstractWindowSet<String, InputT, OutputT, W> windowSet;
+  private final Coder<OutputT> outputCoder;
 
   private static final String KEY = "TEST_KEY";
-
   private boolean logInteractions = false;
-
-  private TriggerIdCoder<W> triggerIdCoder;
+  private ExecutableTrigger<W> executableTrigger;
 
   private void logInteraction(String fmt, Object... args) {
     if (logInteractions) {
@@ -90,41 +94,54 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
     }
   }
 
-  public static <W extends BoundedWindow> TriggerTester<Integer, Iterable<Integer>, W> buffering(
-      WindowFn<?, W> windowFn, Trigger<W> trigger) throws Exception {
+  public static <W extends BoundedWindow> TriggerTester<Integer, Iterable<Integer>, W> nonCombining(
+      WindowFn<?, W> windowFn, Trigger<W> trigger, AccumulationMode mode) throws Exception {
     @SuppressWarnings("unchecked")
     WindowFn<Object, W> objectWindowFn = (WindowFn<Object, W>) windowFn;
 
+    WindowingStrategy<?, W> strategy =
+        WindowingStrategy.of(windowFn).withTrigger(trigger).withMode(mode);
     AbstractWindowSet.Factory<String, Integer, Iterable<Integer>, W> windowSetFactory =
-        BufferingWindowSet.<String, Integer, W>factory(VarIntCoder.of());
+        AbstractWindowSet.<String, Integer, W>factoryFor(strategy, VarIntCoder.of());
 
     return new TriggerTester<Integer, Iterable<Integer>, W>(
-        objectWindowFn, trigger, windowSetFactory);
+        objectWindowFn, trigger, windowSetFactory, mode, IterableCoder.of(VarIntCoder.of()));
   }
 
-  public static <W extends BoundedWindow> TriggerTester<Integer, Iterable<Integer>, W> combining(
-      WindowFn<?, W> windowFn, Trigger<W> trigger) throws Exception {
+  public static <W extends BoundedWindow, AccumT, OutputT>
+      TriggerTester<Integer, OutputT, W> combining(
+          WindowFn<?, W> windowFn, Trigger<W> trigger, AccumulationMode mode,
+          KeyedCombineFn<String, Integer, AccumT, OutputT> combineFn,
+          Coder<OutputT> outputCoder) throws Exception {
     @SuppressWarnings("unchecked")
     WindowFn<Object, W> objectWindowFn = (WindowFn<Object, W>) windowFn;
 
-    AbstractWindowSet.Factory<String, Integer, Iterable<Integer>, W> windowSetFactory =
-        BufferingWindowSet.<String, Integer, W>factory(VarIntCoder.of());
+    AbstractWindowSet.Factory<String, Integer, OutputT, W> windowSetFactory =
+        CombiningWindowSet.<String, Integer, AccumT, OutputT, W>factory(
+            combineFn, StringUtf8Coder.of(), VarIntCoder.of());
 
-    return new TriggerTester<Integer, Iterable<Integer>, W>(
-        objectWindowFn, trigger, windowSetFactory);
+    return new TriggerTester<Integer, OutputT, W>(
+        objectWindowFn, trigger, windowSetFactory, mode, outputCoder);
   }
 
   private TriggerTester(
       WindowFn<Object, W> windowFn,
       Trigger<W> trigger,
-      AbstractWindowSet.Factory<String, VI, VO, W> windowSetFactory) throws Exception {
+      AbstractWindowSet.Factory<String, InputT, OutputT, W> windowSetFactory,
+      AccumulationMode mode,
+      Coder<OutputT> outputCoder) throws Exception {
     this.windowFn = windowFn;
     this.stubContexts = new StubContexts();
-    AbstractWindowSet<String, VI, VO, W> windowSet = windowSetFactory.create(
+    this.windowSet = windowSetFactory.create(
         KEY, windowFn.windowCoder(), stubContexts, stubContexts);
+    this.outputCoder = outputCoder;
+    executableTrigger = ExecutableTrigger.create(trigger);
     this.triggerExecutor = new TriggerExecutor<>(
-        windowFn, timerManager, trigger, stubContexts, stubContexts, windowSet);
-    this.triggerIdCoder = new TriggerIdCoder<W>(windowFn.windowCoder());
+        windowFn, timerManager, executableTrigger, stubContexts, stubContexts, windowSet, mode);
+  }
+
+  public ExecutableTrigger<W> getTrigger() {
+    return executableTrigger;
   }
 
   public void logInteractions(boolean logInteractions) {
@@ -132,7 +149,7 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
   }
 
   public boolean isDone(W window) throws IOException {
-    return triggerExecutor.isRootFinished(window);
+    return triggerExecutor.lookupFinishedSet(window).get(0);
   }
 
   /**
@@ -142,18 +159,8 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
     return stubContexts.getKeyedStateInUse();
   }
 
-  // TODO: Share the tag-mangling code with the TriggerExecutor.
-  public String rootFinished(W window) throws CoderException {
-    return "finished-root-"
-        + CoderUtils.encodeToBase64(triggerIdCoder,
-            new TriggerId<W>(window, Collections.<Integer>emptyList()));
-  }
-
-  public String subFinished(W window, Integer... path) throws CoderException {
-    List<Integer> pathList = new ArrayList<Integer>();
-    Collections.addAll(pathList, path);
-    return "finished-"
-        + CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<W>(window, pathList));
+  public String finishedSet(W window) throws CoderException {
+    return triggerExecutor.finishedSetTag(window).getId();
   }
 
   public String bufferTag(W window) throws IOException {
@@ -161,15 +168,24 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
     return WindowUtils.bufferTag(window, windowFn.windowCoder(), VoidCoder.of()).getId();
   }
 
+  public String earliestElement(W window) throws CoderException {
+    return triggerExecutor.earliestElementTag(window).getId();
+  }
+
+  public boolean isWindowActive(W window) throws IOException {
+    return stubContexts.getKeyedStateInUse()
+        .contains(WindowUtils.bufferTag(window, windowFn.windowCoder(), VarIntCoder.of()).getId());
+  }
+
   /**
    * Retrieve the values that have been output to this time, and clear out the output accumulator.
    */
-  public Iterable<WindowedValue<VO>> extractOutput() {
-    ImmutableList<WindowedValue<VO>> result = FluentIterable.from(stubContexts.outputs)
-        .transform(new Function<WindowedValue<KV<String, VO>>, WindowedValue<VO>>() {
+  public Iterable<WindowedValue<OutputT>> extractOutput() {
+    ImmutableList<WindowedValue<OutputT>> result = FluentIterable.from(stubContexts.outputs)
+        .transform(new Function<WindowedValue<KV<String, OutputT>>, WindowedValue<OutputT>>() {
           @Override
           @Nullable
-          public WindowedValue<VO> apply(@Nullable WindowedValue<KV<String, VO>> input) {
+          public WindowedValue<OutputT> apply(@Nullable WindowedValue<KV<String, OutputT>> input) {
             return WindowedValue.of(
                 input.getValue().getValue(), input.getTimestamp(), input.getWindows());
           }
@@ -181,7 +197,9 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
 
   /** Advance the watermark to the specified time, firing any timers that should fire. */
   public void advanceWatermark(Instant newWatermark) throws Exception {
-    Preconditions.checkState(!newWatermark.isBefore(watermark));
+    Preconditions.checkState(!newWatermark.isBefore(watermark),
+        "Cannot move watermark time backwards from %s to %s",
+        watermark.getMillis(), newWatermark.getMillis());
     logInteraction("Advancing watermark to %d", newWatermark.getMillis());
     watermark = newWatermark;
     timerManager.advanceWatermark(triggerExecutor, newWatermark);
@@ -190,13 +208,15 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
   /** Advance the processing time to the specified time, firing any timers that should fire. */
   public void advanceProcessingTime(
       Instant newProcessingTime) throws Exception {
-    Preconditions.checkState(!newProcessingTime.isBefore(processingTime));
+    Preconditions.checkState(!newProcessingTime.isBefore(processingTime),
+        "Cannot move processing time backwards from %s to %s",
+        processingTime.getMillis(), newProcessingTime.getMillis());
     logInteraction("Advancing processing time to %d", newProcessingTime.getMillis());
     processingTime = newProcessingTime;
     timerManager.advanceProcessingTime(triggerExecutor, newProcessingTime);
   }
 
-  public void injectElement(VI value, Instant timestamp) throws Exception {
+  public void injectElement(InputT value, Instant timestamp) throws Exception {
     Collection<W> windows = windowFn.assignWindows(new TriggerTester.StubAssignContext<W>(
         windowFn, value, timestamp, Arrays.asList(GlobalWindow.INSTANCE)));
     logInteraction("Element %s at time %d put in windows %s",
@@ -204,27 +224,39 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
     triggerExecutor.onElement(WindowedValue.of(value, timestamp, windows));
   }
 
-  public void setTimer(
-      W window, Instant timestamp, TimeDomain domain, List<Integer> subTriggerPath)
-          throws CoderException {
-    triggerExecutor.setTimer(new TriggerId<W>(window, subTriggerPath), timestamp, domain);
+  public void doMerge() throws Exception {
+    triggerExecutor.merge();
   }
 
-  private class StubContexts implements WindowingInternals<VI, KV<String, VO>>, DoFn.KeyedState {
+  public void setTimer(
+      W window, Instant timestamp, TimeDomain domain, ExecutableTrigger<W> trigger)
+          throws CoderException {
+    triggerExecutor.setTimer(
+        new TriggerId<W>(window, trigger.getTriggerIndex()), timestamp, domain);
+  }
 
-    private Map<CodedTupleTag<?>, List<TimestampedValue<?>>> tagListValues = new HashMap<>();
+  private class StubContexts
+      implements WindowingInternals<InputT, KV<String, OutputT>>, DoFn.KeyedState {
+
+    private Map<CodedTupleTag<?>, List<?>> tagListValues = new HashMap<>();
     private Map<CodedTupleTag<?>, Object> tagValues = new HashMap<>();
-    private List<WindowedValue<KV<String, VO>>> outputs = new ArrayList<>();
+    private List<WindowedValue<KV<String, OutputT>>> outputs = new ArrayList<>();
+
+    private Map<CodedTupleTag<?>, Instant> tagTimestamps = new HashMap<>();
+    private PriorityQueue<Instant> minTagTimestamp = new PriorityQueue<>();
 
     @Override
-    public void outputWindowedValue(KV<String, VO> output, Instant timestamp,
+    public void outputWindowedValue(KV<String, OutputT> output, Instant timestamp,
         Collection<? extends BoundedWindow> windows) {
-      WindowedValue<KV<String, VO>> value = WindowedValue.of(output, timestamp, windows);
+      // Copy the output value (using coders) before capturing it.
+      KV<String, OutputT> copy = SerializableUtils.<KV<String, OutputT>>ensureSerializableByCoder(
+          KvCoder.of(StringUtf8Coder.of(), outputCoder), output, "outputForWindow");
+      WindowedValue<KV<String, OutputT>> value = WindowedValue.of(copy, timestamp, windows);
       logInteraction("Outputting: %s", value);
       outputs.add(value);
     }
 
-    public Iterable<String> getKeyedStateInUse() {
+    public Set<String> getKeyedStateInUse() {
       return FluentIterable
           .from(tagListValues.keySet())
           .append(tagValues.keySet())
@@ -239,15 +271,14 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
     }
 
     @Override
-    public <T> void writeToTagList(CodedTupleTag<T> tag, T value, Instant timestamp)
-        throws IOException {
+    public <T> void writeToTagList(CodedTupleTag<T> tag, T value) throws IOException {
       @SuppressWarnings("unchecked")
-      List<TimestampedValue<?>> values = tagListValues.get(tag);
+      List<T> values = (List<T>) tagListValues.get(tag);
       if (values == null) {
         values = new ArrayList<>();
         tagListValues.put(tag, values);
       }
-      values.add(TimestampedValue.of(value, timestamp));
+      values.add(value);
     }
 
     @Override
@@ -256,20 +287,27 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
     }
 
     @Override
-    public <T> Iterable<TimestampedValue<T>> readTagList(CodedTupleTag<T> tag) throws IOException {
-      @SuppressWarnings({"unchecked", "rawtypes"})
-      List<TimestampedValue<T>> values = (List) tagListValues.get(tag);
+    public <T> Iterable<T> readTagList(CodedTupleTag<T> tag) {
+      @SuppressWarnings("unchecked")
+      List<T> values = (List<T>) tagListValues.get(tag);
       if (values == null) {
-        return Collections.<TimestampedValue<T>>emptyList();
+        return Collections.emptyList();
       } else {
-        Collections.sort(values, new Comparator<TimestampedValue<T>>() {
-              @Override
-              public int compare(TimestampedValue<T> v1, TimestampedValue<T> v2) {
-                return v1.getTimestamp().compareTo(v2.getTimestamp());
-              }
-            });
         return values;
       }
+    }
+
+    @Override
+    public <T> Map<CodedTupleTag<T>, Iterable<T>> readTagList(
+        List<CodedTupleTag<T>> tags) throws IOException {
+      return FluentIterable.from(tags)
+          .toMap(new Function<CodedTupleTag<T>, Iterable<T>>() {
+            @Override
+            @Nullable
+            public Iterable<T> apply(@Nullable CodedTupleTag<T> tag) {
+              return readTagList(tag);
+            }
+          });
     }
 
     @Override
@@ -292,12 +330,26 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
 
     @Override
     public <T> void store(CodedTupleTag<T> tag, T value) throws IOException {
+      store(tag, value, BoundedWindow.TIMESTAMP_MAX_VALUE);
+    }
+
+    @Override
+    public <T> void store(CodedTupleTag<T> tag, T value, Instant timestamp) throws IOException {
       tagValues.put(tag, value);
+
+      // We never use the timestamp, but for testing purposes we want to keep track of the minimum
+      // timestamp that is currently being stored, since this will be used to hold-up the watermark.
+      Instant old = tagTimestamps.put(tag, timestamp);
+      if (old != null) {
+        minTagTimestamp.remove(old);
+      }
+      minTagTimestamp.add(timestamp);
     }
 
     @Override
     public <T> void remove(CodedTupleTag<T> tag) {
       tagValues.remove(tag);
+      minTagTimestamp.remove(tagTimestamps.remove(tag));
     }
 
     @Override
@@ -309,7 +361,7 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
 
     @SuppressWarnings("unchecked")
     @Override
-    public CodedTupleTagMap lookup(List<? extends CodedTupleTag<?>> tags) throws IOException {
+    public CodedTupleTagMap lookup(Iterable<? extends CodedTupleTag<?>> tags) throws IOException {
       LinkedHashMap<CodedTupleTag<?>, Object> result = new LinkedHashMap<>();
       for (CodedTupleTag<?> tag : tags) {
         result.put(tag, tagValues.get(tag));
@@ -381,4 +433,5 @@ public class TriggerTester<VI, VO, W extends BoundedWindow> {
       return windows;
     }
   }
+
 }

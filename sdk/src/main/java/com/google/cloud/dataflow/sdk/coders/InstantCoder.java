@@ -25,7 +25,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * A InstantCoder encodes joda Instant.
+ * A {@code InstantCoder} is a {@link Coder} for a joda {@link Instant}.
  */
 @SuppressWarnings("serial")
 public class InstantCoder extends AtomicCoder<Instant> {
@@ -54,15 +54,6 @@ public class InstantCoder extends AtomicCoder<Instant> {
       throws CoderException, IOException {
       return new Instant(BigEndianLongCoder.of().decode(inStream, context) + Long.MIN_VALUE);
   }
-
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return true;
-  }
-
-  @Override
-  public void verifyDeterministic() { }
 
   @Override
   public boolean consistentWithEquals() {

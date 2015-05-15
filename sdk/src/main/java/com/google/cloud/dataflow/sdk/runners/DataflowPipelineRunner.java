@@ -16,11 +16,14 @@
 
 package com.google.cloud.dataflow.sdk.runners;
 
+import static com.google.cloud.dataflow.sdk.PipelineResult.State;
+
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.util.Joiner;
 import com.google.api.services.dataflow.Dataflow;
 import com.google.api.services.dataflow.model.DataflowPackage;
 import com.google.api.services.dataflow.model.Job;
+import com.google.api.services.dataflow.model.ListJobsResponse;
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
@@ -140,20 +143,15 @@ public class DataflowPipelineRunner extends PipelineRunner<DataflowPipelineJob> 
 
   @Override
   @SuppressWarnings("unchecked")
-  public <Output extends POutput, Input extends PInput> Output apply(
-      PTransform<Input, Output> transform, Input input) {
-    if (transform instanceof Combine.GroupedValues) {
+  public <OutputT extends POutput, InputT extends PInput> OutputT apply(
+      PTransform<InputT, OutputT> transform, InputT input) {
+    if (transform instanceof Combine.GroupedValues || transform instanceof GroupByKey) {
       // TODO: Redundant with translator registration?
-      return (Output) PCollection.createPrimitiveOutputInternal(
+      return (OutputT) PCollection.createPrimitiveOutputInternal(
+          input.getPipeline(),
           ((PCollection<?>) input).getWindowingStrategy());
-    } else if (transform instanceof GroupByKey) {
-      // The DataflowPipelineRunner implementation of GroupByKey will sort values by timestamp,
-      // so no need for an explicit sort transform.
-      boolean runnerSortsByTimestamp = true;
-      return (Output) ((GroupByKey) transform).applyHelper(
-          (PCollection<?>) input, options.isStreaming(), runnerSortsByTimestamp);
     } else if (transform instanceof Create) {
-      return (Output) ((Create) transform).applyHelper(input, options.isStreaming());
+      return (OutputT) ((Create) transform).applyHelper(input, options.isStreaming());
     } else {
       return super.apply(transform, input);
     }
@@ -212,11 +210,20 @@ public class DataflowPipelineRunner extends PipelineRunner<DataflowPipelineJob> 
       }
     }
 
+    String reloadJobId = null;
+    if (options.getReload()) {
+      reloadJobId = getJobIdFromName(options.getJobName());
+    }
+
     Job jobResult;
     try {
-      jobResult = dataflowClient.v1b3().projects().jobs()
-          .create(options.getProject(), newJob)
-          .execute();
+      Dataflow.V1b3.Projects.Jobs.Create createRequest =
+          dataflowClient.v1b3().projects().jobs()
+          .create(options.getProject(), newJob);
+      if (reloadJobId != null) {
+        createRequest.setReplaceJobId(reloadJobId);
+      }
+      jobResult = createRequest.execute();
     } catch (GoogleJsonResponseException e) {
       throw new RuntimeException(
           "Failed to create a workflow job: "
@@ -254,7 +261,9 @@ public class DataflowPipelineRunner extends PipelineRunner<DataflowPipelineJob> 
   /////////////////////////////////////////////////////////////////////////////
 
   @Override
-  public String toString() { return "DataflowPipelineRunner#" + hashCode(); }
+  public String toString() {
+    return "DataflowPipelineRunner#" + hashCode();
+  }
 
   /**
    * Attempts to detect all the resources the class loader has access to. This does not recurse
@@ -284,5 +293,36 @@ public class DataflowPipelineRunner extends PipelineRunner<DataflowPipelineJob> 
       }
     }
     return files;
+  }
+
+  /**
+   * Finds the id for the running job of the given name.
+   */
+  private String getJobIdFromName(String jobName) {
+    try {
+      ListJobsResponse listResult;
+      String token = null;
+      do {
+        listResult = dataflowClient.v1b3().projects().jobs()
+            .list(options.getProject())
+            .setPageToken(token)
+            .execute();
+        token = listResult.getNextPageToken();
+        for (Job job : listResult.getJobs()) {
+          if (job.getName().equals(jobName)
+              && MonitoringUtil.toState(job.getCurrentState()).equals(State.RUNNING)) {
+            return job.getId();
+          }
+        }
+      } while (token != null);
+    } catch (GoogleJsonResponseException e) {
+      throw new RuntimeException(
+          "Got error while looking up jobs: "
+          + (e.getDetails() != null ? e.getDetails().getMessage() : e), e);
+    } catch (IOException e) {
+      throw new RuntimeException("Got error while looking up jobs: ", e);
+    }
+
+    throw new IllegalArgumentException("Could not find running job named " + jobName);
   }
 }

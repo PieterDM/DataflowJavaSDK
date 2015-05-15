@@ -16,22 +16,23 @@
 
 package com.google.cloud.dataflow.sdk.coders;
 
+import com.google.cloud.dataflow.sdk.util.ExposedByteArrayOutputStream;
+import com.google.cloud.dataflow.sdk.util.StreamUtils;
 import com.google.cloud.dataflow.sdk.util.VarInt;
 import com.google.cloud.dataflow.sdk.util.common.worker.PartialGroupByKeyOperation.StructuralByteArray;
 import com.google.common.io.ByteStreams;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * A ByteArrayCoder encodes byte[] objects.
+ * A {@code ByteArrayCoder} encodes {@code byte[]} objects.
  *
- * <p> If in a nested context, prefixes the encoded array with a VarInt encoding
- * of the length.
+ * <p> If in a nested context, prefixes the encoded array with its
+ * length, encoded via a {@link VarIntCoder}.
  */
 @SuppressWarnings("serial")
 public class ByteArrayCoder extends AtomicCoder<byte[]> {
@@ -55,17 +56,21 @@ public class ByteArrayCoder extends AtomicCoder<byte[]> {
     }
     if (!context.isWholeStream) {
       VarInt.encode(value.length, outStream);
+      outStream.write(value);
+    } else {
+      if (outStream instanceof ExposedByteArrayOutputStream) {
+        ((ExposedByteArrayOutputStream) outStream).writeAndOwn(value);
+      } else {
+        outStream.write(value);
+      }
     }
-    outStream.write(value);
   }
 
   @Override
   public byte[] decode(InputStream inStream, Context context)
       throws IOException, CoderException {
     if (context.isWholeStream) {
-      ByteArrayOutputStream outStream = new ByteArrayOutputStream();
-      ByteStreams.copy(inStream, outStream);
-      return outStream.toByteArray();
+      return StreamUtils.getBytes(inStream);
     } else {
       int length = VarInt.decodeInt(inStream);
       if (length < 0) {
@@ -75,11 +80,6 @@ public class ByteArrayCoder extends AtomicCoder<byte[]> {
       ByteStreams.readFully(inStream, value);
       return value;
     }
-  }
-
-  @Override
-  public boolean isDeterministic() {
-    return true;
   }
 
   @Override

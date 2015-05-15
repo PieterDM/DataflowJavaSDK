@@ -102,7 +102,7 @@ public class GcsPath implements Path {
    * <p> This is used to separate the components.  Verification is handled
    * separately.
    */
-  private static final Pattern GCS_URI =
+  public static final Pattern GCS_URI =
       Pattern.compile("(?<SCHEME>[^:]+)://(?<BUCKET>[^/]+)(/(?<OBJECT>.*))?");
 
   /**
@@ -386,7 +386,9 @@ public class GcsPath implements Path {
 
   // TODO: support "." and ".." path components?
   @Override
-  public GcsPath normalize() { return this; }
+  public GcsPath normalize() {
+    return this;
+  }
 
   @Override
   public GcsPath resolve(Path other) {

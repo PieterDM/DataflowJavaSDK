@@ -22,12 +22,17 @@ import static com.google.cloud.dataflow.sdk.TestUtils.LINES_ARRAY;
 import static com.google.cloud.dataflow.sdk.TestUtils.NO_LINES;
 import static com.google.cloud.dataflow.sdk.TestUtils.NO_LINES_ARRAY;
 
+import static org.hamcrest.Matchers.isA;
+import static org.hamcrest.core.StringContains.containsString;
+
 import com.google.cloud.dataflow.sdk.Pipeline;
+import com.google.cloud.dataflow.sdk.coders.CannotProvideCoderException;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.IterableCoder;
 import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
+import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.transforms.windowing.FixedWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Sessions;
@@ -36,15 +41,21 @@ import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PCollectionList;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
 
+import org.hamcrest.BaseMatcher;
+import org.hamcrest.Description;
+import org.hamcrest.Matcher;
 import org.joda.time.Duration;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -54,41 +65,47 @@ import java.util.List;
 @SuppressWarnings("serial")
 public class FlattenTest implements Serializable {
 
+  @Rule
+  public transient ExpectedException thrown = ExpectedException.none();
+
+  private static class ClassWithoutCoder { }
+
+
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testFlattenPCollectionList() {
     Pipeline p = TestPipeline.create();
 
-    List<String>[] inputs = new List[] {
-      LINES, NO_LINES, LINES2, NO_LINES, LINES, NO_LINES };
+    List<List<String>> inputs = Arrays.asList(
+      LINES, NO_LINES, LINES2, NO_LINES, LINES, NO_LINES);
 
     PCollection<String> output =
         makePCollectionListOfStrings(p, inputs)
         .apply(Flatten.<String>pCollections());
 
-    DataflowAssert.that(output).containsInAnyOrder(flatten(inputs));
+    DataflowAssert.that(output).containsInAnyOrder(flattenLists(inputs));
     p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testFlattenPCollectionListThenParDo() {
     Pipeline p = TestPipeline.create();
 
-    List<String>[] inputs = new List[] {
-      LINES, NO_LINES, LINES2, NO_LINES, LINES, NO_LINES };
+    List<List<String>> inputs = Arrays.asList(
+      LINES, NO_LINES, LINES2, NO_LINES, LINES, NO_LINES);
 
     PCollection<String> output =
         makePCollectionListOfStrings(p, inputs)
         .apply(Flatten.<String>pCollections())
         .apply(ParDo.of(new IdentityFn<String>(){}));
 
-    DataflowAssert.that(output).containsInAnyOrder(flatten(inputs));
+    DataflowAssert.that(output).containsInAnyOrder(flattenLists(inputs));
     p.run();
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testFlattenPCollectionListEmpty() {
     Pipeline p = TestPipeline.create();
 
@@ -101,7 +118,7 @@ public class FlattenTest implements Serializable {
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testEmptyFlattenAsSideInput() {
     Pipeline p = TestPipeline.create();
 
@@ -128,7 +145,7 @@ public class FlattenTest implements Serializable {
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testFlattenPCollectionListEmptyThenParDo() {
 
     Pipeline p = TestPipeline.create();
@@ -142,11 +159,54 @@ public class FlattenTest implements Serializable {
     p.run();
   }
 
+  private static class HasMessageMatcher extends BaseMatcher<Throwable>
+      implements Matcher<Throwable>{
+
+    private final Matcher<String> messageMatcher;
+
+    public HasMessageMatcher(Matcher<String> messageMatcher) {
+      this.messageMatcher = messageMatcher;
+    }
+
+    @Override
+    public boolean matches(Object item) {
+      return (item instanceof Throwable) && matches((Throwable) item);
+    }
+
+    public boolean matches(Throwable item) {
+      return messageMatcher.matches(item.getMessage());
+    }
+
+    @Override
+    public void describeTo(Description description) {
+      description.appendText("where getMessage() is ");
+      description.appendDescriptionOf(messageMatcher);
+    }
+  }
+
+  private static Matcher<Throwable> hasMessage(Matcher<String> messageMatcher) {
+    return new HasMessageMatcher(messageMatcher);
+  }
+
+  @Test
+  public void testFlattenNoListsNoCoder() {
+    // not RunnableOnService because it should fail at pipeline construction time anyhow.
+    thrown.expect(IllegalStateException.class);
+    thrown.expectCause(isA(CannotProvideCoderException.class));
+    thrown.expectCause(hasMessage(containsString("cannot provide a Coder for empty")));
+
+    Pipeline p = TestPipeline.create();
+
+    PCollectionList.<ClassWithoutCoder>empty(p)
+        .apply(Flatten.<ClassWithoutCoder>pCollections());
+
+    p.run();
+  }
 
   /////////////////////////////////////////////////////////////////////////////
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testFlattenIterables() {
     Pipeline p = TestPipeline.create();
 
@@ -164,7 +224,7 @@ public class FlattenTest implements Serializable {
   }
 
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testFlattenIterablesEmpty() {
     Pipeline p = TestPipeline.create();
 
@@ -202,7 +262,7 @@ public class FlattenTest implements Serializable {
     p.run();
 
     Assert.assertTrue(output.getWindowingStrategy().getWindowFn().isCompatible(
-        FixedWindows.<String>of(Duration.standardMinutes(1))));
+        FixedWindows.of(Duration.standardMinutes(1))));
   }
 
   @Test
@@ -223,7 +283,7 @@ public class FlattenTest implements Serializable {
     p.run();
 
     Assert.assertTrue(output.getWindowingStrategy().getWindowFn().isCompatible(
-        Sessions.<String>withGapDuration(Duration.standardMinutes(2))));
+        Sessions.withGapDuration(Duration.standardMinutes(2))));
   }
 
   @Test
@@ -238,8 +298,7 @@ public class FlattenTest implements Serializable {
         .apply(Window.<String>into(FixedWindows.of(Duration.standardMinutes(2))));
 
     try {
-      PCollection<String> output =
-          PCollectionList.of(input1).and(input2)
+      PCollectionList.of(input1).and(input2)
           .apply(Flatten.<String>pCollections());
       Assert.fail("Exception should have been thrown");
     } catch (IllegalStateException e) {
@@ -260,14 +319,14 @@ public class FlattenTest implements Serializable {
 
   private PCollectionList<String> makePCollectionListOfStrings(
       Pipeline p,
-      List<String>... lists) {
+      List<List<String>> lists) {
     return makePCollectionList(p, StringUtf8Coder.of(), lists);
   }
 
   private <T> PCollectionList<T> makePCollectionList(
       Pipeline p,
       Coder<T> coder,
-      List<T>... lists) {
+      List<List<T>> lists) {
     List<PCollection<T>> pcs = new ArrayList<>();
     for (List<T> list : lists) {
       PCollection<T> pc = p.apply(Create.of(list)).setCoder(coder);
@@ -276,11 +335,11 @@ public class FlattenTest implements Serializable {
     return PCollectionList.of(pcs);
   }
 
-  private <T> T[] flatten(List<T>... lists) {
+  private <T> List<T> flattenLists(List<List<T>> lists) {
     List<T> flattened = new ArrayList<>();
     for (List<T> list : lists) {
       flattened.addAll(list);
     }
-    return flattened.toArray((T[]) new Object[flattened.size()]);
+    return flattened;
   }
 }

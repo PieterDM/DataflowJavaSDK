@@ -51,7 +51,55 @@ import java.util.NoSuchElementException;
 /**
  * Transforms for creating {@link PCollectionView}s from {@link PCollection}s,
  * for consuming the contents of those {@link PCollection}s as side inputs
- * to {@link ParDo} transforms.
+ * to {@link ParDo} transforms. These transforms support viewing a {@link PCollection}
+ * as a single value, an iterable, a map, or a multimap.
+ *
+ * <p> For a {@link PCollection} that contains a single value of type {@code T}
+ * per window, such as the output of {@link Combine#globally},
+ * use {@link View#asSingleton()} to prepare it for use as a side input:
+ *
+ * <pre>
+ * {@code
+ * PCollectionView<T> output = someOtherPCollection
+ *     .apply(Combine.globally(...))
+ *     .apply(View.asSingleton());
+ * }
+ * </pre>
+ *
+ * <p> To iterate over an entire window of a {@link PCollection} via
+ * side input, use {@link View#asIterable()}:
+ *
+ * <pre>
+ * {@code
+ * PCollectionView<Iterable<T>> output =
+ *     somePCollection.apply(View.asIterable());
+ * }
+ * </pre>
+ *
+ * <p> To access a {@link PCollection PCollection<K, V>} as a
+ * {@code Map<K, Iterable<V>>} side input, use {@link View#asMap()}:
+ *
+ * <pre>
+ * {@code
+ * PCollectionView<Map<K, Iterable<V>> output =
+ *     somePCollection.apply(View.asMap());
+ * }
+ * </pre>
+ *
+ * <p> If a {@link PCollection PCollection<K, V>} is known to
+ * have a single value for each key, then use
+ * {@code View.AsMultimap#withSingletonValues View.asMap().withSingletonValues()}
+ * to view it as a {@code Map<K, V>}:
+ *
+ * <pre>
+ * {@code
+ * PCollectionView<Map<K, V> output =
+ *     somePCollection.apply(View.asMap().withSingletonValues());
+ * }
+ * </pre>
+ *
+ * <p> See {@link ParDo#withSideInputs} for details on how to access
+ * this variable inside a {@link ParDo} over another {@link PCollection}.
  */
 public class View {
 
@@ -76,9 +124,22 @@ public class View {
   }
 
   /**
+   * Returns a transform that takes a {@link PCollection} and returns a
+   * {@code List} containing all of its elements, to be consumed as
+   * a side input.
+   *
+   * <p> The resulting list is required to fit in memory.
+   */
+  public static <T> PTransform<PCollection<T>, PCollectionView<List<T>>> asList() {
+    return Combine.globally(new Concatenate<T>()).asSingletonView();
+  }
+
+  /**
    * Returns a {@link AsIterable} that takes a
    * {@link PCollection} as input and produces a {@link PCollectionView}
-   * of the values, to be consumed as an iterable side input.
+   * of the values, to be consumed as an iterable side input.  The values of
+   * this {@code Iterable} may not be cached; if that behavior is desired, use
+   * {@link #asList}.
    */
   public static <T> AsIterable<T> asIterable() {
     return new AsIterable<>();
@@ -111,7 +172,8 @@ public class View {
     public PCollectionView<Iterable<T>> apply(
         PCollection<T> input) {
       if (input.getPipeline().getOptions().as(StreamingOptions.class).isStreaming()) {
-        return input.apply(Combine.globally(new Concatenate<T>()).asSingletonView());
+        return input.apply((Combine.GloballyAsSingletonView<T, Iterable<T>>)
+            Combine.globally(new Concatenate()).asSingletonView());
       } else {
         return input.apply(
             new CreatePCollectionView<T, Iterable<T>>(
@@ -197,12 +259,13 @@ public class View {
     }
 
     /**
-     * Returns a PTransform creating a view as a {@code Map<K, VO>} rather than a
+     * Returns a PTransform creating a view as a {@code Map<K, OutputT>} rather than a
      * {@code Map<K, Iterable<V>>} by applying the given combiner to the set of
      * values associated with each key.
      */
-    public <VO> AsSingletonMap<K, V, VO> withCombiner(CombineFn<V, ?, VO> combineFn) {
-      return new AsSingletonMap<K, V, VO>(combineFn);
+    public <OutputT> AsSingletonMap<K, V, OutputT>
+        withCombiner(CombineFn<V, ?, OutputT> combineFn) {
+      return new AsSingletonMap<K, V, OutputT>(combineFn);
     }
 
     @Override
@@ -230,33 +293,34 @@ public class View {
    *
    * <p> Instantiate via {@link View#asMap}.
    */
-  public static class AsSingletonMap<K, VI, VO>
-      extends PTransform<PCollection<KV<K, VI>>, PCollectionView<Map<K, VO>>> {
+  public static class AsSingletonMap<K, InputT, OutputT>
+      extends PTransform<PCollection<KV<K, InputT>>, PCollectionView<Map<K, OutputT>>> {
     private static final long serialVersionUID = 0;
 
-    private CombineFn<VI, ?, VO> combineFn;
+    private CombineFn<InputT, ?, OutputT> combineFn;
 
-    private AsSingletonMap(CombineFn<VI, ?, VO> combineFn) {
+    private AsSingletonMap(CombineFn<InputT, ?, OutputT> combineFn) {
       this.combineFn = combineFn;
     }
 
     @Override
-    public PCollectionView<Map<K, VO>> apply(PCollection<KV<K, VI>> input) {
-      // VI == VO if combineFn is null
+    public PCollectionView<Map<K, OutputT>> apply(PCollection<KV<K, InputT>> input) {
+      // InputT == OutputT if combineFn is null
       @SuppressWarnings("unchecked")
-      PCollection<KV<K, VO>> combined =
+      PCollection<KV<K, OutputT>> combined =
         combineFn == null
         ? (PCollection) input
         : input.apply(Combine.perKey(combineFn.<K>asKeyedFn()));
 
-      MapPCollectionView<K, VO> view = new MapPCollectionView<K, VO>(
+      MapPCollectionView<K, OutputT> view = new MapPCollectionView<K, OutputT>(
           input.getPipeline(), combined.getWindowingStrategy(), combined.getCoder());
 
-      CreatePCollectionView<KV<K, VO>, Map<K, VO>> createView = new CreatePCollectionView<>(view);
+      CreatePCollectionView<KV<K, OutputT>, Map<K, OutputT>> createView =
+          new CreatePCollectionView<>(view);
 
       if (combined.getPipeline().getOptions().as(StreamingOptions.class).isStreaming()) {
         return combined
-            .apply(Combine.globally(new Concatenate<KV<K, VO>>()).withoutDefaults())
+            .apply(Combine.globally(new Concatenate<KV<K, OutputT>>()).withoutDefaults())
             .apply(ParDo.of(StreamingPCollectionViewWriterFn.create(view, combined.getCoder())))
             .apply(createView);
       } else {
@@ -269,12 +333,12 @@ public class View {
   // Internal details below
 
   /**
-   * Combiner that combines {@code T}s into a single {@code Iterable<T>} containing
+   * Combiner that combines {@code T}s into a single {@code List<T>} containing
    * all inputs.
    *
    * @param <T> the type of elements to concatenate.
    */
-  private static class Concatenate<T> extends CombineFn<T, List<T>, Iterable<T>> {
+  private static class Concatenate<T> extends CombineFn<T, List<T>, List<T>> {
     private static final long serialVersionUID = 0;
 
     @Override
@@ -298,7 +362,7 @@ public class View {
     }
 
     @Override
-    public Iterable<T> extractOutput(List<T> accumulator) {
+    public List<T> extractOutput(List<T> accumulator) {
       return accumulator;
     }
 
@@ -306,28 +370,33 @@ public class View {
     public Coder<List<T>> getAccumulatorCoder(CoderRegistry registry, Coder<T> inputCoder) {
       return ListCoder.of(inputCoder);
     }
+
+    @Override
+    public Coder<List<T>> getDefaultOutputCoder(CoderRegistry registry, Coder<T> inputCoder) {
+      return ListCoder.of(inputCoder);
+    }
   }
 
   /**
-   * Creates a primitive PCollectionView.
+   * Creates a primitive {@link PCollectionView}.
    *
    * <p> For internal use only.
    *
-   * @param <R> The type of the elements of the input PCollection
-   * @param <T> The type associated with the PCollectionView used as a side input
+   * @param <ElemT> The type of the elements of the input PCollection
+   * @param <ViewT> The type associated with the {@link PCollectionView} used as a side input
    */
-  public static class CreatePCollectionView<R, T>
-      extends PTransform<PCollection<R>, PCollectionView<T>> {
+  public static class CreatePCollectionView<ElemT, ViewT>
+      extends PTransform<PCollection<ElemT>, PCollectionView<ViewT>> {
     private static final long serialVersionUID = 0;
 
-    private PCollectionView<T> view;
+    private PCollectionView<ViewT> view;
 
-    public CreatePCollectionView(PCollectionView<T> view) {
+    public CreatePCollectionView(PCollectionView<ViewT> view) {
       this.view = view;
     }
 
     @Override
-    public PCollectionView<T> apply(PCollection<R> input) {
+    public PCollectionView<ViewT> apply(PCollection<ElemT> input) {
       return view;
     }
 
@@ -342,10 +411,10 @@ public class View {
               evaluateTyped(transform, context);
             }
 
-            private <R, T> void evaluateTyped(
-                CreatePCollectionView<R, T> transform,
+            private <ElemT, ViewT> void evaluateTyped(
+                CreatePCollectionView<ElemT, ViewT> transform,
                 DirectPipelineRunner.EvaluationContext context) {
-              List<WindowedValue<R>> elems =
+              List<WindowedValue<ElemT>> elems =
                   context.getPCollectionWindowedValues(context.getInput(transform));
               context.setPCollectionView(context.getOutput(transform), elems);
             }
@@ -363,8 +432,7 @@ public class View {
     public SingletonPCollectionView(
         Pipeline pipeline, WindowingStrategy<?, ?> windowingStrategy,
         boolean hasDefault, T defaultValue, Coder<T> valueCoder) {
-      super(windowingStrategy, valueCoder);
-      setPipelineInternal(pipeline);
+      super(pipeline, windowingStrategy, valueCoder);
       this.defaultValue = defaultValue;
       this.valueCoder = valueCoder;
       if (hasDefault) {
@@ -409,8 +477,7 @@ public class View {
 
     public IterablePCollectionView(
         Pipeline pipeline, WindowingStrategy<?, ?> windowingStrategy, Coder<T> valueCoder) {
-      super(windowingStrategy, valueCoder);
-      setPipelineInternal(pipeline);
+      super(pipeline, windowingStrategy, valueCoder);
     }
 
     @Override
@@ -431,8 +498,7 @@ public class View {
 
     public MultimapPCollectionView(
         Pipeline pipeline, WindowingStrategy<?, ?> windowingStrategy, Coder<KV<K, V>> valueCoder) {
-      super(windowingStrategy, valueCoder);
-      setPipelineInternal(pipeline);
+      super(pipeline, windowingStrategy, valueCoder);
     }
 
     @Override
@@ -454,8 +520,7 @@ public class View {
 
     public MapPCollectionView(
         Pipeline pipeline, WindowingStrategy<?, ?> windowingStrategy, Coder<KV<K, V>> valueCoder) {
-      super(windowingStrategy, valueCoder);
-      setPipelineInternal(pipeline);
+      super(pipeline, windowingStrategy, valueCoder);
     }
 
     @Override
@@ -477,7 +542,18 @@ public class View {
       implements PCollectionView<T> {
     private static final long serialVersionUID = 0;
 
-    PCollectionViewBase(WindowingStrategy<?, ?> windowingStrategy, Coder<?> valueCoder) {
+    // for serialization only
+    protected PCollectionViewBase() {
+      super();
+    }
+
+    protected PCollectionViewBase(
+        Pipeline pipeline,
+        WindowingStrategy<?, ?> windowingStrategy,
+        Coder<?> valueCoder) {
+
+      super(pipeline);
+
       if (windowingStrategy.getWindowFn() instanceof InvalidWindows) {
         throw new IllegalArgumentException("WindowFn of PCollectionView cannot be InvalidWindows");
       }

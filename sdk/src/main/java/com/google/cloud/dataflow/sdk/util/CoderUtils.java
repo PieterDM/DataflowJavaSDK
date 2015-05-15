@@ -26,6 +26,7 @@ import com.google.cloud.dataflow.sdk.coders.KvCoder;
 import com.google.cloud.dataflow.sdk.coders.KvCoderBase;
 import com.google.cloud.dataflow.sdk.coders.MapCoder;
 import com.google.cloud.dataflow.sdk.coders.MapCoderBase;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.annotation.JsonTypeInfo.As;
@@ -40,6 +41,8 @@ import com.fasterxml.jackson.databind.type.TypeFactory;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.ref.SoftReference;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.TypeVariable;
 
 /**
@@ -58,19 +61,30 @@ public final class CoderUtils {
    */
   public static final String KIND_STREAM = "kind:stream";
 
+  private static ThreadLocal<SoftReference<ExposedByteArrayOutputStream>> threadLocalOutputStream
+      = new ThreadLocal<>();
+
   /**
    * Encodes the given value using the specified Coder, and returns
    * the encoded bytes.
-   *
-   * @throws CoderException if there are errors during encoding
+   * This function is non-reentrant due to the use of ThreadLocal.
    */
-  public static <T> byte[] encodeToByteArray(Coder<T> coder, T value)
+  public static <T> byte[] encodeToByteArray(Coder<T> coder, T value) throws CoderException{
+    return encodeToByteArray(coder, value, Coder.Context.OUTER);
+  }
+
+  public static <T> byte[] encodeToByteArray(Coder<T> coder, T value, Coder.Context context)
       throws CoderException {
     try {
-      try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
-        coder.encode(value, os, Coder.Context.OUTER);
-        return os.toByteArray();
+      SoftReference<ExposedByteArrayOutputStream> refStream = threadLocalOutputStream.get();
+      ExposedByteArrayOutputStream stream = refStream == null ? null : refStream.get();
+      if (stream == null) {
+        stream = new ExposedByteArrayOutputStream();
+        threadLocalOutputStream.set(new SoftReference<>(stream));
       }
+      stream.reset();
+      coder.encode(value, stream, context);
+      return stream.toByteArray();
     } catch (IOException exn) {
       throw new RuntimeException("unexpected IOException", exn);
     }
@@ -79,14 +93,17 @@ public final class CoderUtils {
   /**
    * Decodes the given bytes using the specified Coder, and returns
    * the resulting decoded value.
-   *
-   * @throws CoderException if there are errors during decoding
    */
   public static <T> T decodeFromByteArray(Coder<T> coder, byte[] encodedValue)
       throws CoderException {
+    return decodeFromByteArray(coder, encodedValue, Coder.Context.OUTER);
+  }
+
+  public static <T> T decodeFromByteArray(
+      Coder<T> coder, byte[] encodedValue, Coder.Context context) throws CoderException {
     try {
-      try (ByteArrayInputStream is = new ByteArrayInputStream(encodedValue)) {
-        T result = coder.decode(is, Coder.Context.OUTER);
+      try (ByteArrayInputStream is = new ExposedByteArrayInputStream(encodedValue)) {
+        T result = coder.decode(is, context);
         if (is.available() != 0) {
           throw new CoderException(
               is.available() + " unexpected extra bytes after decoding " +
@@ -129,6 +146,18 @@ public final class CoderUtils {
     }
   }
 
+  /**
+   * If {@code coderType} is a subclass of {@link Coder<T>} for a fixed T,
+   * returns {@code T.class}.
+   */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public static TypeDescriptor getCodedType(TypeDescriptor coderDescriptor) {
+    ParameterizedType coderType =
+        (ParameterizedType) coderDescriptor.getSupertype(Coder.class).getType();
+    TypeDescriptor codedType = TypeDescriptor.of(coderType.getActualTypeArguments()[0]);
+    return codedType;
+  }
+
   public static CloudObject makeCloudEncoding(
       String type,
       CloudObject... componentSpecs) {
@@ -169,6 +198,7 @@ public final class CoderUtils {
         if (clazz == MapCoder.class) {
           clazz = MapCoderBase.class;
         }
+        @SuppressWarnings("rawtypes")
         TypeVariable[] tvs = clazz.getTypeParameters();
         JavaType[] types = new JavaType[tvs.length];
         for (int lupe = 0; lupe < tvs.length; lupe++) {

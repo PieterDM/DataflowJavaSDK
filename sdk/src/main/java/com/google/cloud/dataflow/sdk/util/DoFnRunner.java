@@ -21,12 +21,11 @@ import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.IterableCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.transforms.Aggregator;
-import com.google.cloud.dataflow.sdk.transforms.Combine;
+import com.google.cloud.dataflow.sdk.transforms.Combine.CombineFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.RequiresKeyedState;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.RequiresWindowAccess;
-import com.google.cloud.dataflow.sdk.transforms.SerializableFunction;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
@@ -35,8 +34,8 @@ import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
 import com.google.cloud.dataflow.sdk.util.ExecutionContext.StepContext;
 import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
+import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
-import com.google.cloud.dataflow.sdk.values.TimestampedValue;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
@@ -54,35 +53,35 @@ import java.util.Map;
 /**
  * Runs a DoFn by constructing the appropriate contexts and passing them in.
  *
- * @param <I> the type of the DoFn's (main) input elements
- * @param <O> the type of the DoFn's (main) output elements
- * @param <R> the type of object that receives outputs
+ * @param <InputT> the type of the DoFn's (main) input elements
+ * @param <OutputT> the type of the DoFn's (main) output elements
+ * @param <ReceiverT> the type of object that receives outputs
  */
-public class DoFnRunner<I, O, R> {
+public class DoFnRunner<InputT, OutputT, ReceiverT> {
 
   /** Information about how to create output receivers and output to them. */
-  public interface OutputManager<R> {
+  public interface OutputManager<ReceiverT> {
 
     /** Returns the receiver to use for a given tag. */
-    public R initialize(TupleTag<?> tag);
+    public ReceiverT initialize(TupleTag<?> tag);
 
     /** Outputs a single element to the provided receiver. */
-    public void output(R receiver, WindowedValue<?> output);
+    public void output(ReceiverT receiver, WindowedValue<?> output);
 
   }
 
   /** The DoFn being run. */
-  public final DoFn<I, O> fn;
+  public final DoFn<InputT, OutputT> fn;
 
   /** The context used for running the DoFn. */
-  public final DoFnContext<I, O, R> context;
+  public final DoFnContext<InputT, OutputT, ReceiverT> context;
 
   DoFnRunner(
       PipelineOptions options,
-      DoFn<I, O> fn,
+      DoFn<InputT, OutputT> fn,
       PTuple sideInputs,
-      OutputManager<R> outputManager,
-      TupleTag<O> mainOutputTag,
+      OutputManager<ReceiverT> outputManager,
+      TupleTag<OutputT> mainOutputTag,
       List<TupleTag<?>> sideOutputTags,
       StepContext stepContext,
       CounterSet.AddCounterMutator addCounterMutator,
@@ -93,12 +92,12 @@ public class DoFnRunner<I, O, R> {
         addCounterMutator, windowingStrategy == null ? null : windowingStrategy.getWindowFn());
   }
 
-  public static <I, O, R> DoFnRunner<I, O, R> create(
+  public static <InputT, OutputT, ReceiverT> DoFnRunner<InputT, OutputT, ReceiverT> create(
       PipelineOptions options,
-      DoFn<I, O> fn,
+      DoFn<InputT, OutputT> fn,
       PTuple sideInputs,
-      OutputManager<R> outputManager,
-      TupleTag<O> mainOutputTag,
+      OutputManager<ReceiverT> outputManager,
+      TupleTag<OutputT> mainOutputTag,
       List<TupleTag<?>> sideOutputTags,
       StepContext stepContext,
       CounterSet.AddCounterMutator addCounterMutator,
@@ -109,11 +108,11 @@ public class DoFnRunner<I, O, R> {
   }
 
   @SuppressWarnings({"rawtypes", "unchecked"})
-  public static <I, O> DoFnRunner<I, O, List> createWithListOutputs(
+  public static <InputT, OutputT> DoFnRunner<InputT, OutputT, List> createWithListOutputs(
       PipelineOptions options,
-      DoFn<I, O> fn,
+      DoFn<InputT, OutputT> fn,
       PTuple sideInputs,
-      TupleTag<O> mainOutputTag,
+      TupleTag<OutputT> mainOutputTag,
       List<TupleTag<?>> sideOutputTags,
       StepContext stepContext,
       CounterSet.AddCounterMutator addCounterMutator,
@@ -149,10 +148,10 @@ public class DoFnRunner<I, O, R> {
    * Calls {@link DoFn#processElement} with a ProcessContext containing
    * the current element.
    */
-  public void processElement(WindowedValue<I> elem) {
-    if (elem.getWindows().size() == 1
-        || !RequiresWindowAccess.class.isAssignableFrom(fn.getClass())
-        || !context.sideInputs.getAll().isEmpty()) {
+  public void processElement(WindowedValue<InputT> elem) {
+    if (elem.getWindows().size() <= 1
+        || (!RequiresWindowAccess.class.isAssignableFrom(fn.getClass())
+            && context.sideInputs.getAll().isEmpty())) {
       invokeProcessElement(elem);
     } else {
       // We could modify the windowed value (and the processContext) to
@@ -164,8 +163,8 @@ public class DoFnRunner<I, O, R> {
     }
   }
 
-  protected void invokeProcessElement(WindowedValue<I> elem) {
-    DoFn<I, O>.ProcessContext processContext = createProcessContext(elem);
+  protected void invokeProcessElement(WindowedValue<InputT> elem) {
+    DoFn<InputT, OutputT>.ProcessContext processContext = createProcessContext(elem);
     // This can contain user code. Wrap it in case it throws an exception.
     try {
       fn.processElement(processContext);
@@ -189,37 +188,38 @@ public class DoFnRunner<I, O, R> {
   }
 
   /** Returns the receiver who gets outputs with the provided tag. */
-  public R getReceiver(TupleTag<?> tag) {
+  public ReceiverT getReceiver(TupleTag<?> tag) {
     return context.getReceiver(tag);
   }
 
   /**
-   * A concrete implementation of {@link DoFn<I, O>.Context} used for running
+   * A concrete implementation of {@link DoFn<InputT, OutputT>.Context} used for running
    * a {@link DoFn}.
    *
-   * @param <I> the type of the DoFn's (main) input elements
-   * @param <O> the type of the DoFn's (main) output elements
+   * @param <InputT> the type of the DoFn's (main) input elements
+   * @param <OutputT> the type of the DoFn's (main) output elements
    * @param <R> the type of object that receives outputs
    */
-  private static class DoFnContext<I, O, R> extends DoFn<I, O>.Context {
+  private static class DoFnContext<InputT, OutputT, ReceiverT>
+      extends DoFn<InputT, OutputT>.Context {
     private static final int MAX_SIDE_OUTPUTS = 1000;
 
     final PipelineOptions options;
-    final DoFn<I, O> fn;
+    final DoFn<InputT, OutputT> fn;
     final PTuple sideInputs;
     final Map<TupleTag<?>, Map<BoundedWindow, Object>> sideInputCache;
-    final OutputManager<R> outputManager;
-    final Map<TupleTag<?>, R> outputMap;
-    final TupleTag<O> mainOutputTag;
+    final OutputManager<ReceiverT> outputManager;
+    final Map<TupleTag<?>, ReceiverT> outputMap;
+    final TupleTag<OutputT> mainOutputTag;
     final StepContext stepContext;
     final CounterSet.AddCounterMutator addCounterMutator;
     final WindowFn windowFn;
 
     public DoFnContext(PipelineOptions options,
-                       DoFn<I, O> fn,
+                       DoFn<InputT, OutputT> fn,
                        PTuple sideInputs,
-                       OutputManager<R> outputManager,
-                       TupleTag<O> mainOutputTag,
+                       OutputManager<ReceiverT> outputManager,
+                       TupleTag<OutputT> mainOutputTag,
                        List<TupleTag<?>> sideOutputTags,
                        StepContext stepContext,
                        CounterSet.AddCounterMutator addCounterMutator,
@@ -239,10 +239,11 @@ public class DoFnRunner<I, O, R> {
       this.stepContext = stepContext;
       this.addCounterMutator = addCounterMutator;
       this.windowFn = windowFn;
+      super.setupDelegateAggregators();
     }
 
-    public R getReceiver(TupleTag<?> tag) {
-      R receiver = outputMap.get(tag);
+    public ReceiverT getReceiver(TupleTag<?> tag) {
+      ReceiverT receiver = outputMap.get(tag);
       if (receiver == null) {
         throw new IllegalArgumentException(
             "calling getReceiver() with unknown tag " + tag);
@@ -273,27 +274,27 @@ public class DoFnRunner<I, O, R> {
       if (windows == null) {
         try {
           windows = windowFn.assignWindows(windowFn.new AssignContext() {
-              @Override
-              public Object element() {
-                throw new UnsupportedOperationException(
-                    "WindowFn attemped to access input element when none was available");
-              }
+            @Override
+            public Object element() {
+              throw new UnsupportedOperationException(
+                  "WindowFn attempted to access input element when none was available");
+            }
 
-              @Override
-              public Instant timestamp() {
-                if (inputTimestamp == null) {
-                  throw new UnsupportedOperationException(
-                      "WindowFn attemped to access input timestamp when none was available");
-                }
-                return inputTimestamp;
-              }
-
-              @Override
-              public Collection<? extends BoundedWindow> windows() {
+            @Override
+            public Instant timestamp() {
+              if (inputTimestamp == null) {
                 throw new UnsupportedOperationException(
-                    "WindowFn attemped to access input windows when none were available");
+                    "WindowFn attempted to access input timestamp when none was available");
               }
-            });
+              return inputTimestamp;
+            }
+
+            @Override
+            public Collection<? extends BoundedWindow> windows() {
+              throw new UnsupportedOperationException(
+                  "WindowFn attempted to access input windows when none were available");
+            }
+          });
         } catch (Exception e) {
           throw new RuntimeException(e);
         }
@@ -303,10 +304,10 @@ public class DoFnRunner<I, O, R> {
     }
 
     void outputWindowedValue(
-        O output,
+        OutputT output,
         Instant timestamp,
         Collection<? extends BoundedWindow> windows) {
-      WindowedValue<O> windowedElem = makeWindowedValue(output, timestamp, windows);
+      WindowedValue<OutputT> windowedElem = makeWindowedValue(output, timestamp, windows);
       outputManager.output(outputMap.get(mainOutputTag), windowedElem);
       if (stepContext != null) {
         stepContext.noteOutput(windowedElem);
@@ -317,7 +318,7 @@ public class DoFnRunner<I, O, R> {
                                                T output,
                                                Instant timestamp,
                                                Collection<? extends BoundedWindow> windows) {
-      R receiver = outputMap.get(tag);
+      ReceiverT receiver = outputMap.get(tag);
       if (receiver == null) {
         // This tag wasn't declared nor was it seen before during this execution.
         // Thus, this must be a new, undeclared and unconsumed output.
@@ -347,12 +348,12 @@ public class DoFnRunner<I, O, R> {
     // are only accessible in DoFn.startBundle and DoFn.finishBundle, and will be shadowed by
     // ProcessContext's versions in DoFn.processElement.
     @Override
-    public void output(O output) {
+    public void output(OutputT output) {
       outputWindowedValue(output, null, null);
     }
 
     @Override
-    public void outputWithTimestamp(O output, Instant timestamp) {
+    public void outputWithTimestamp(OutputT output, Instant timestamp) {
       outputWindowedValue(output, timestamp, null);
     }
 
@@ -373,46 +374,41 @@ public class DoFnRunner<I, O, R> {
     }
 
     @Override
-    public <AI, AA, AO> Aggregator<AI> createAggregator(
-        String name, Combine.CombineFn<? super AI, AA, AO> combiner) {
-      Preconditions.checkNotNull(combiner, "Combiner passed to createAggregator cannot be null");
-      return new AggregatorImpl<>(
-          generateInternalAggregatorName(name), combiner, addCounterMutator);
+    protected <AggInputT, AggOutputT> Aggregator<AggInputT, AggOutputT> createAggregatorInternal(
+        String name, CombineFn<AggInputT, ?, AggOutputT> combiner) {
+      Preconditions.checkNotNull(combiner,
+          "Combiner passed to createAggregator cannot be null");
+      return new CounterAggregator<>(generateInternalAggregatorName(name),
+          combiner, addCounterMutator);
     }
 
-    @Override
-    public <AI, AO> Aggregator<AI> createAggregator(
-        String name, SerializableFunction<Iterable<AI>, AO> combiner) {
-      Preconditions.checkNotNull(combiner, "Combiner passed to createAggregator cannot be null");
-      return new AggregatorImpl<AI, Iterable<AI>, AO>(
-          generateInternalAggregatorName(name), combiner, addCounterMutator);
-    }
   }
 
   /**
    * Returns a new {@link DoFn.ProcessContext} for the given element.
    */
-  protected DoFn<I, O>.ProcessContext createProcessContext(WindowedValue<I> elem) {
-    return new DoFnProcessContext<I, O>(fn, context, elem);
+  protected DoFn<InputT, OutputT>.ProcessContext createProcessContext(WindowedValue<InputT> elem) {
+    return new DoFnProcessContext<InputT, OutputT>(fn, context, elem);
   }
 
   /**
-   * A concrete implementation of {@link DoFn<I, O>.ProcessContext} used for running
+   * A concrete implementation of {@link DoFn<InputT, OutputT>.ProcessContext} used for running
    * a {@link DoFn} over a single element.
    *
-   * @param <I> the type of the DoFn's (main) input elements
-   * @param <O> the type of the DoFn's (main) output elements
+   * @param <InputT> the type of the DoFn's (main) input elements
+   * @param <OutputT> the type of the DoFn's (main) output elements
    */
-  private static class DoFnProcessContext<I, O> extends DoFn<I, O>.ProcessContext {
+  private static class DoFnProcessContext<InputT, OutputT>
+      extends DoFn<InputT, OutputT>.ProcessContext {
 
 
-    final DoFn<I, O> fn;
-    final DoFnContext<I, O, ?> context;
-    final WindowedValue<I> windowedValue;
+    final DoFn<InputT, OutputT> fn;
+    final DoFnContext<InputT, OutputT, ?> context;
+    final WindowedValue<InputT> windowedValue;
 
-    public DoFnProcessContext(DoFn<I, O> fn,
-                              DoFnContext<I, O, ?> context,
-                              WindowedValue<I> windowedValue) {
+    public DoFnProcessContext(DoFn<InputT, OutputT> fn,
+                              DoFnContext<InputT, OutputT, ?> context,
+                              WindowedValue<InputT> windowedValue) {
       fn.super();
       this.fn = fn;
       this.context = context;
@@ -425,7 +421,7 @@ public class DoFnRunner<I, O, R> {
     }
 
     @Override
-    public I element() {
+    public InputT element() {
       return windowedValue.getValue();
     }
 
@@ -455,7 +451,8 @@ public class DoFnRunner<I, O, R> {
 
     @Override
     public KeyedState keyedState() {
-      if (!(fn instanceof RequiresKeyedState)) {
+      if (!(fn instanceof RequiresKeyedState)
+          || !equivalentToKV(element())) {
         throw new UnsupportedOperationException(
             "Keyed state is only available in the context of a keyed DoFn "
             + "marked as requiring state");
@@ -474,14 +471,21 @@ public class DoFnRunner<I, O, R> {
     }
 
     @Override
-    public void output(O output) {
+    public void output(OutputT output) {
       context.outputWindowedValue(output, windowedValue.getTimestamp(), windowedValue.getWindows());
     }
 
     @Override
-    public void outputWithTimestamp(O output, Instant timestamp) {
+    public void outputWithTimestamp(OutputT output, Instant timestamp) {
       checkTimestamp(timestamp);
       context.outputWindowedValue(output, timestamp, windowedValue.getWindows());
+    }
+
+    void outputWindowedValue(
+        OutputT output,
+        Instant timestamp,
+        Collection<? extends BoundedWindow> windows) {
+      context.outputWindowedValue(output, timestamp, windows);
     }
 
     @Override
@@ -501,20 +505,6 @@ public class DoFnRunner<I, O, R> {
     }
 
     @Override
-    public <AI, AA, AO> Aggregator<AI> createAggregator(
-        String name, Combine.CombineFn<? super AI, AA, AO> combiner) {
-      Preconditions.checkNotNull(combiner, "Combiner passed to createAggregator cannot be null");
-      return context.createAggregator(name, combiner);
-    }
-
-    @Override
-    public <AI, AO> Aggregator<AI> createAggregator(
-        String name, SerializableFunction<Iterable<AI>, AO> combiner) {
-      Preconditions.checkNotNull(combiner, "Combiner passed to createAggregator cannot be null");
-      return context.createAggregator(name, combiner);
-    }
-
-    @Override
     public Instant timestamp() {
       return windowedValue.getTimestamp();
     }
@@ -529,19 +519,31 @@ public class DoFnRunner<I, O, R> {
           "Timestamp %s exceeds allowed maximum skew.", timestamp);
     }
 
+    private boolean equivalentToKV(InputT input) {
+      if (input == null) {
+        return true;
+      } else if (input instanceof KV) {
+        return true;
+      } else if (input instanceof TimerOrElement) {
+        return ((TimerOrElement) input).isTimer()
+            || ((TimerOrElement) input).element() instanceof KV;
+      }
+      return false;
+    }
+
     @Override
-    public WindowingInternals<I, O> windowingInternals() {
-      return new WindowingInternals<I, O>() {
+    public WindowingInternals<InputT, OutputT> windowingInternals() {
+      return new WindowingInternals<InputT, OutputT>() {
         @Override
-        public void outputWindowedValue(O output, Instant timestamp,
+        public void outputWindowedValue(OutputT output, Instant timestamp,
             Collection<? extends BoundedWindow> windows) {
           context.outputWindowedValue(output, timestamp, windows);
         }
 
         @Override
-        public <T> void writeToTagList(CodedTupleTag<T> tag, T value, Instant timestamp)
+        public <T> void writeToTagList(CodedTupleTag<T> tag, T value)
             throws IOException {
-          context.stepContext.writeToTagList(tag, value, timestamp);
+          context.stepContext.writeToTagList(tag, value);
         }
 
         @Override
@@ -550,9 +552,15 @@ public class DoFnRunner<I, O, R> {
         }
 
         @Override
-        public <T> Iterable<TimestampedValue<T>> readTagList(CodedTupleTag<T> tag)
+        public <T> Iterable<T> readTagList(CodedTupleTag<T> tag)
             throws IOException {
           return context.stepContext.readTagList(tag);
+        }
+
+        @Override
+        public <T> Map<CodedTupleTag<T>, Iterable<T>> readTagList(List<CodedTupleTag<T>> tags)
+            throws IOException {
+          return context.stepContext.readTagLists(tags);
         }
 
         @Override
@@ -575,13 +583,24 @@ public class DoFnRunner<I, O, R> {
             TupleTag<?> tag,
             Iterable<WindowedValue<T>> data,
             Coder<T> elemCoder) throws IOException {
-          Coder<BoundedWindow> windowCoder = (Coder<BoundedWindow>) context.windowFn.windowCoder();
+          Coder<BoundedWindow> windowCoder = context.windowFn.windowCoder();
 
           context.stepContext.getExecutionContext().writePCollectionViewData(
               tag, data, IterableCoder.of(WindowedValue.getFullCoder(elemCoder, windowCoder)),
               window(), windowCoder);
         }
+
+        @Override
+        public <T> void store(CodedTupleTag<T> tag, T value, Instant timestamp) throws IOException {
+          context.stepContext.store(tag, value, timestamp);
+        }
       };
+    }
+
+    @Override
+    protected <InputT, OutputT> Aggregator<InputT, OutputT> createAggregatorInternal(String name,
+        CombineFn<InputT, ?, OutputT> combiner) {
+      return context.createAggregatorInternal(name, combiner);
     }
   }
 }

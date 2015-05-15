@@ -26,7 +26,7 @@ import static org.junit.Assert.assertEquals;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.CoderException;
 import com.google.cloud.dataflow.sdk.coders.CoderRegistry;
-import com.google.cloud.dataflow.sdk.coders.StandardCoder;
+import com.google.cloud.dataflow.sdk.coders.DeterministicStandardCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.transforms.Combine;
 import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
@@ -39,7 +39,7 @@ import com.google.cloud.dataflow.sdk.util.common.ElementByteSizeObserver;
 import com.google.cloud.dataflow.sdk.util.common.worker.ParDoFn;
 import com.google.cloud.dataflow.sdk.util.common.worker.Receiver;
 import com.google.cloud.dataflow.sdk.values.KV;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -127,7 +127,7 @@ public class CombineValuesFnTest {
   /**
    * An example "cheap" accumulator coder.
    */
-  public static class CountSumCoder extends StandardCoder<MeanInts.CountSum> {
+  public static class CountSumCoder extends DeterministicStandardCoder<MeanInts.CountSum> {
     public CountSumCoder() { }
 
     @Override
@@ -148,18 +148,14 @@ public class CombineValuesFnTest {
       return (new MeanInts ()).new CountSum(count, sum);
     }
 
-    @Override
-    public boolean isDeterministic() { return true; }
-
-    @Override
-    public void verifyDeterministic() { }
-
     public CloudObject asCloudObject() {
       return makeCloudEncoding(this.getClass().getName());
     }
 
     @Override
-    public List<? extends Coder<?>> getCoderArguments() { return null; }
+    public List<? extends Coder<?>> getCoderArguments() {
+      return null;
+    }
 
     public List<Object> getInstanceComponents(MeanInts.CountSum exampleValue) {
       return null;
@@ -333,7 +329,7 @@ public class CombineValuesFnTest {
     MeanInts.CountSum countSum = meanInts.new CountSum(6, 27);
 
     Coder<MeanInts.CountSum> coder = meanInts.getAccumulatorCoder(
-        registry, registry.getDefaultCoder(TypeToken.of(Integer.class)));
+        registry, registry.getDefaultCoder(TypeDescriptor.of(Integer.class)));
 
     assertEquals(
         countSum,

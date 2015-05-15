@@ -17,7 +17,6 @@
 package com.google.cloud.dataflow.sdk.io;
 
 import static com.google.cloud.dataflow.sdk.TestUtils.INTS_ARRAY;
-import static com.google.cloud.dataflow.sdk.TestUtils.LINES;
 import static com.google.cloud.dataflow.sdk.TestUtils.LINES_ARRAY;
 import static com.google.cloud.dataflow.sdk.TestUtils.NO_INTS_ARRAY;
 import static com.google.cloud.dataflow.sdk.TestUtils.NO_LINES_ARRAY;
@@ -33,9 +32,9 @@ import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.coders.TextualIntegerCoder;
 import com.google.cloud.dataflow.sdk.io.TextIO.CompressionType;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
-import com.google.cloud.dataflow.sdk.runners.DirectPipeline;
-import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner.EvaluationResults;
+import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
 import com.google.cloud.dataflow.sdk.testing.TestDataflowPipelineOptions;
+import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.transforms.Create;
 import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.cloud.dataflow.sdk.util.CoderUtils;
@@ -45,7 +44,6 @@ import com.google.cloud.dataflow.sdk.util.gcsfs.GcsPath;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PDone;
 
-import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -73,42 +71,46 @@ import java.util.zip.GZIPOutputStream;
 @RunWith(JUnit4.class)
 @SuppressWarnings("unchecked")
 public class TextIOTest {
-
-  @Rule
-  public TemporaryFolder tmpFolder = new TemporaryFolder();
-
-  @Rule
-  public ExpectedException thrown = ExpectedException.none();
+  @Rule public TemporaryFolder tmpFolder = new TemporaryFolder();
+  @Rule public ExpectedException expectedException = ExpectedException.none();
 
   private static class EmptySeekableByteChannel implements SeekableByteChannel {
+    @Override
     public long position() {
       return 0L;
     }
 
+    @Override
     public SeekableByteChannel position(long newPosition) {
       return this;
     }
 
+    @Override
     public long size() {
       return 0L;
     }
 
+    @Override
     public SeekableByteChannel truncate(long size) {
       return this;
     }
 
+    @Override
     public int write(ByteBuffer src) {
       return 0;
     }
 
+    @Override
     public int read(ByteBuffer dst) {
       return 0;
     }
 
+    @Override
     public boolean isOpen() {
       return true;
     }
 
+    @Override
     public void close() { }
   }
 
@@ -149,7 +151,7 @@ public class TextIOTest {
       }
     }
 
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
 
     TextIO.Read.Bound<T> read;
     if (coder.equals(StringUtf8Coder.of())) {
@@ -162,10 +164,8 @@ public class TextIOTest {
 
     PCollection<T> output = p.apply(read);
 
-    EvaluationResults results = p.run();
-
-    assertThat(results.getPCollection(output),
-               containsInAnyOrder(expected));
+    DataflowAssert.that(output).containsInAnyOrder(expected);
+    p.run();
   }
 
   @Test
@@ -190,7 +190,7 @@ public class TextIOTest {
 
   @Test
   public void testReadNamed() {
-    Pipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
 
     {
       PCollection<String> output1 =
@@ -215,7 +215,7 @@ public class TextIOTest {
     File tmpFile = tmpFolder.newFile("file.txt");
     String filename = tmpFile.getPath();
 
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
 
     PCollection<T> input =
         p.apply(Create.of(Arrays.asList(elems))).setCoder(coder);
@@ -234,14 +234,15 @@ public class TextIOTest {
 
     p.run();
 
-    BufferedReader reader = new BufferedReader(new FileReader(tmpFile));
     List<String> actual = new ArrayList<>();
-    for (;;) {
-      String line = reader.readLine();
-      if (line == null) {
-        break;
+    try (BufferedReader reader = new BufferedReader(new FileReader(tmpFile))) {
+      for (;;) {
+        String line = reader.readLine();
+        if (line == null) {
+          break;
+        }
+        actual.add(line);
       }
-      actual.add(line);
     }
 
     String[] expected = new String[elems.length];
@@ -281,7 +282,7 @@ public class TextIOTest {
     File outFolder = tmpFolder.newFolder();
     String filename = outFolder.toPath().resolve("output").toString();
 
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
 
     PCollection<String> input =
         p.apply(Create.of(Arrays.asList(LINES_ARRAY)))
@@ -300,11 +301,6 @@ public class TextIOTest {
 
   @Test
   public void testWriteNamed() {
-    Pipeline p = DirectPipeline.createForTest();
-
-    PCollection<String> input =
-        p.apply(Create.of(LINES)).setCoder(StringUtf8Coder.of());
-
     {
       PTransform<PCollection<String>, PDone> transform1 =
         TextIO.Write.to("/tmp/file.txt");
@@ -324,21 +320,21 @@ public class TextIOTest {
     }
   }
 
-  @Test(expected = IllegalArgumentException.class)
+  @Test
   public void testUnsupportedFilePattern() throws IOException {
     File outFolder = tmpFolder.newFolder();
-    String filename = outFolder.toPath().resolve("output@*").toString();
+    // Windows doesn't like resolving paths with * in them.
+    String filename = outFolder.toPath().resolve("output@5").toString();
 
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
 
     PCollection<String> input =
         p.apply(Create.of(Arrays.asList(LINES_ARRAY)))
             .setCoder(StringUtf8Coder.of());
 
+    expectedException.expect(IllegalArgumentException.class);
+    expectedException.expectMessage("Output name components are not allowed to contain");
     input.apply(TextIO.Write.to(filename));
-
-    p.run();
-    Assert.fail("Expected failure due to unsupported output pattern");
   }
 
   /**
@@ -346,6 +342,7 @@ public class TextIOTest {
    */
   @Test
   public void testGoodWildcards() throws Exception {
+
     TestDataflowPipelineOptions options = buildTestPipelineOptions();
     options.setGcsUtil(buildMockGcsUtil());
 
@@ -376,13 +373,13 @@ public class TextIOTest {
    */
   @Test
   public void testBadWildcardRecursive() throws Exception {
-    Pipeline pipeline = Pipeline.create(buildTestPipelineOptions());
+    Pipeline pipeline = TestPipeline.create();
 
     pipeline.apply(TextIO.Read.from("gs://bucket/foo**/baz"));
 
     // Check that running does fail.
-    thrown.expect(IllegalArgumentException.class);
-    thrown.expectMessage("wildcard");
+    expectedException.expect(IllegalArgumentException.class);
+    expectedException.expectMessage("wildcard");
     pipeline.run();
   }
 
@@ -423,16 +420,15 @@ public class TextIOTest {
       }
     }
 
-
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
 
     TextIO.Read.Bound<String> read =
         TextIO.Read.from(filename).withCompressionType(CompressionType.GZIP);
     PCollection<String> output = p.apply(read);
 
-    EvaluationResults results = p.run();
+    DataflowAssert.that(output).containsInAnyOrder(expected);
+    p.run();
 
-    assertThat(results.getPCollection(output), containsInAnyOrder(expected.toArray()));
     tmpFile.delete();
   }
 
@@ -450,14 +446,14 @@ public class TextIOTest {
       }
     }
 
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline p = TestPipeline.create();
     TextIO.Read.Bound<String> read =
         TextIO.Read.from(filename).withCompressionType(CompressionType.GZIP);
     PCollection<String> output = p.apply(read);
 
-    EvaluationResults results = p.run();
+    DataflowAssert.that(output).containsInAnyOrder(expected);
+    p.run();
 
-    assertThat(results.getPCollection(output), containsInAnyOrder(expected.toArray()));
     tmpFile.delete();
   }
 }

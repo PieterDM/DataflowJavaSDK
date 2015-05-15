@@ -16,6 +16,7 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import com.google.cloud.dataflow.sdk.coders.CannotProvideCoderException;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.IterableCoder;
 import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
@@ -70,11 +71,6 @@ public class Flatten {
     return new FlattenPCollectionList<>();
   }
 
-  @Deprecated
-  public static <T> FlattenPCollectionList<T> create() {
-    return pCollections();
-  }
-
   /**
    * Returns a {@code PTransform} that takes a {@code PCollection<Iterable<T>>}
    * and returns a {@code PCollection<T>} containing all the elements from
@@ -124,7 +120,8 @@ public class Flatten {
                 + windowingStrategy.getWindowFn() + ", " + other.getWindowFn());
           }
 
-          if (!windowingStrategy.getTrigger().isCompatible(other.getTrigger())) {
+          if (!windowingStrategy.getTrigger().getSpec()
+              .isCompatible(other.getTrigger().getSpec())) {
             throw new IllegalStateException(
                 "Inputs to Flatten had incompatible triggers: "
                 + windowingStrategy.getTrigger() + ", " + other.getTrigger());
@@ -134,18 +131,24 @@ public class Flatten {
         windowingStrategy = WindowingStrategy.globalDefault();
       }
 
-      return PCollection.<T>createPrimitiveOutputInternal(windowingStrategy);
+      return PCollection.<T>createPrimitiveOutputInternal(
+          inputs.getPipeline(),
+          windowingStrategy);
     }
 
     @Override
-    protected Coder<?> getDefaultOutputCoder(PCollectionList<T> input) {
-      List<PCollection<T>> inputs = input.getAll();
-      if (inputs.isEmpty()) {
-        // Cannot infer a Coder from an empty list of input PCollections.
-        return null;
+    protected Coder<?> getDefaultOutputCoder(PCollectionList<T> input)
+        throws CannotProvideCoderException {
+
+      // Take coder from first collection
+      for (PCollection<T> pCollection : input.getAll()) {
+        return pCollection.getCoder();
       }
-      // Use the Coder of the first input.
-      return inputs.get(0).getCoder();
+
+      // No inputs
+      throw new CannotProvideCoderException(
+          this.getClass().getSimpleName() + " cannot provide a Coder for"
+          + " empty " + PCollectionList.class.getSimpleName());
     }
   }
 

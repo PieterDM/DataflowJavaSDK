@@ -16,11 +16,14 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import com.google.cloud.dataflow.sdk.transforms.Combine.CombineFn;
+
 /**
- * An {@code Aggregator} enables arbitrary monitoring in user code.
+ * An {@code Aggregator<InputT>} enables monitoring of values of type {@code InputT},
+ * to be combined across all bundles.
  *
- * <p> Aggregators are created by calling {@link DoFn.Context#createAggregator},
- * typically from {@link DoFn#startBundle}. Elements can be added to the
+ * <p> Aggregators are created by calling {@link DoFn#createAggregator},
+ * typically from the {@link DoFn} constructor. Elements can be added to the
  * {@code Aggregator} by calling {@link Aggregator#addValue}.
  *
  * <p> Aggregators are visible in the monitoring UI, when the pipeline is run
@@ -32,11 +35,10 @@ package com.google.cloud.dataflow.sdk.transforms;
  * <p> Example:
  * <pre> {@code
  * class MyDoFn extends DoFn<String, String> {
- *   private Aggregator<Integer> myAggregator;
+ *   private Aggregator<Integer, Integer> myAggregator;
  *
- *   {@literal @}Override
- *   public void startBundle(Context c) {
- *     myAggregator = c.createAggregator("myCounter", new Sum.SumIntegerFn());
+ *   public MyDoFn() {
+ *     myAggregator = createAggregator("myCounter", new Sum.SumIntegerFn());
  *   }
  *
  *   {@literal @}Override
@@ -46,14 +48,26 @@ package com.google.cloud.dataflow.sdk.transforms;
  * }
  * } </pre>
  *
- * @param <VI> the type of input values
+ * @param <InputT> the type of input values
+ * @param <OutputT> the type of output values
  */
-public interface Aggregator<VI> {
+public interface Aggregator<InputT, OutputT> {
 
   /**
    * Adds a new value into the Aggregator.
    */
-  public void addValue(VI value);
+  void addValue(InputT value);
+
+  /**
+   * Returns the name of the Aggregator.
+   */
+  String getName();
+
+  /**
+   * Returns the {@link CombineFn}, which combines input elements in the
+   * aggregator.
+   */
+  CombineFn<InputT, ?, OutputT> getCombineFn();
 
   // TODO: Consider the following additional API conveniences:
   // - In addition to createAggregator(), consider adding getAggregator() to

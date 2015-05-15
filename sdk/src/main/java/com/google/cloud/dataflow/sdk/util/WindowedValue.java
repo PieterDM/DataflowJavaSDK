@@ -166,7 +166,9 @@ public abstract class WindowedValue<V> {
    */
   private static class ValueInGlobalWindow<V>
       extends MinTimestampWindowedValue<V> {
-    public ValueInGlobalWindow(V value) { super(value); }
+    public ValueInGlobalWindow(V value) {
+      super(value);
+    }
 
     @Override
     public <V> WindowedValue<V> withValue(V value) {
@@ -205,7 +207,9 @@ public abstract class WindowedValue<V> {
    */
   private static class ValueInEmptyWindows<V>
       extends MinTimestampWindowedValue<V> {
-    public ValueInEmptyWindows(V value) { super(value); }
+    public ValueInEmptyWindows(V value) {
+      super(value);
+    }
 
     @Override
     public <V> WindowedValue<V> withValue(V value) {
@@ -539,12 +543,6 @@ public abstract class WindowedValue<V> {
     }
 
     @Override
-    @Deprecated
-    public boolean isDeterministic() {
-      return valueCoder.isDeterministic() && windowCoder.isDeterministic();
-    }
-
-    @Override
     public void verifyDeterministic() throws NonDeterministicException {
       verifyDeterministic(
           "FullWindowedValueCoder requires a deterministic valueCoder",
@@ -584,7 +582,7 @@ public abstract class WindowedValue<V> {
   /**
    * Coder for {@code WindowedValue}.
    *
-   * <P>A {@code ValueOnlyWindowedValueCoder} only encodes and decodes the value. It drops
+   * <p>A {@code ValueOnlyWindowedValueCoder} only encodes and decodes the value. It drops
    * timestamp and windows for encoding, and uses defaults timestamp, and windows for decoding.
    */
   public static class ValueOnlyWindowedValueCoder<T> extends WindowedValueCoder<T> {
@@ -624,13 +622,6 @@ public abstract class WindowedValue<V> {
       T value = valueCoder.decode(inStream, context);
       return WindowedValue.valueInGlobalWindow(value);
     }
-
-    @Override
-    @Deprecated
-    public boolean isDeterministic() {
-      return valueCoder.isDeterministic();
-    }
-
 
     @Override
     public void verifyDeterministic() throws NonDeterministicException {

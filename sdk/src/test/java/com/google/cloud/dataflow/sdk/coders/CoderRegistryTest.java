@@ -19,12 +19,11 @@ package com.google.cloud.dataflow.sdk.coders;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.common.ElementByteSizeObserver;
 import com.google.cloud.dataflow.sdk.values.KV;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -36,11 +35,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Tests for CoderRegistry.
@@ -48,9 +47,7 @@ import java.util.Map;
 @RunWith(JUnit4.class)
 @SuppressWarnings("serial")
 public class CoderRegistryTest {
-
-  @Rule
-  public transient ExpectedException thrown = ExpectedException.none();
+  @Rule public ExpectedException expectedException = ExpectedException.none();
 
   public static CoderRegistry getStandardRegistry() {
     CoderRegistry registry = new CoderRegistry();
@@ -63,10 +60,8 @@ public class CoderRegistryTest {
 
   private static class NotSerializableClass { }
 
-  private static class NotACoderProvider { }
-
   @Test
-  public void testSerializableFallbackCoderProvider() {
+  public void testSerializableFallbackCoderProvider() throws Exception {
     CoderRegistry registry = getStandardRegistry();
     registry.setFallbackCoderProvider(SerializableCoder.PROVIDER);
     Coder<?> serializableCoder = registry.getDefaultCoder(SerializableClass.class);
@@ -75,7 +70,7 @@ public class CoderRegistryTest {
   }
 
   @Test
-  public void testAvroFallbackCoderProvider() {
+  public void testAvroFallbackCoderProvider() throws Exception {
     CoderRegistry registry = getStandardRegistry();
     registry.setFallbackCoderProvider(AvroCoder.PROVIDER);
     Coder<?> avroCoder = registry.getDefaultCoder(NotSerializableClass.class);
@@ -84,7 +79,7 @@ public class CoderRegistryTest {
   }
 
   @Test
-  public void testRegisterInstantiatedGenericCoder() {
+  public void testRegisterInstantiatedGenericCoder() throws Exception {
     class MyValueList extends ArrayList<MyValue> { }
 
     CoderRegistry registry = new CoderRegistry();
@@ -93,81 +88,113 @@ public class CoderRegistryTest {
   }
 
   @Test
-  public void testSimpleDefaultCoder() {
+  public void testSimpleDefaultCoder() throws Exception {
     CoderRegistry registry = getStandardRegistry();
     assertEquals(StringUtf8Coder.of(), registry.getDefaultCoder(String.class));
-    assertEquals(null, registry.getDefaultCoder(UnknownType.class));
   }
 
   @Test
-  public void testTemplateDefaultCoder() {
+  public void testSimpleUnknownDefaultCoder() throws Exception {
     CoderRegistry registry = getStandardRegistry();
-    TypeToken<List<Integer>> listToken = new TypeToken<List<Integer>>() {};
+    expectedException.expect(CannotProvideCoderException.class);
+    registry.getDefaultCoder(UnknownType.class);
+  }
+
+  @Test
+  public void testParameterizedDefaultCoder() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    TypeDescriptor<List<Integer>> listToken = new TypeDescriptor<List<Integer>>() {};
     assertEquals(ListCoder.of(VarIntCoder.of()),
                  registry.getDefaultCoder(listToken));
 
     registry.registerCoder(MyValue.class, MyValueCoder.class);
-    TypeToken<KV<String, List<MyValue>>> kvToken =
-        new TypeToken<KV<String, List<MyValue>>>() {};
+    TypeDescriptor<KV<String, List<MyValue>>> kvToken =
+        new TypeDescriptor<KV<String, List<MyValue>>>() {};
     assertEquals(KvCoder.of(StringUtf8Coder.of(),
                             ListCoder.of(MyValueCoder.of())),
                  registry.getDefaultCoder(kvToken));
 
-    TypeToken<List<UnknownType>> listUnknownToken =
-        new TypeToken<List<UnknownType>>() {};
-    assertEquals(null, registry.getDefaultCoder(listUnknownToken));
   }
 
   @Test
-  public void testTemplateInference() {
+  public void testParameterizedDefaultCoderUnknown() throws Exception {
     CoderRegistry registry = getStandardRegistry();
-    MyTemplateClass<MyValue, List<MyValue>> instance =
-        new MyTemplateClass<MyValue, List<MyValue>>() {};
-    Coder<List<MyValue>> listCoder = ListCoder.of(MyValueCoder.of());
+    TypeDescriptor<List<UnknownType>> listUnknownToken =
+        new TypeDescriptor<List<UnknownType>>() {};
 
-    // The map method operates on parameter names.
-    Map<String, Coder<?>> coderMap = registry.getDefaultCoders(
+    expectedException.expect(CannotProvideCoderException.class);
+    registry.getDefaultCoder(listUnknownToken);
+  }
+
+  @Test
+  public void testTypeParameterInferenceForward() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    MyGenericClass<MyValue, List<MyValue>> instance =
+        new MyGenericClass<MyValue, List<MyValue>>() {};
+
+    Coder<?> bazCoder = registry.getDefaultCoder(
         instance.getClass(),
-        MyTemplateClass.class,
-        Collections.singletonMap("A", MyValueCoder.of()));
-    assertEquals(listCoder, coderMap.get("B"));
+        MyGenericClass.class,
+        Collections.<Type, Coder<?>>singletonMap(
+            TypeDescriptor.of(MyGenericClass.class).getTypeParameter("FooT"), MyValueCoder.of()),
+        TypeDescriptor.of(MyGenericClass.class).getTypeParameter("BazT"));
 
-    // Check we can infer the other direction as well.
-    Map<String, Coder<?>> coderMap2 = registry.getDefaultCoders(
+    assertEquals(ListCoder.of(MyValueCoder.of()), bazCoder);
+  }
+
+  @Test
+  public void testTypeParameterInferenceBackward() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    MyGenericClass<MyValue, List<MyValue>> instance =
+        new MyGenericClass<MyValue, List<MyValue>>() {};
+
+    Coder<?> fooCoder = registry.getDefaultCoder(
         instance.getClass(),
-        MyTemplateClass.class,
-        Collections.singletonMap("B", listCoder));
-    assertEquals(MyValueCoder.of(), coderMap2.get("A"));
+        MyGenericClass.class,
+        Collections.<Type, Coder<?>>singletonMap(
+            TypeDescriptor.of(MyGenericClass.class).getTypeParameter("BazT"),
+            ListCoder.of(MyValueCoder.of())),
+        TypeDescriptor.of(MyGenericClass.class).getTypeParameter("FooT"));
 
-    // The array interface operates on position.
-    Coder<?>[] coders = registry.getDefaultCoders(
-        instance.getClass(),
-        MyTemplateClass.class,
-        new Coder<?>[] { MyValueCoder.of(), null });
-    assertEquals(listCoder, coders[1]);
+    assertEquals(MyValueCoder.of(), fooCoder);
+  }
 
-    // The "last argument" coder handles a common case.
+  @Test
+  public void testTypeParameterInferenceLast() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    MyGenericClass<MyValue, List<MyValue>> instance =
+        new MyGenericClass<MyValue, List<MyValue>>() {};
+
     Coder<List<MyValueCoder>> actual = registry.getDefaultCoder(
         instance.getClass(),
-        MyTemplateClass.class,
+        MyGenericClass.class,
         MyValueCoder.of());
-    assertEquals(listCoder, actual);
 
-    try {
-      registry.getDefaultCoder(
-          instance.getClass(),
-          MyTemplateClass.class,
-          BigEndianIntegerCoder.of());
-      fail("should have failed");
-    } catch (IllegalArgumentException exn) {
-      assertEquals("Cannot encode elements of type class "
-          + "com.google.cloud.dataflow.sdk.coders.CoderRegistryTest$MyValue "
-          + "with BigEndianIntegerCoder", exn.getMessage());
-    }
+    assertEquals(ListCoder.of(MyValueCoder.of()), actual);
+  }
+
+  /**
+   * Tests sanity checking of the not-type-safe {@code Map<TypeVariable, Coder>}
+   * that the user can provide to {@code getDefaultCoder}.
+   */
+  @Test
+  public void testTypeParameterInferenceIncompatibleMap() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    MyGenericClass<MyValue, List<MyValue>> instance =
+        new MyGenericClass<MyValue, List<MyValue>>() {};
+
+    expectedException.expect(IllegalArgumentException.class);
+    expectedException.expectMessage("Cannot encode elements of type class "
+        + "com.google.cloud.dataflow.sdk.coders.CoderRegistryTest$MyValue "
+        + "with BigEndianIntegerCoder");
+    registry.getDefaultCoder(
+        instance.getClass(),
+        MyGenericClass.class,
+        BigEndianIntegerCoder.of());
   }
 
   @Test
-  public void testGetDefaultCoderFromIntegerValue() {
+  public void testGetDefaultCoderFromIntegerValue() throws Exception {
     CoderRegistry registry = getStandardRegistry();
     Integer i = 13;
     Coder<Integer> coder = registry.getDefaultCoder(i);
@@ -175,7 +202,13 @@ public class CoderRegistryTest {
   }
 
   @Test
-  public void testGetDefaultCoderFromKvValue() {
+  public void testGetDefaultCoderFromNullValue() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    assertEquals(VoidCoder.of(), registry.getDefaultCoder((Void) null));
+  }
+
+  @Test
+  public void testGetDefaultCoderFromKvValue() throws Exception {
     CoderRegistry registry = getStandardRegistry();
     KV<Integer, String> kv = KV.of(13, "hello");
     Coder<KV<Integer, String>> coder = registry.getDefaultCoder(kv);
@@ -184,7 +217,15 @@ public class CoderRegistryTest {
   }
 
   @Test
-  public void testGetDefaultCoderFromNestedKvValue() {
+  public void testGetDefaultCoderFromKvNullValue() throws Exception {
+    CoderRegistry registry = getStandardRegistry();
+    KV<Void, Void> kv = KV.of((Void) null, (Void) null);
+    assertEquals(KvCoder.of(VoidCoder.of(), VoidCoder.of()),
+        registry.getDefaultCoder(kv));
+  }
+
+  @Test
+  public void testGetDefaultCoderFromNestedKvValue() throws Exception {
     CoderRegistry registry = getStandardRegistry();
     KV<Integer, KV<Long, KV<String, String>>> kv = KV.of(13, KV.of(17L, KV.of("hello", "goodbye")));
     Coder<KV<Integer, KV<Long, KV<String, String>>>> coder = registry.getDefaultCoder(kv);
@@ -196,7 +237,7 @@ public class CoderRegistryTest {
   }
 
   @Test
-  public void testTypeCompatibility() {
+  public void testTypeCompatibility() throws Exception {
     assertTrue(CoderRegistry.isCompatible(
         BigEndianIntegerCoder.of(), Integer.class));
     assertFalse(CoderRegistry.isCompatible(
@@ -206,13 +247,13 @@ public class CoderRegistryTest {
         ListCoder.of(BigEndianIntegerCoder.of()), Integer.class));
     assertTrue(CoderRegistry.isCompatible(
         ListCoder.of(BigEndianIntegerCoder.of()),
-        new TypeToken<List<Integer>>() {}.getType()));
+        new TypeDescriptor<List<Integer>>() {}.getType()));
     assertFalse(CoderRegistry.isCompatible(
         ListCoder.of(BigEndianIntegerCoder.of()),
-        new TypeToken<List<String>>() {}.getType()));
+        new TypeDescriptor<List<String>>() {}.getType()));
   }
 
-  static class MyTemplateClass<A, B> { }
+  static class MyGenericClass<FooT, BazT> { }
 
   static class MyValue { }
 
@@ -249,16 +290,18 @@ public class CoderRegistryTest {
       return null;
     }
 
-    @Deprecated
-    @Override
-    public boolean isDeterministic() { return true; }
-
     @Override
     public void verifyDeterministic() { }
 
-    public boolean consistentWithEquals() { return true; }
+    @Override
+    public boolean consistentWithEquals() {
+      return true;
+    }
 
-    public Object structuralValue(MyValue value) { return value; }
+    @Override
+    public Object structuralValue(MyValue value) {
+      return value;
+    }
 
     @Override
     public boolean isRegisterByteSizeObserverCheap(MyValue value, Context context) {

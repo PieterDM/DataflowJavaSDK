@@ -79,10 +79,10 @@ public class Top {
    * {@link #largestPerKey}, which take a {@code PCollection} of
    * {@code KV}s and return the top values associated with each key.
    */
-  public static <T, C extends Comparator<T> & Serializable>
-      Combine.Globally<T, List<T>> of(int count, C compareFn) {
+  public static <T, ComparatorT extends Comparator<T> & Serializable>
+      Combine.Globally<T, List<T>> of(int count, ComparatorT compareFn) {
     return Combine.globally(new TopCombineFn<>(count, compareFn))
-        .withName("Top");
+        .setName("Top");
   }
 
   /**
@@ -122,7 +122,7 @@ public class Top {
   public static <T extends Comparable<T>>
       Combine.Globally<T, List<T>> smallest(int count) {
     return Combine.globally(new TopCombineFn<>(count, new Smallest<T>()))
-        .withName("Top.Smallest");
+        .setName("Top.Smallest");
   }
 
   /**
@@ -162,7 +162,7 @@ public class Top {
   public static <T extends Comparable<T>>
       Combine.Globally<T, List<T>> largest(int count) {
     return Combine.globally(new TopCombineFn<>(count, new Largest<T>()))
-        .withName("Top.Largest");
+        .setName("Top.Largest");
   }
 
   /**
@@ -206,12 +206,12 @@ public class Top {
    * <p> See also {@link #of}, {@link #smallest}, and {@link #largest}, which
    * take a {@code PCollection} and return the top elements.
    */
-  public static <K, V, C extends Comparator<V> & Serializable>
+  public static <K, V, ComparatorT extends Comparator<V> & Serializable>
       PTransform<PCollection<KV<K, V>>, PCollection<KV<K, List<V>>>>
-      perKey(int count, C compareFn) {
+      perKey(int count, ComparatorT compareFn) {
     return Combine.perKey(
         new TopCombineFn<>(count, compareFn).<K>asKeyedFn())
-        .withName("Top.PerKey");
+        .setName("Top.PerKey");
   }
 
   /**
@@ -259,7 +259,7 @@ public class Top {
       smallestPerKey(int count) {
     return Combine.perKey(
         new TopCombineFn<>(count, new Smallest<V>()).<K>asKeyedFn())
-        .withName("Top.SmallestPerKey");
+        .setName("Top.SmallestPerKey");
   }
 
   /**
@@ -307,7 +307,7 @@ public class Top {
       largestPerKey(int count) {
     return Combine.perKey(
         new TopCombineFn<>(count, new Largest<V>()).<K>asKeyedFn())
-        .withName("Top.LargestPerKey");
+        .setName("Top.LargestPerKey");
   }
 
 
@@ -328,8 +328,8 @@ public class Top {
     private final int count;
     private final Comparator<T> compareFn;
 
-    public <C extends Comparator<T> & Serializable> TopCombineFn(
-        int count, C compareFn) {
+    public <ComparatorT extends Comparator<T> & Serializable> TopCombineFn(
+        int count, ComparatorT compareFn) {
       if (count < 0) {
         throw new IllegalArgumentException("count must be >= 0");
       }
@@ -438,12 +438,6 @@ public class Top {
       public Heap decode(InputStream inStream, Coder.Context context)
           throws CoderException, IOException {
         return new Heap(listCoder.decode(inStream, context));
-      }
-
-      @Override
-      @Deprecated
-      public boolean isDeterministic() {
-        return listCoder.isDeterministic();
       }
 
       @Override

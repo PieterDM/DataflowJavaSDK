@@ -16,8 +16,7 @@
 
 package com.google.cloud.dataflow.sdk.coders;
 
-import com.google.common.base.Optional;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 /**
  * A {@code CoderProvider} may create a {@link Coder} for
@@ -27,6 +26,8 @@ public interface CoderProvider {
 
   /**
    * Provides a coder for a given class, if possible.
+   *
+   * @throws CannotProvideCoderException if no coder can be provided
    */
-  public <T> Optional<Coder<T>> getCoder(TypeToken<T> type);
+  public <T> Coder<T> getCoder(TypeDescriptor<T> type) throws CannotProvideCoderException;
 }

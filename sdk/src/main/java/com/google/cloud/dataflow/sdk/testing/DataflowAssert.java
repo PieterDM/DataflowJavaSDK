@@ -16,8 +16,16 @@
 
 package com.google.cloud.dataflow.sdk.testing;
 
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.equalTo;
+import static org.junit.Assert.assertThat;
+
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.coders.Coder;
+import com.google.cloud.dataflow.sdk.coders.IterableCoder;
+import com.google.cloud.dataflow.sdk.coders.KvCoder;
+import com.google.cloud.dataflow.sdk.coders.MapCoder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
 import com.google.cloud.dataflow.sdk.runners.PipelineRunner;
 import com.google.cloud.dataflow.sdk.transforms.Create;
@@ -27,6 +35,7 @@ import com.google.cloud.dataflow.sdk.transforms.SerializableFunction;
 import com.google.cloud.dataflow.sdk.transforms.View;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
+import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
 import com.google.common.base.Optional;
@@ -34,11 +43,10 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
 import java.io.Serializable;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 
 /**
@@ -92,19 +100,26 @@ public class DataflowAssert {
    * {@link PCollection PCollection&lt;Iterable&lt;T&gt;&gt;}, which must be a
    * singleton.
    */
-  public static <T> IterableAssert<T> thatSingletonIterable(PCollection<Iterable<T>> actual) {
+  public static <T> IterableAssert<T>
+      thatSingletonIterable(PCollection<? extends Iterable<T>> actual) {
+
     List<? extends Coder<?>> maybeElementCoder = actual.getCoder().getCoderArguments();
     Coder<T> tCoder;
     try {
       tCoder = (Coder<T>) Iterables.getOnlyElement(maybeElementCoder);
     } catch (NoSuchElementException | IllegalArgumentException exc) {
       throw new IllegalArgumentException(
-        "DataflowAssert.<T>thatSingltonIterable requires a PCollection<Iterable<T>>"
+        "DataflowAssert.<T>thatSingletonIterable requires a PCollection<Iterable<T>>"
         + " with a Coder<Iterable<T>> where getCoderArguments() yields a"
         + " single Coder<T> to apply to the elements.");
     }
 
-    return new IterableAssert<>(inGlobalWindows(actual).apply(View.<Iterable<T>>asSingleton()))
+    @SuppressWarnings("unchecked") // Safe covariant cast
+    PCollection<Iterable<T>> actualIterables = (PCollection<Iterable<T>>) actual;
+
+    return new IterableAssert<T>(
+            inGlobalWindows(actualIterables)
+            .apply(View.<Iterable<T>>asSingleton()))
         .setCoder(tCoder);
   }
 
@@ -123,6 +138,37 @@ public class DataflowAssert {
   public static <T> SingletonAssert<T> thatSingleton(PCollection<T> actual) {
     return new SingletonAssert<>(inGlobalWindows(actual).apply(View.<T>asSingleton()))
         .setCoder(actual.getCoder());
+  }
+
+  /**
+   * Constructs a {@link SingletonAssert SingletonAssert<Map<K, Iterable<V>>>}
+   * for the value of the provided {@link PCollection PCollection<KV<K, V>>}
+   *
+   * <p> Note that the actual value must be coded by a {@link KvCoder},
+   * not just any {@code Coder<K, V>}.
+   */
+  public static <K, V> SingletonAssert<Map<K, Iterable<V>>>
+      thatMultimap(PCollection<KV<K, V>> actual) {
+    @SuppressWarnings("unchecked")
+    KvCoder<K, V> kvCoder = (KvCoder<K, V>) actual.getCoder();
+    return new SingletonAssert<>(inGlobalWindows(actual).apply(View.<K, V>asMap()))
+        .setCoder(MapCoder.of(kvCoder.getKeyCoder(), IterableCoder.of(kvCoder.getValueCoder())));
+  }
+
+  /**
+   * Constructs a {@link SingletonAssert SingletonAssert<Map<K, V>>} for the value of the provided
+   * {@link PCollection PCollection<KV<K, V>>}, which must have at
+   * most one value per key.
+
+   * <p> Note that the actual value must be coded by a {@link KvCoder},
+   * not just any {@code Coder<K, V>}.
+   */
+  public static <K, V> SingletonAssert<Map<K, V>> thatMap(PCollection<KV<K, V>> actual) {
+    @SuppressWarnings("unchecked")
+    KvCoder<K, V> kvCoder = (KvCoder<K, V>) actual.getCoder();
+    return new SingletonAssert<>(
+        inGlobalWindows(actual).apply(View.<K, V>asMap().withSingletonValues()))
+        .setCoder(MapCoder.of(kvCoder.getKeyCoder(), kvCoder.getValueCoder()));
   }
 
   ////////////////////////////////////////////////////////////
@@ -145,20 +191,11 @@ public class DataflowAssert {
     /**
      * Sets the coder to use for elements of type {@code T}, as needed
      * for internal purposes.
-     */
-    public IterableAssert<T> setCoder(Coder<T> coder) {
-      this.coder = Optional.of(coder);
-      return this;
-    }
-
-    /**
-     * Sets the coder to use for elements of type {@code T}, as needed
-     * for internal purposes.
      *
      * <p> Returns this {@code IterableAssert}.
      */
-    public IterableAssert<T> setCoder(Optional<Coder<T>> coder) {
-      this.coder = coder;
+    public IterableAssert<T> setCoder(Coder<T> coderOrNull) {
+      this.coder = Optional.fromNullable(coderOrNull);
       return this;
     }
 
@@ -244,19 +281,8 @@ public class DataflowAssert {
      * Sets the coder to use for elements of type {@code T}, as needed
      * for internal purposes.
      */
-    public SingletonAssert<T> setCoder(Coder<T> coder) {
-      this.coder = Optional.of(coder);
-      return this;
-    }
-
-    /**
-     * Sets the coder to use for elements of type {@code T}, as needed
-     * for internal purposes.
-     *
-     * <p> Returns this {@code SingletonAssert}.
-     */
-    public SingletonAssert<T> setCoder(Optional<Coder<T>> coder) {
-      this.coder = coder;
+    public SingletonAssert<T> setCoder(Coder<T> coderOrNull) {
+      this.coder = Optional.fromNullable(coderOrNull);
       return this;
     }
 
@@ -313,6 +339,12 @@ public class DataflowAssert {
       return satisfies(new AssertIsEqualToRelation<T>(), expectedValue);
     }
 
+    /**
+     * Checks that the value of this {@code SingletonAssert}'s view is equal to
+     * the expected value.
+     *
+     * @deprecated replaced by {@link #isEqualTo}
+     */
     @Deprecated
     public SingletonAssert<T> is(T expectedValue) {
       return isEqualTo(expectedValue);
@@ -342,16 +374,16 @@ public class DataflowAssert {
    * are serializable but whose underlying data may not have a coder.
    */
   @SuppressWarnings("serial")
-  private static class OneSideInputAssert<Actual> implements Serializable {
+  private static class OneSideInputAssert<ActualT> implements Serializable {
 
-    private final PCollectionView<Actual> actualView;
+    private final PCollectionView<ActualT> actualView;
 
-    public OneSideInputAssert(PCollectionView<Actual> actualView) {
+    public OneSideInputAssert(PCollectionView<ActualT> actualView) {
       this.actualView = actualView;
     }
 
-    public OneSideInputAssert<Actual> satisfies(
-        final SerializableFunction<Actual, Void> checkerFn) {
+    public OneSideInputAssert<ActualT> satisfies(
+        final SerializableFunction<ActualT, Void> checkerFn) {
       actualView.getPipeline()
         .apply(Create.<Void>of((Void) null))
         .setCoder(VoidCoder.of())
@@ -360,7 +392,7 @@ public class DataflowAssert {
           .of(new DoFn<Void, Void>() {
             @Override
             public void processElement(ProcessContext c) {
-              Actual actualContents = c.sideInput(actualView);
+              ActualT actualContents = c.sideInput(actualView);
               checkerFn.apply(actualContents);
             }
           }));
@@ -379,20 +411,20 @@ public class DataflowAssert {
    * by the underlying {@link PCollection}s).
    */
   @SuppressWarnings("serial")
-  private static class TwoSideInputAssert<Actual, Expected> implements Serializable {
+  private static class TwoSideInputAssert<ActualT, ExpectedT> implements Serializable {
 
-    private final PCollectionView<Actual> actualView;
-    private final PCollectionView<Expected> expectedView;
+    private final PCollectionView<ActualT> actualView;
+    private final PCollectionView<ExpectedT> expectedView;
 
     protected TwoSideInputAssert(
-        PCollectionView<Actual> actualView,
-        PCollectionView<Expected> expectedView) {
+        PCollectionView<ActualT> actualView,
+        PCollectionView<ExpectedT> expectedView) {
       this.actualView = actualView;
       this.expectedView = expectedView;
     }
 
-    public TwoSideInputAssert<Actual, Expected> satisfies(
-        final AssertRelation<Actual, Expected> relation) {
+    public TwoSideInputAssert<ActualT, ExpectedT> satisfies(
+        final AssertRelation<ActualT, ExpectedT> relation) {
       actualView.getPipeline()
         .apply(Create.<Void>of((Void) null))
         .setCoder(VoidCoder.of())
@@ -401,8 +433,8 @@ public class DataflowAssert {
           .of(new DoFn<Void, Void>() {
             @Override
             public void processElement(ProcessContext c) {
-              Actual actualContents = c.sideInput(actualView);
-              Expected expectedContents = c.sideInput(expectedView);
+              ActualT actualContents = c.sideInput(actualView);
+              ExpectedT expectedContents = c.sideInput(expectedView);
               relation.assertFor(expectedContents).apply(actualContents);
             }
           }));
@@ -413,105 +445,36 @@ public class DataflowAssert {
   /////////////////////////////////////////////////////////////////////////////
 
   /**
-   * A {@link SerializableFunction} that performs an
-   * {@code Assert.assertThat()} operation using a
-   * {@code Matcher} operation.
-   *
-   * <P> The {@code MatcherFactory} should take an {@code Expected} and
-   * produce a Matcher to be used to check an {@code Actual} value
-   * against.
+   * A {@link SerializableFunction} that verifies that an actual value is equal to an
+   * expected value.
    */
   @SuppressWarnings("serial")
-  public static class AssertThat<Actual, Expected>
-      implements SerializableFunction<Actual, Void> {
-    final Expected expected;
-    final Class<?> expectedClass;
-    final String matcherClassName;
-    final String matcherFactoryMethodName;
+  private static class AssertIsEqualTo<T> implements SerializableFunction<T, Void> {
+    private T expected;
 
-    AssertThat(Expected expected,
-               Class<?> expectedClass,
-               String matcherClassName,
-               String matcherFactoryMethodName) {
+    public AssertIsEqualTo(T expected) {
       this.expected = expected;
-      this.expectedClass = expectedClass;
-      this.matcherClassName = matcherClassName;
-      this.matcherFactoryMethodName = matcherFactoryMethodName;
     }
 
     @Override
-    public Void apply(Actual in) {
-      try {
-        Method matcherFactoryMethod = Class.forName(this.matcherClassName)
-            .getMethod(this.matcherFactoryMethodName, expectedClass);
-        Object matcher = matcherFactoryMethod.invoke(null, (Object) expected);
-        Method assertThatMethod = Class.forName("org.junit.Assert")
-            .getMethod("assertThat",
-                       Object.class,
-                       Class.forName("org.hamcrest.Matcher"));
-        assertThatMethod.invoke(null, in, matcher);
-      } catch (InvocationTargetException e) {
-        // An error in the assertThat or matcher itself.
-        throw new RuntimeException(e);
-      } catch (ReflectiveOperationException e) {
-        // An error looking up the classes and methods.
-        throw new RuntimeException(
-            "DataflowAssert requires that JUnit and Hamcrest be linked in.",
-            e);
-      }
+    public Void apply(T actual) {
+      assertThat(actual, equalTo(expected));
       return null;
     }
   }
 
   /**
-   * An {@link AssertThat} taking a single element.
-   */
-  @SuppressWarnings("serial")
-  private static class AssertThatValue<T> extends AssertThat<T, T> {
-    AssertThatValue(T expected,
-                    String matcherClassName,
-                    String matcherFactoryMethodName) {
-      super(expected, Object.class,
-            matcherClassName, matcherFactoryMethodName);
-    }
-  }
-
-  /**
-   * An {@link AssertThatValue} that verifies that an actual value is equal to an
-   * expected value.
-   */
-  @SuppressWarnings("serial")
-  private static class AssertIsEqualTo<T> extends AssertThatValue<T> {
-    public AssertIsEqualTo(T expected) {
-      super(expected, "org.hamcrest.core.IsEqual", "equalTo");
-    }
-  }
-
-  /**
-   * An {@link AssertThat} that operates on an {@code Iterable}. The
-   * underlying matcher takes a {@code T[]} of expected values, for
-   * compatibility with the corresponding Hamcrest {@code Matcher}s.
-   */
-  @SuppressWarnings("serial")
-  private static class AssertThatIterable<T> extends AssertThat<Iterable<T>, T[]> {
-    AssertThatIterable(T[] expected,
-                       String matcherClassName,
-                       String matcherFactoryMethodName) {
-      super(expected, Object[].class,
-            matcherClassName, matcherFactoryMethodName);
-    }
-  }
-
-  /**
-   * An {@link AssertThatIterable} that verifies that an {@code Iterable} contains
+   * A {@link SerializableFunction} that verifies that an {@code Iterable} contains
    * expected items in any order.
    */
   @SuppressWarnings("serial")
-  private static class AssertContainsInAnyOrder<T> extends AssertThatIterable<T> {
+  private static class AssertContainsInAnyOrder<T>
+      implements SerializableFunction<Iterable<T>, Void> {
+
+    private T[] expected;
+
     public AssertContainsInAnyOrder(T... expected) {
-      super(expected,
-            "org.hamcrest.collection.IsIterableContainingInAnyOrder",
-            "containsInAnyOrder");
+      this.expected = expected;
     }
 
     @SuppressWarnings("unchecked")
@@ -523,18 +486,24 @@ public class DataflowAssert {
     public AssertContainsInAnyOrder(Iterable<T> expected) {
       this(Lists.newArrayList(expected));
     }
+
+    @Override
+    public Void apply(Iterable<T> actual) {
+      assertThat(actual, containsInAnyOrder(expected));
+      return null;
+    }
   }
 
   /**
-   * An {@link AssertThatIterable} that verifies that an {@code Iterable} contains
+   * A {@link SerializableFunction} that verifies that an {@code Iterable} contains
    * the expected items in the provided order.
    */
   @SuppressWarnings("serial")
-  private static class AssertContainsInOrder<T> extends AssertThatIterable<T> {
+  private static class AssertContainsInOrder<T> implements SerializableFunction<Iterable<T>, Void> {
+    private T[] expected;
+
     public AssertContainsInOrder(T... expected) {
-      super(expected,
-            "org.hamcrest.collection.IsIterableContainingInOrder",
-            "contains");
+      this.expected = expected;
     }
 
     @SuppressWarnings("unchecked")
@@ -546,35 +515,42 @@ public class DataflowAssert {
     public AssertContainsInOrder(Iterable<T> expected) {
       this(Lists.newArrayList(expected));
     }
+
+    @Override
+    public Void apply(Iterable<T> actual) {
+      assertThat(actual, contains(expected));
+      return null;
+    }
   }
 
   ////////////////////////////////////////////////////////////
 
   /**
-   * A serializable function implementing a binary predicate
-   * between types {@code Actual} and {@code Expected}.
+   * A binary predicate between types {@code Actual} and {@code Expected}.
+   * Implemented as a method {@code assertFor(Expected)} which returns
+   * a {@link SerializableFunction SerializableFunction<Actual, Void>}
+   * that should verify the assertion..
    */
-  public static interface AssertRelation<Actual, Expected> extends Serializable {
-    public SerializableFunction<Actual, Void> assertFor(Expected input);
+  public static interface AssertRelation<ActualT, ExpectedT> extends Serializable {
+    public SerializableFunction<ActualT, Void> assertFor(ExpectedT input);
   }
 
   /**
-   * An {@link AssertRelation} implementing the binary predicate
-   * that two objects are equal.
+   * An {@link AssertRelation} implementing the binary predicate that two objects are equal.
    */
   private static class AssertIsEqualToRelation<T>
       implements AssertRelation<T, T> {
     private static final long serialVersionUID = 0;
 
     @Override
-    public AssertThat<T, T> assertFor(T expected) {
+    public SerializableFunction<T, Void> assertFor(T expected) {
       return new AssertIsEqualTo<T>(expected);
     }
   }
 
   /**
-   * An {@code AssertRelation} implementing the binary predicate
-   * that two collections are equal modulo reordering.
+   * An {@code AssertRelation} implementing the binary predicate that two collections are equal
+   * modulo reordering.
    */
   private static class AssertContainsInAnyOrderRelation<T>
       implements AssertRelation<Iterable<T>, Iterable<T>> {
@@ -587,8 +563,8 @@ public class DataflowAssert {
   }
 
   /**
-   * A {@code AssertRelation} implementating the binary function
-   * that two iterables have equal contents, in the same order.
+   * A {@code AssertRelation} implementating the binary function that two iterables have equal
+   * contents, in the same order.
    */
   private static class AssertContainsInOrderRelation<T>
       implements AssertRelation<Iterable<T>, Iterable<T>> {

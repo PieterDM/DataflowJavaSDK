@@ -17,8 +17,7 @@
 package com.google.cloud.dataflow.sdk.coders;
 
 import com.google.cloud.dataflow.sdk.util.CloudObject;
-import com.google.common.base.Optional;
-import com.google.common.reflect.TypeToken;
+import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -31,7 +30,8 @@ import java.io.OutputStream;
 import java.io.Serializable;
 
 /**
- * An encoder of {@link java.io.Serializable} objects.
+ * A {@code SerializableCoder} is a {@link Coder} for a
+ * Java class that implements {@link java.io.Serializable}.
  *
  * <p> To use, specify the coder type on a PCollection:
  * <pre>
@@ -59,16 +59,6 @@ public class SerializableCoder<T extends Serializable>
     return new SerializableCoder<>(clazz);
   }
 
-  /**
-   * Returns a {@code SerializableCoder} instance for the provided element type token.
-   * @param <T> the element type
-   */
-  public static <T extends Serializable> SerializableCoder<T> of(TypeToken<T> typeToken) {
-    @SuppressWarnings("unchecked")
-    Class<T> clazz = (Class<T>) typeToken.getRawType();
-    return SerializableCoder.of(clazz);
-  }
-
   @JsonCreator
   @SuppressWarnings("unchecked")
   public static SerializableCoder<?> of(@JsonProperty("type") String classType)
@@ -87,17 +77,20 @@ public class SerializableCoder<T extends Serializable>
    */
   public static final CoderProvider PROVIDER = new CoderProvider() {
     @Override
-    public <T> Optional<Coder<T>> getCoder(TypeToken<T> typeToken) {
-      Class<?> clazz = typeToken.getRawType();
+    public <T> Coder<T> getCoder(TypeDescriptor<T> typeDescriptor)
+        throws CannotProvideCoderException {
+      Class<?> clazz = typeDescriptor.getRawType();
       if (Serializable.class.isAssignableFrom(clazz)) {
         @SuppressWarnings("unchecked")
         Class<? extends Serializable> serializableClazz =
             (Class<? extends Serializable>) clazz;
         @SuppressWarnings("unchecked")
-        Coder<T> coderOrNull = (Coder<T>) SerializableCoder.of(serializableClazz);
-        return Optional.fromNullable(coderOrNull);
+        Coder<T> coder = (Coder<T>) SerializableCoder.of(serializableClazz);
+        return coder;
       } else {
-        return Optional.<Coder<T>>absent();
+        throw new CannotProvideCoderException(
+            "Cannot provide SerializableCoder because " + typeDescriptor
+            + " does not implement Serializable");
       }
     }
   };
@@ -116,9 +109,6 @@ public class SerializableCoder<T extends Serializable>
   @Override
   public void encode(T value, OutputStream outStream, Context context)
       throws IOException, CoderException {
-    if (value == null) {
-      throw new CoderException("cannot encode a null record");
-    }
     try (ObjectOutputStream oos = new ObjectOutputStream(outStream)) {
       oos.writeObject(value);
     } catch (IOException exn) {
@@ -144,12 +134,6 @@ public class SerializableCoder<T extends Serializable>
   }
 
   @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
-  }
-
-  @Override
   public void verifyDeterministic() throws NonDeterministicException {
     throw new NonDeterministicException(this,
         "Java Serialization may be non-deterministic.");
@@ -160,7 +144,7 @@ public class SerializableCoder<T extends Serializable>
     if (getClass() != other.getClass()) {
       return false;
     }
-    return type == ((SerializableCoder) other).type;
+    return type == ((SerializableCoder<?>) other).type;
   }
 
   @Override

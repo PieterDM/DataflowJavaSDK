@@ -23,7 +23,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * A TextualIntegerCoder encodes Integers as text.
+ * A {@code TextualIntegerCoder} encodes {@code Integer}s
+ * as their textual, decimal, representation.
  */
 @SuppressWarnings("serial")
 public class TextualIntegerCoder extends AtomicCoder<Integer> {
@@ -56,12 +57,6 @@ public class TextualIntegerCoder extends AtomicCoder<Integer> {
     } catch (NumberFormatException exn) {
       throw new CoderException("error when decoding a textual integer", exn);
     }
-  }
-
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return true;
   }
 
   @Override

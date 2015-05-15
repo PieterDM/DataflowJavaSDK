@@ -28,7 +28,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.io.Serializable;
 
 /**
- * An abstract base class for writing Coders that encodes itself via java
+ * An abstract base class for writing {@link Coder}s that encodes itself via java
  * serialization.  Subclasses only need to implement the {@link Coder#encode}
  * and {@link Coder#decode} methods.
  *
@@ -74,9 +74,10 @@ public abstract class CustomCoder<T> extends AtomicCoder<T>
   }
 
   @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
+  public void verifyDeterministic() throws NonDeterministicException {
+    throw new NonDeterministicException(this,
+        "CustomCoder implementations must override verifyDeterministic,"
+        + " or they are presumed nondeterministic.");
   }
 
   // This coder inherits isRegisterByteSizeObserverCheap,

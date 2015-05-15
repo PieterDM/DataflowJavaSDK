@@ -35,7 +35,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 
 /**
- * A MapCoder encodes Maps.
+ * A {@code MapCoder} encodes {@code Map}s.
  *
  * @param <K> the type of the keys of the KVs being transcoded
  * @param <V> the type of the values of the KVs being transcoded
@@ -72,8 +72,13 @@ public class MapCoder<K, V> extends MapCoderBase<Map<K, V>> {
      return null;
    }
 
-  public Coder<K> getKeyCoder() { return keyCoder; }
-  public Coder<V> getValueCoder() { return valueCoder; }
+  public Coder<K> getKeyCoder() {
+    return keyCoder;
+  }
+
+  public Coder<V> getValueCoder() {
+    return valueCoder;
+  }
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -125,12 +130,6 @@ public class MapCoder<K, V> extends MapCoderBase<Map<K, V>> {
    * <p> For example, HashMap comparison does not depend on element order, so
    * two HashMap instances may be equal but produce different encodings.
    */
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
-  }
-
   @Override
   public void verifyDeterministic() throws NonDeterministicException {
     throw new NonDeterministicException(this,

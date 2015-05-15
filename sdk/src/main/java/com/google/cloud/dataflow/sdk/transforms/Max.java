@@ -16,6 +16,10 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import com.google.cloud.dataflow.sdk.util.common.Counter;
+import com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind;
+import com.google.cloud.dataflow.sdk.util.common.CounterProvider;
+
 /**
  * {@code PTransform}s for computing the maximum of the elements in a
  * {@code PCollection}, or the maximum of the values associated with
@@ -137,14 +141,14 @@ public class Max {
    * of type {@code N}, useful as an argument to {@link Combine#globally}
    * or {@link Combine#perKey}.
    *
-   * @param <N> the type of the {@code Number}s being compared
+   * @param <NumT> the type of the {@code Number}s being compared
    */
   @SuppressWarnings("serial")
-  public static class MaxFn<N extends Comparable<N>>
-      extends Combine.BinaryCombineFn<N> {
+  public static class MaxFn<NumT extends Comparable<NumT>>
+      extends Combine.BinaryCombineFn<NumT> {
 
-    /** The smallest value of type N. */
-    private final N initialValue;
+    /** The smallest value of type NumT. */
+    private final NumT initialValue;
 
     /**
      * Constructs a combining function that computes the maximum over
@@ -152,17 +156,17 @@ public class Max {
      * value of type {@code N}, which is the identity value for the
      * maximum operation over {@code N}s.
      */
-    public MaxFn(N initialValue) {
+    public MaxFn(NumT initialValue) {
       this.initialValue = initialValue;
     }
 
     @Override
-    public N apply(N a, N b) {
+    public NumT apply(NumT a, NumT b) {
       return a.compareTo(b) >= 0 ? a : b;
     }
 
     @Override
-    public N identity() {
+    public NumT identity() {
       return initialValue;
     }
   }
@@ -173,8 +177,16 @@ public class Max {
    * {@link Combine#globally} or {@link Combine#perKey}.
    */
   @SuppressWarnings("serial")
-  public static class MaxIntegerFn extends MaxFn<Integer> {
-    public MaxIntegerFn() { super(Integer.MIN_VALUE); }
+  public static class MaxIntegerFn extends MaxFn<Integer> implements
+      CounterProvider<Integer> {
+    public MaxIntegerFn() {
+      super(Integer.MIN_VALUE);
+    }
+
+    @Override
+    public Counter<Integer> getCounter(String name) {
+      return Counter.ints(name, AggregationKind.MAX);
+    }
   }
 
   /**
@@ -183,8 +195,16 @@ public class Max {
    * {@link Combine#globally} or {@link Combine#perKey}.
    */
   @SuppressWarnings("serial")
-  public static class MaxLongFn extends MaxFn<Long> {
-    public MaxLongFn() { super(Long.MIN_VALUE); }
+  public static class MaxLongFn extends MaxFn<Long> implements
+      CounterProvider<Long> {
+    public MaxLongFn() {
+      super(Long.MIN_VALUE);
+    }
+
+    @Override
+    public Counter<Long> getCounter(String name) {
+      return Counter.longs(name, AggregationKind.MAX);
+    }
   }
 
   /**
@@ -193,7 +213,15 @@ public class Max {
    * {@link Combine#globally} or {@link Combine#perKey}.
    */
   @SuppressWarnings("serial")
-  public static class MaxDoubleFn extends MaxFn<Double> {
-    public MaxDoubleFn() { super(Double.NEGATIVE_INFINITY); }
+  public static class MaxDoubleFn extends MaxFn<Double> implements
+      CounterProvider<Double> {
+    public MaxDoubleFn() {
+      super(Double.NEGATIVE_INFINITY);
+    }
+
+    @Override
+    public Counter<Double> getCounter(String name) {
+      return Counter.doubles(name, AggregationKind.MAX);
+    }
   }
 }

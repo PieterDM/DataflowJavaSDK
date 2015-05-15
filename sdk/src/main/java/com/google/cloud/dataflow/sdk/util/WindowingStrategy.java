@@ -36,16 +36,27 @@ import java.io.Serializable;
  */
 public class WindowingStrategy<T, W extends BoundedWindow> implements Serializable {
 
+  /**
+   * The accumulation modes that can be used with windowing.
+   */
+  public enum AccumulationMode {
+    DISCARDING_FIRED_PANES,
+    ACCUMULATING_FIRED_PANES;
+  }
+
   private static final WindowingStrategy<Object, GlobalWindow> DEFAULT = of(new GlobalWindows());
 
   private static final long serialVersionUID = 0L;
 
   private final WindowFn<T, W> windowFn;
-  private final Trigger<W> trigger;
+  private final ExecutableTrigger<W> trigger;
+  private final AccumulationMode mode;
 
-  private WindowingStrategy(WindowFn<T, W> windowFn, Trigger<W> trigger) {
+  private WindowingStrategy(
+      WindowFn<T, W> windowFn, ExecutableTrigger<W> trigger, AccumulationMode mode) {
     this.windowFn = windowFn;
     this.trigger = trigger;
+    this.mode = mode;
   }
 
   public static WindowingStrategy<Object, GlobalWindow> globalDefault() {
@@ -57,22 +68,36 @@ public class WindowingStrategy<T, W extends BoundedWindow> implements Serializab
    * {@link DefaultTrigger}.
    */
   public static <T, W extends BoundedWindow> WindowingStrategy<T, W> of(WindowFn<T, W> windowFn) {
-    return of(windowFn, DefaultTrigger.<W>of());
+    ExecutableTrigger<W> defaultTrigger = ExecutableTrigger.create(DefaultTrigger.<W>of());
+    return new WindowingStrategy<>(
+        windowFn, defaultTrigger, AccumulationMode.DISCARDING_FIRED_PANES);
   }
 
-  /**
-   * Create a {@code WindowingStrategy} for the given {@code windowFn} and {@code trigger}.
-   */
-  public static <T, W extends BoundedWindow> WindowingStrategy<T, W> of(
-      WindowFn<T, W> windowFn, Trigger<W> trigger) {
-    return new WindowingStrategy<>(windowFn, trigger);
+  public WindowingStrategy<T, W> withTrigger(Trigger<?> wildcardTrigger) {
+    @SuppressWarnings("unchecked")
+    Trigger<W> trigger = (Trigger<W>) wildcardTrigger;
+    return new WindowingStrategy<T, W>(windowFn, ExecutableTrigger.create(trigger), mode);
+  }
+
+  public WindowingStrategy<T, W> withMode(AccumulationMode mode) {
+    return new WindowingStrategy<T, W>(windowFn, trigger, mode);
+  }
+
+  public <T> WindowingStrategy<T, W> withWindowFn(WindowFn<?, ?> wildcardWindowFn) {
+    @SuppressWarnings("unchecked")
+    WindowFn<T, W> windowFn = (WindowFn<T, W>) wildcardWindowFn;
+    return new WindowingStrategy<T, W>(windowFn, trigger, mode);
   }
 
   public WindowFn<T, W> getWindowFn() {
     return windowFn;
   }
 
-  public Trigger<W> getTrigger() {
+  public ExecutableTrigger<W> getTrigger() {
     return trigger;
+  }
+
+  public AccumulationMode getMode() {
+    return mode;
   }
 }

@@ -14,11 +14,14 @@
  * the License.
  */
 
-package com.google.cloud.dataflow.sdk.coders;
+package com.google.cloud.dataflow.sdk.testing;
 
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
+import com.google.cloud.dataflow.sdk.coders.CoderException;
+import com.google.cloud.dataflow.sdk.coders.CustomCoder;
+import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.common.base.Strings;
 
 import org.hamcrest.CoreMatchers;
@@ -101,9 +104,7 @@ public class CoderPropertiesTest {
     }
 
     @Override
-    public boolean isDeterministic() {
-      return true;
-    }
+    public void verifyDeterministic() throws NonDeterministicException { }
   }
 
   @Test

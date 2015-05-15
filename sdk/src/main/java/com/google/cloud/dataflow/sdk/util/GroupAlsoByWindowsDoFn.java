@@ -22,9 +22,7 @@ import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.RequiresKeyedState;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
-import com.google.cloud.dataflow.sdk.transforms.windowing.NonMergingWindowFn;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
-import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.common.base.Preconditions;
 
@@ -35,13 +33,13 @@ import org.joda.time.Instant;
  * combining values.
  *
  * @param <K> key type
- * @param <VI> input value element type
- * @param <VO> output value element type
+ * @param <InputT> input value element type
+ * @param <OutputT> output value element type
  * @param <W> window type
  */
 @SuppressWarnings("serial")
-public abstract class GroupAlsoByWindowsDoFn<K, VI, VO, W extends BoundedWindow>
-    extends DoFn<KV<K, Iterable<WindowedValue<VI>>>, KV<K, VO>>
+public abstract class GroupAlsoByWindowsDoFn<K, InputT, OutputT, W extends BoundedWindow>
+    extends DoFn<KV<K, Iterable<WindowedValue<InputT>>>, KV<K, OutputT>>
     implements RequiresKeyedState {
 
   /**
@@ -53,59 +51,57 @@ public abstract class GroupAlsoByWindowsDoFn<K, VI, VO, W extends BoundedWindow>
    */
   public static <K, V, W extends BoundedWindow> GroupAlsoByWindowsDoFn<K, V, Iterable<V>, W>
   createForIterable(WindowingStrategy<?, W> windowingStrategy, Coder<V> inputCoder) {
-    if (windowingStrategy.getWindowFn() instanceof NonMergingWindowFn
-        && windowingStrategy.getTrigger() instanceof DefaultTrigger) {
+    if (windowingStrategy.getWindowFn().isNonMerging()
+        && windowingStrategy.getTrigger().getSpec() instanceof DefaultTrigger
+        && windowingStrategy.getMode() == AccumulationMode.DISCARDING_FIRED_PANES) {
       return new GroupAlsoByWindowsViaIteratorsDoFn<K, V, W>();
-    } else {
-      return new GABWViaWindowSetDoFn<>(
-          windowingStrategy, BufferingWindowSet.<K, V, W>factory(inputCoder));
     }
+
+    return new GABWViaWindowSetDoFn<>(
+        windowingStrategy, AbstractWindowSet.<K, V, W>factoryFor(windowingStrategy, inputCoder));
   }
 
   /**
    * Construct a {@link GroupAlsoByWindowsDoFn} using the {@code combineFn} if available.
    */
-  public static <K, VI, VA, VO, W extends BoundedWindow> GroupAlsoByWindowsDoFn<K, VI, VO, W>
+  public static <K, InputT, AccumT, OutputT, W extends BoundedWindow>
+      GroupAlsoByWindowsDoFn<K, InputT, OutputT, W>
   create(
       final WindowingStrategy<?, W> windowingStrategy,
-      final KeyedCombineFn<K, VI, VA, VO> combineFn,
+      final KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn,
       final Coder<K> keyCoder,
-      final Coder<VI> inputCoder) {
+      final Coder<InputT> inputCoder) {
     Preconditions.checkNotNull(combineFn);
     return new GABWViaWindowSetDoFn<>(
-        windowingStrategy, CombiningWindowSet.<K, VI, VA, VO, W>factory(
+        windowingStrategy, CombiningWindowSet.<K, InputT, AccumT, OutputT, W>factory(
             combineFn, keyCoder, inputCoder));
   }
 
-  private static class GABWViaWindowSetDoFn<K, VI, VO, W extends BoundedWindow>
-     extends GroupAlsoByWindowsDoFn<K, VI, VO, W> {
+  private static class GABWViaWindowSetDoFn<K, InputT, OutputT, W extends BoundedWindow>
+     extends GroupAlsoByWindowsDoFn<K, InputT, OutputT, W> {
 
-    private WindowFn<Object, W> windowFn;
-    private AbstractWindowSet.Factory<K, VI, VO, W> windowSetFactory;
-    private Trigger<W> trigger;
+    private AbstractWindowSet.Factory<K, InputT, OutputT, W> windowSetFactory;
+    private WindowingStrategy<Object, W> strategy;
 
     public GABWViaWindowSetDoFn(WindowingStrategy<?, W> windowingStrategy,
-        AbstractWindowSet.Factory<K, VI, VO, W> factory) {
+        AbstractWindowSet.Factory<K, InputT, OutputT, W> factory) {
       @SuppressWarnings("unchecked")
       WindowingStrategy<Object, W> noWildcard = (WindowingStrategy<Object, W>) windowingStrategy;
-      this.windowFn = noWildcard.getWindowFn();
-      this.trigger = noWildcard.getTrigger();
+      this.strategy = noWildcard;
       this.windowSetFactory = factory;
     }
 
     @Override
     public void processElement(
-        DoFn<KV<K, Iterable<WindowedValue<VI>>>, KV<K, VO>>.ProcessContext c) throws Exception {
+        DoFn<KV<K, Iterable<WindowedValue<InputT>>>,
+        KV<K, OutputT>>.ProcessContext c)
+        throws Exception {
       K key = c.element().getKey();
-      AbstractWindowSet<K, VI, VO, W> windowSet = windowSetFactory.create(
-          key, windowFn.windowCoder(), c.keyedState(), c.windowingInternals());
-
       BatchTimerManager timerManager = new BatchTimerManager(Instant.now());
-      TriggerExecutor<K, VI, VO, W> triggerExecutor = new TriggerExecutor<>(
-          windowFn, timerManager, trigger,
-          c.keyedState(), c.windowingInternals(), windowSet);
+      TriggerExecutor<K, InputT, OutputT, W> triggerExecutor = TriggerExecutor.create(
+          key, strategy, timerManager, windowSetFactory, c.keyedState(), c.windowingInternals());
 
-      for (WindowedValue<VI> e : c.element().getValue()) {
+      for (WindowedValue<InputT> e : c.element().getValue()) {
         // First, handle anything that needs to happen for this element
         triggerExecutor.onElement(e);
 
@@ -117,13 +113,16 @@ public abstract class GroupAlsoByWindowsDoFn<K, VI, VO, W extends BoundedWindow>
         timerManager.advanceProcessingTime(triggerExecutor, Instant.now());
       }
 
+      // Merge the active windows for the current key, to fire any data-based triggers.
+      triggerExecutor.merge();
+
       // Finish any pending windows by advancing the watermark to infinity.
       timerManager.advanceWatermark(triggerExecutor, new Instant(Long.MAX_VALUE));
 
-      // Finally, advance the processing time
-      timerManager.advanceProcessingTime(triggerExecutor, Instant.now());
+      // Finally, advance the processing time to infinity to fire any timers.
+      timerManager.advanceProcessingTime(triggerExecutor, new Instant(Long.MAX_VALUE));
 
-      windowSet.persist();
+      triggerExecutor.persistWindowSet();
     }
   }
 }

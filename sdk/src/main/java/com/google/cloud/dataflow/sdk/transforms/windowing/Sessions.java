@@ -24,7 +24,7 @@ import java.util.Arrays;
 import java.util.Collection;
 
 /**
- * A WindowFn windowing values into sessions separated by {@link #gapDuration}-long
+ * A {@link WindowFn} windowing values into sessions separated by {@link #gapDuration}-long
  * periods with no elements.
  *
  * <p> For example, in order to window data into session with at least 10 minute
@@ -32,7 +32,7 @@ import java.util.Collection;
  * <pre> {@code
  * PCollection<Integer> pc = ...;
  * PCollection<Integer> windowed_pc = pc.apply(
- *   Window.<Integer>by(Sessions.withGapDuration(Duration.standardMinutes(10))));
+ *   Window.<Integer>into(Sessions.withGapDuration(Duration.standardMinutes(10))));
  * } </pre>
  */
 public class Sessions extends WindowFn<Object, IntervalWindow> {
@@ -78,5 +78,14 @@ public class Sessions extends WindowFn<Object, IntervalWindow> {
   @Override
   public boolean isCompatible(WindowFn<?, ?> other) {
     return other instanceof Sessions;
+  }
+
+  @Override
+  public IntervalWindow getSideInputWindow(BoundedWindow window) {
+    throw new UnsupportedOperationException("Sessions is not allowed in side inputs");
+  }
+
+  public Duration getGapDuration() {
+    return gapDuration;
   }
 }

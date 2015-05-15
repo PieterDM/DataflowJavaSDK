@@ -27,7 +27,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * A TableRowJsonCoder encodes BigQuery TableRow objects.
+ * A {@code TableRowJsonCoder} encodes BigQuery {@link TableRow} objects.
  */
 @SuppressWarnings("serial")
 public class TableRowJsonCoder extends AtomicCoder<TableRow> {
@@ -73,12 +73,6 @@ public class TableRowJsonCoder extends AtomicCoder<TableRow> {
    * TableCell can hold arbitrary Object instances, which makes the encoding
    * non-deterministic.
    */
-  @Override
-  @Deprecated
-  public boolean isDeterministic() {
-    return false;
-  }
-
   @Override
   public void verifyDeterministic() throws NonDeterministicException {
     throw new NonDeterministicException(this,

@@ -27,7 +27,7 @@ import java.io.OutputStream;
 import java.io.UTFDataFormatException;
 
 /**
- * A BigEndianLongCoder encodes Longs in 8 bytes, big-endian.
+ * A {@code BigEndianLongCoder} encodes {@code Long}s in 8 bytes, big-endian.
  */
 @SuppressWarnings("serial")
 public class BigEndianLongCoder extends AtomicCoder<Long> {
@@ -62,11 +62,6 @@ public class BigEndianLongCoder extends AtomicCoder<Long> {
       // what kind of exception they're branded as.
       throw new CoderException(exn);
     }
-  }
-
-  @Override
-  public boolean isDeterministic() {
-    return true;
   }
 
   @Override

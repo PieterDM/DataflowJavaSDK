@@ -28,7 +28,7 @@ import com.google.common.base.Preconditions;
 import javax.annotation.Nullable;
 
 /**
- * The {@code PTransform} for reading from a {@code Source}.
+ * A {@link PTransform} for reading from a {@link Source}.
  * <p>
  * Usage example:
  * <pre>
@@ -55,7 +55,7 @@ public class Read {
   }
 
   /**
-   * Implementation of the {@code Read} {@code PTransform} builder.
+   * Implementation of the {@code Read} {@link PTransform} builder.
    */
   public static class Bound<T>
       extends PTransform<PInput, PCollection<T>> {
@@ -99,7 +99,9 @@ public class Read {
     public final PCollection<T> apply(PInput input) {
       Preconditions.checkNotNull(source, "source must be set");
       source.validate();
-      return PCollection.<T>createPrimitiveOutputInternal(WindowingStrategy.globalDefault())
+      return PCollection.<T>createPrimitiveOutputInternal(
+          input.getPipeline(),
+          WindowingStrategy.globalDefault())
           .setCoder(getDefaultOutputCoder());
     }
 

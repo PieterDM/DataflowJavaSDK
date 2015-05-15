@@ -20,6 +20,7 @@ import static com.google.cloud.dataflow.sdk.TestUtils.LINES;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.io.TextIO;
+import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.transforms.Create;
 import com.google.cloud.dataflow.sdk.transforms.PTransform;
@@ -49,7 +50,7 @@ public class PDoneTest {
   static class EmptyTransform extends PTransform<PBegin, PDone> {
     @Override
     public PDone apply(PBegin begin) {
-      return new PDone();
+      return PDone.in(begin.getPipeline());
     }
   }
 
@@ -76,7 +77,7 @@ public class PDoneTest {
   // transforms that contain no nested transforms.
   @Ignore
   @Test
-  @Category(com.google.cloud.dataflow.sdk.testing.RunnableOnService.class)
+  @Category(RunnableOnService.class)
   public void testEmptyTransform() {
     Pipeline p = TestPipeline.create();
 

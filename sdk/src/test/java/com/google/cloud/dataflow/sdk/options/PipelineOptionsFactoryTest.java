@@ -69,28 +69,14 @@ public class PipelineOptionsFactoryTest {
   public void testCreationFromSystemProperties() throws Exception {
     System.getProperties().putAll(ImmutableMap
         .<String, String>builder()
-        .put("root_url", "test_root_url")
-        .put("service_path", "test_service_path")
-        .put("temp_gcs_directory",
-            "gs://tap-testing-30lsaafg6g3zudmjbnsdz6wj/unittesting/staging")
-        .put("service_account_name", "test_service_account_name")
-        .put("service_account_keyfile", "test_service_account_keyfile")
         .put("worker_id", "test_worker_id")
-        .put("project_id", "test_project_id")
         .put("job_id", "test_job_id")
         // Set a non-default value for testing
         .put("sdk_pipeline_options", "{\"options\":{\"numWorkers\":999}}")
         .build());
 
     DataflowWorkerHarnessOptions options = PipelineOptionsFactory.createFromSystemProperties();
-    assertEquals("test_root_url", options.getApiRootUrl());
-    assertEquals("test_service_path", options.getDataflowEndpoint());
-    assertEquals("gs://tap-testing-30lsaafg6g3zudmjbnsdz6wj/unittesting/staging",
-        options.getTempLocation());
-    assertEquals("test_service_account_name", options.getServiceAccountName());
-    assertEquals("test_service_account_keyfile", options.getServiceAccountKeyfile());
     assertEquals("test_worker_id", options.getWorkerId());
-    assertEquals("test_project_id", options.getProject());
     assertEquals("test_job_id", options.getJobId());
     assertEquals(999, options.getNumWorkers());
   }
@@ -154,6 +140,22 @@ public class PipelineOptionsFactoryTest {
         + "[com.google.cloud.dataflow.sdk.options.PipelineOptionsFactoryTest$MissingSetter].");
 
     PipelineOptionsFactory.as(MissingSetter.class);
+  }
+
+  /** A test interface with a type mismatch between the getter and setter. */
+  public static interface GetterSetterTypeMismatch extends PipelineOptions {
+    boolean getValue();
+    void setValue(int value);
+  }
+
+  @Test
+  public void testGetterSetterTypeMismatchThrows() throws Exception {
+    expectedException.expect(IllegalArgumentException.class);
+    expectedException.expectMessage(
+        "Type mismatch between getter and setter methods for property [value]. Getter is of type "
+        + "[boolean] whereas setter is of type [int].");
+
+    PipelineOptionsFactory.as(GetterSetterTypeMismatch.class);
   }
 
   /** A test interface representing a composite interface. */
