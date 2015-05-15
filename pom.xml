@@ -81,12 +81,12 @@
           <configuration>
             <source>1.7</source>
             <target>1.7</target>
-            <compilerArgs>
+            <!--<compilerArgs>
               <arg>-Xlint:all</arg>
               <arg>-Werror</arg>
-              <!-- Override options warnings to support cross-compilation -->
+              &lt;!&ndash; Override options warnings to support cross-compilation &ndash;&gt;
               <arg>-Xlint:-options</arg>
-              <!-- Temporary lint overrides, to be removed over time. -->
+              &lt;!&ndash; Temporary lint overrides, to be removed over time. &ndash;&gt;
               <arg>-Xlint:-cast</arg>
               <arg>-Xlint:-deprecation</arg>
               <arg>-Xlint:-processing</arg>
@@ -94,10 +94,10 @@
               <arg>-Xlint:-try</arg>
               <arg>-Xlint:-unchecked</arg>
               <arg>-Xlint:-varargs</arg>
-              <!-- Uncomment the following args to display more warnings.  -->
-              <!-- -Xmaxwarns -->
-              <!-- 10000 -->
-            </compilerArgs>
+              &lt;!&ndash; Uncomment the following args to display more warnings.  &ndash;&gt;
+              &lt;!&ndash; -Xmaxwarns &ndash;&gt;
+              &lt;!&ndash; 10000 &ndash;&gt;
+            </compilerArgs>-->
             <showWarnings>true</showWarnings>
             <!-- Another temp override, to be set to true in due course. -->
             <showDeprecation>false</showDeprecation>

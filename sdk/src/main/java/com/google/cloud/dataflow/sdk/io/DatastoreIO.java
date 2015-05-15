@@ -302,9 +302,11 @@ public class DatastoreIO {
         // Fallback in case estimated size is unavailable.
         numSplits = dataflowOptions.getNumWorkers();
       }
+
       List<Query> splitQueries;
       if (mockSplitter == null) {
-        splitQueries = DatastoreHelper.getQuerySplitter().getSplits(
+        QuerySplitter querySplitter = FixedQuerySplitterImpl.INSTANCE;
+        splitQueries = querySplitter.getSplits(
             query, (int) numSplits, getDatastore(options));
       } else {
         splitQueries = mockSplitter.getSplits(query, (int) numSplits, null);
