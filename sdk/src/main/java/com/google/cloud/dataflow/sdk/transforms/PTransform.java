@@ -188,7 +188,7 @@ public abstract class PTransform<InputT extends PInput, OutputT extends POutput>
    */
   public OutputT apply(InputT input) {
     throw new IllegalArgumentException(
-        "Runner " + getPipeline().getRunner()
+        "Runner " + input.getPipeline().getRunner()
             + " has not registered an implementation for the required primitive operation "
             + this);
   }
@@ -203,57 +203,13 @@ public abstract class PTransform<InputT extends PInput, OutputT extends POutput>
   public void validate(InputT input) { }
 
   /**
-   * Sets the base name of this {@code PTransform}.
-   * Returns {@code this} for method chaining.
-   */
-  public PTransform<InputT, OutputT> setName(String name) {
-    this.name = name;
-    return this;
-  }
-
-  /**
-   * @deprecated Use {@link #setName}, which has been modified to return {@code this}.
-   */
-  @Deprecated
-  public PTransform<InputT, OutputT> withName(String name) {
-    return setName(name);
-  }
-
-  /**
    * Returns the transform name.
    *
    * <p> This name is provided by the transform creator and is not required to be unique.
    */
   public String getName() {
-    return name != null ? name : getDefaultName();
+    return name != null ? name : getKindString();
   }
-
-  /**
-   * Returns the owning {@link Pipeline} of this {@code PTransform}.
-   *
-   * @throws IllegalStateException if the owning {@code Pipeline} hasn't been
-   * set yet
-   */
-  @Deprecated
-  private Pipeline getPipeline() {
-    if (pipeline == null) {
-      throw new IllegalStateException("owning pipeline not set");
-    }
-    return pipeline;
-  }
-
-  /**
-   * Returns the output of this transform.
-   *
-   * @throws IllegalStateException if this PTransform hasn't been applied yet
-   */
-  @Deprecated
-  private OutputT getOutput() {
-    @SuppressWarnings("unchecked")
-    OutputT output = (OutputT) getPipeline().getOutput(this);
-    return output;
-  }
-
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -265,13 +221,7 @@ public abstract class PTransform<InputT extends PInput, OutputT extends POutput>
    * {@link ParDo#named(String)}, or from defaults, or {@code null} if not
    * yet assigned.
    */
-  protected transient String name;
-
-  /**
-   * The {@link Pipeline} that owns this {@code PTransform}, or {@code null}
-   * if not yet set.
-   */
-  private transient Pipeline pipeline;
+  protected final transient String name;
 
   protected PTransform() {
     this.name = null;
@@ -281,53 +231,30 @@ public abstract class PTransform<InputT extends PInput, OutputT extends POutput>
     this.name = name;
   }
 
-  /**
-   * Associates this {@code PTransform} with the given {@code Pipeline}.
-   *
-   * <p> For internal use only.
-   *
-   * @throws IllegalArgumentException if this transform has already
-   * been associated with a pipeline
-   */
-  @Deprecated
-  public void setPipeline(Pipeline pipeline) {
-    if (this.pipeline != null) {
-      throw new IllegalStateException(
-          "internal error: transform already initialized");
-    }
-    this.pipeline = pipeline;
-  }
-
   @Override
   public String toString() {
-    return getName() + " [" + getKindString() + "]";
+    if (name == null) {
+      return getKindString();
+    } else {
+      return getName() + " [" + getKindString() + "]";
+    }
   }
 
   /**
    * Returns the name to use by default for this {@code PTransform}
    * (not including the names of any enclosing {@code PTransform}s).
    *
-   * <p> By default, returns {@link #getKindString}.
+   * <p> By default, returns the base name of this {@code PTransform}'s class.
    *
    * <p> The caller is responsible for ensuring that names of applied
    * {@code PTransform}s are unique, e.g., by adding a uniquifying
    * suffix when needed.
    */
-  protected String getDefaultName() {
-    return getKindString();
-  }
-
-  /**
-   * Returns a string describing what kind of {@code PTransform} this is.
-   *
-   * <p> By default, returns the base name of this
-   * {@code PTransform}'s class.
-   */
   protected String getKindString() {
     if (getClass().isAnonymousClass()) {
       return "AnonymousTransform";
     } else {
-      return StringUtils.approximateSimpleName(getClass());
+      return StringUtils.approximatePTransformName(getClass());
     }
   }
 
@@ -341,17 +268,6 @@ public abstract class PTransform<InputT extends PInput, OutputT extends POutput>
     // We don't really want to be serializing this object, but we
     // often have serializable anonymous DoFns nested within a
     // PTransform.
-  }
-
-  /**
-   * After building, finalizes this {@code PTransform} to
-   * make it ready for running.  Called automatically when its
-   * output(s) are finished.
-   *
-   * <p> Not normally called by user code.
-   */
-  public void finishSpecifyingInternal() {
-    getOutput().finishSpecifyingOutput();
   }
 
   /**
@@ -369,33 +285,30 @@ public abstract class PTransform<InputT extends PInput, OutputT extends POutput>
 
   /**
    * Returns the default {@code Coder} to use for the output of this
-   * single-output {@code PTransform}.
+   * single-output {@code PTransform} when applied to the given input.
    *
    * @throws CannotProvideCoderException if none can be inferred.
    *
    * <p> By default, always throws.
    */
-  protected Coder<?> getDefaultOutputCoder(InputT input) throws CannotProvideCoderException {
+  protected Coder<?> getDefaultOutputCoder(@SuppressWarnings("unused") InputT input)
+      throws CannotProvideCoderException {
     return getDefaultOutputCoder();
   }
 
   /**
    * Returns the default {@code Coder} to use for the given output of
-   * this single-output {@code PTransform}.
+   * this single-output {@code PTransform} when applied to the given input.
    *
    * @throws CannotProvideCoderException if none can be inferred.
    *
    * <p> By default, always throws.
    */
-  public <T> Coder<T> getDefaultOutputCoder(InputT input, TypedPValue<T> output)
+  public <T> Coder<T> getDefaultOutputCoder(
+      InputT input, @SuppressWarnings("unused") TypedPValue<T> output)
       throws CannotProvideCoderException {
-    if (output != getOutput()) {
-      throw new CannotProvideCoderException(
-          "Attempt to get default output coder from PTransform for a POutput it did not produce");
-    } else {
-      @SuppressWarnings("unchecked")
-      Coder<T> defaultOutputCoder = (Coder<T>) getDefaultOutputCoder(input);
-      return defaultOutputCoder;
-    }
+    @SuppressWarnings("unchecked")
+    Coder<T> defaultOutputCoder = (Coder<T>) getDefaultOutputCoder(input);
+    return defaultOutputCoder;
   }
 }

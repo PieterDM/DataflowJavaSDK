@@ -23,6 +23,7 @@ import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.util.CoderUtils;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
 import com.google.cloud.dataflow.sdk.util.WindowedValue.WindowedValueCoder;
+import com.google.cloud.dataflow.sdk.util.common.worker.AbstractBoundedReaderIterator;
 import com.google.cloud.dataflow.sdk.util.common.worker.BatchingShuffleEntryReader;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
 import com.google.cloud.dataflow.sdk.util.common.worker.ShuffleEntry;
@@ -69,6 +70,7 @@ public class PartitioningShuffleReader<K, V> extends Reader<WindowedValue<KV<K, 
       throw new Exception("unexpected kind of coder for elements read from "
           + "a key-partitioning shuffle: " + elemCoder);
     }
+    @SuppressWarnings("unchecked")
     KvCoder<K, V> kvCoder = (KvCoder<K, V>) elemCoder;
     this.keyCoder = kvCoder.getKeyCoder();
     windowedValueCoder = windowedElemCoder.withValueCoder(kvCoder.getValueCoder());
@@ -81,7 +83,7 @@ public class PartitioningShuffleReader<K, V> extends Reader<WindowedValue<KV<K, 
         new ChunkingShuffleBatchReader(new ApplianceShuffleReader(shuffleReaderConfig))));
   }
 
-  ReaderIterator<WindowedValue<KV<K, V>>> iterator(ShuffleEntryReader reader) throws IOException {
+  ReaderIterator<WindowedValue<KV<K, V>>> iterator(ShuffleEntryReader reader) {
     return new PartitioningShuffleReaderIterator(reader);
   }
 
@@ -90,7 +92,8 @@ public class PartitioningShuffleReader<K, V> extends Reader<WindowedValue<KV<K, 
    * extracts K and {@code WindowedValue<V>}, and returns a constructed
    * {@code WindowedValue<KV>}.
    */
-  class PartitioningShuffleReaderIterator extends AbstractReaderIterator<WindowedValue<KV<K, V>>> {
+  class PartitioningShuffleReaderIterator
+      extends AbstractBoundedReaderIterator<WindowedValue<KV<K, V>>> {
     Iterator<ShuffleEntry> iterator;
 
     PartitioningShuffleReaderIterator(ShuffleEntryReader reader) {
@@ -100,19 +103,18 @@ public class PartitioningShuffleReader<K, V> extends Reader<WindowedValue<KV<K, 
     }
 
     @Override
-    public boolean hasNext() throws IOException {
+    protected boolean hasNextImpl() throws IOException {
       return iterator.hasNext();
     }
 
     @Override
-    public WindowedValue<KV<K, V>> next() throws IOException {
+    protected WindowedValue<KV<K, V>> nextImpl() throws IOException {
       ShuffleEntry record = iterator.next();
       K key = CoderUtils.decodeFromByteArray(keyCoder, record.getKey());
       WindowedValue<V> windowedValue =
           CoderUtils.decodeFromByteArray(windowedValueCoder, record.getValue());
       notifyElementRead(record.length());
-      return WindowedValue.of(KV.of(key, windowedValue.getValue()), windowedValue.getTimestamp(),
-          windowedValue.getWindows());
+      return windowedValue.withValue(KV.of(key, windowedValue.getValue()));
     }
   }
 }

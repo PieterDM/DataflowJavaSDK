@@ -17,16 +17,12 @@
 package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.coders.Coder;
-import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
+import com.google.cloud.dataflow.sdk.transforms.Aggregator;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
+import com.google.cloud.dataflow.sdk.transforms.Sum;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
-import com.google.cloud.dataflow.sdk.util.AbstractWindowSet.Factory;
-import com.google.cloud.dataflow.sdk.util.TriggerExecutor.TimerManager;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.common.base.Preconditions;
-
-import org.joda.time.Instant;
 
 /**
  * DoFn that merges windows and groups elements in those windows.
@@ -37,19 +33,18 @@ import org.joda.time.Instant;
  * @param <W> window type
  */
 @SuppressWarnings("serial")
+@SystemDoFnInternal
 public abstract class StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W extends BoundedWindow>
-    extends DoFn<TimerOrElement<KV<K, InputT>>, KV<K, OutputT>> implements DoFn.RequiresKeyedState {
+    extends DoFn<TimerOrElement<KV<K, InputT>>, KV<K, OutputT>> {
 
   public static <K, InputT, AccumT, OutputT, W extends BoundedWindow>
       StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W> create(
           final WindowingStrategy<?, W> windowingStrategy,
-          final KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn,
-          final Coder<K> keyCoder,
-          final Coder<InputT> inputValueCoder) {
+          final AppliedCombineFn<K, InputT, AccumT, OutputT> combineFn,
+          final Coder<K> keyCoder) {
     Preconditions.checkNotNull(combineFn);
     return new StreamingGABWViaWindowSetDoFn<>(windowingStrategy,
-        CombiningWindowSet.<K, InputT, AccumT, OutputT, W>factory(
-            combineFn, keyCoder, inputValueCoder));
+        SystemReduceFn.<K, InputT, AccumT, OutputT, W>combining(keyCoder, combineFn));
   }
 
   public static <K, V, W extends BoundedWindow>
@@ -57,82 +52,78 @@ public abstract class StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W exte
       final WindowingStrategy<?, W> windowingStrategy,
       final Coder<V> inputCoder) {
     return new StreamingGABWViaWindowSetDoFn<>(
-        windowingStrategy, AbstractWindowSet.<K, V, W>factoryFor(windowingStrategy, inputCoder));
+        windowingStrategy, SystemReduceFn.<K, V, W>buffering(inputCoder));
   }
 
   private static class StreamingGABWViaWindowSetDoFn<K, InputT, OutputT, W extends BoundedWindow>
   extends StreamingGroupAlsoByWindowsDoFn<K, InputT, OutputT, W> {
-    private final Factory<K, InputT, OutputT, W> windowSetFactory;
-    private final WindowingStrategy<Object, W> windowingStrategy;
 
-    private TriggerExecutor<K, InputT, OutputT, W> executor;
+    private final Aggregator<Long, Long> droppedDueToClosedWindow =
+        createAggregator(ReduceFnRunner.DROPPED_DUE_TO_CLOSED_WINDOW_COUNTER, new Sum.SumLongFn());
+    private final Aggregator<Long, Long> droppedDueToLateness =
+        createAggregator(ReduceFnRunner.DROPPED_DUE_TO_LATENESS_COUNTER, new Sum.SumLongFn());
+
+    private final WindowingStrategy<Object, W> windowingStrategy;
+    private SystemReduceFn.Factory<K, InputT, OutputT, W> reduceFnFactory;
+
+    private transient ReduceFnRunner<K, InputT, OutputT, W> runner;
 
     public StreamingGABWViaWindowSetDoFn(WindowingStrategy<?, W> windowingStrategy,
-        AbstractWindowSet.Factory<K, InputT, OutputT, W> windowSetFactory) {
-      this.windowSetFactory = windowSetFactory;
+        SystemReduceFn.Factory<K, InputT, OutputT, W> reduceFnFactory) {
       @SuppressWarnings("unchecked")
       WindowingStrategy<Object, W> noWildcard = (WindowingStrategy<Object, W>) windowingStrategy;
       this.windowingStrategy = noWildcard;
+      this.reduceFnFactory = reduceFnFactory;
     }
 
     private void initForKey(ProcessContext c, K key) throws Exception{
-      if (executor == null) {
-        TimerManager timerManager = new StreamingTimerManager(c);
-        executor = TriggerExecutor.create(
-          key, windowingStrategy, timerManager, windowSetFactory,
-          c.keyedState(), c.windowingInternals());
+      if (runner == null) {
+        TimerInternals timerInternals = c.windowingInternals().timerInternals();
+        runner = new ReduceFnRunner<>(
+            key, windowingStrategy, timerInternals, c.windowingInternals(),
+            droppedDueToClosedWindow, droppedDueToLateness, reduceFnFactory.create(key));
       }
     }
 
     @Override
     public void processElement(ProcessContext c) throws Exception {
-      @SuppressWarnings("unchecked")
-      K key = c.element().isTimer() ? (K) c.element().key() : c.element().element().getKey();
-      initForKey(c, key);
-
       if (c.element().isTimer()) {
-        executor.onTimer(c.element().tag());
+        processTimer(c);
       } else {
-        InputT value = c.element().element().getValue();
-        executor.onElement(
-            WindowedValue.of(value, c.timestamp(), c.windowingInternals().windows()));
+        processValue(c);
       }
+    }
+
+
+    private void processTimer(ProcessContext c) throws Exception {
+      @SuppressWarnings("unchecked")
+      K key = (K) c.element().key();
+      initForKey(c, key);
+      runner.onTimer(c.element().getTimer());
+    }
+
+    private void processValue(ProcessContext c) throws Exception {
+      K key = c.element().element().getKey();
+      initForKey(c, key);
+      InputT value = c.element().element().getValue();
+      runner.processElement(
+          WindowedValue.of(
+              value,
+              c.timestamp(),
+              c.windowingInternals().windows(),
+              c.pane()));
     }
 
     @Override
     public void finishBundle(Context c) throws Exception {
-      if (executor != null) {
+      if (runner != null) {
         // Merge before finishing the bundle in case it causes triggers to fire.
-        executor.merge();
-        executor.persistWindowSet();
+        runner.merge();
+        runner.persist();
       }
 
       // Prepare this DoFn for reuse.
-      executor = null;
-    }
-  }
-
-  private static class StreamingTimerManager implements TimerManager {
-
-    private DoFn<?, ?>.ProcessContext context;
-
-    public StreamingTimerManager(DoFn<?, ?>.ProcessContext context) {
-      this.context = context;
-    }
-
-    @Override
-    public void setTimer(String timer, Instant timestamp, Trigger.TimeDomain domain) {
-      context.windowingInternals().setTimer(timer, timestamp, domain);
-    }
-
-    @Override
-    public void deleteTimer(String timer, Trigger.TimeDomain domain) {
-      context.windowingInternals().deleteTimer(timer, domain);
-    }
-
-    @Override
-    public Instant currentProcessingTime() {
-      return Instant.now();
+      runner = null;
     }
   }
 }

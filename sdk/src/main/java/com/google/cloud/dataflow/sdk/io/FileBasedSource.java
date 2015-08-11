@@ -16,10 +16,14 @@ package com.google.cloud.dataflow.sdk.io;
 
 import com.google.api.client.util.Preconditions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
-import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.IOChannelFactory;
 import com.google.cloud.dataflow.sdk.util.IOChannelUtils;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
 
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -30,36 +34,51 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.NoSuchElementException;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
 
 /**
  * A common base class for all file-based {@link Source}s. Extend this class to implement your own
  * file-based custom source.
  *
  * <p>A file-based {@code Source} is a {@code Source} backed by a file pattern defined as a Java
- * glob, a single file, or a offset range for a single file. See {@link ByteOffsetBasedSource} for
- * semantics of offset ranges.
+ * glob, a single file, or a offset range for a single file. See {@link OffsetBasedSource} and
+ * {@link com.google.cloud.dataflow.sdk.io.range.RangeTracker} for semantics of offset ranges.
  *
  * <p>This source stores a {@code String} that is an {@link IOChannelFactory} specification for a
  * file or file pattern. There should be an {@code IOChannelFactory} defined for the file
  * specification provided. Please refer to {@link IOChannelUtils} and {@link IOChannelFactory} for
  * more information on this.
  *
- * <p>In addition to the methods left abstract from {@code Source}, subclasses must implement
+ * <p>In addition to the methods left abstract from {@code BoundedSource}, subclasses must implement
  * methods to create a sub-source and a reader for a range of a single file -
  * {@link #createForSubrangeOfFile} and {@link #createSingleFileReader}. Please refer to
- * {@link XmlSource} for an example implementation of {@code FilebasedSource}.
+ * {@link XmlSource} for an example implementation of {@code FileBasedSource}.
  *
  * @param <T> Type of records represented by the source.
  */
-public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
+public abstract class FileBasedSource<T> extends OffsetBasedSource<T> {
   private static final long serialVersionUID = 0;
   private static final Logger LOG = LoggerFactory.getLogger(FileBasedSource.class);
+  private static final float FRACTION_OF_FILES_TO_STAT = 0.01f;
+
+  // Package-private for testing
+  static final int MAX_NUMBER_OF_FILES_FOR_AN_EXACT_STAT = 100;
+
+  // Size of the thread pool to be used for sending requests to GCS.
+  // Package-private for testing.
+  static final int SPLITTING_THREAD_POOL_SIZE = 128;
 
   private final String fileOrPatternSpec;
   private final Mode mode;
+
+  // Thread pool to be used for parallelizing requests to GCS.
+  private static ListeningExecutorService service =
+      MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(SPLITTING_THREAD_POOL_SIZE));
 
   /**
    * A given {@code FileBasedSource} represents a file resource of one of these types.
@@ -73,7 +92,7 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
    * Create a {@code FileBaseSource} based on a file or a file pattern specification. This
    * constructor must be used when creating a new {@code FileBasedSource} for a file pattern.
    *
-   * <p> See {@link ByteOffsetBasedSource} for a detailed description of {@code minBundleSize}.
+   * <p> See {@link OffsetBasedSource} for a detailed description of {@code minBundleSize}.
    *
    * @param fileOrPatternSpec {@link IOChannelFactory} specification of file or file pattern
    *        represented by the {@link FileBasedSource}.
@@ -91,7 +110,7 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
    * Additionally, this constructor must be used to create new {@code FileBasedSource}s when
    * subclasses implement the method {@link #createForSubrangeOfFile}.
    *
-   * <p> See {@link ByteOffsetBasedSource} for detailed descriptions of {@code minBundleSize},
+   * <p> See {@link OffsetBasedSource} for detailed descriptions of {@code minBundleSize},
    * {@code startOffset}, and {@code endOffset}.
    *
    * @param fileName {@link IOChannelFactory} specification of the file represented by the
@@ -155,8 +174,7 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
    * source assuming the source represents a single file. File patterns will be handled by
    * {@code FileBasedSource} implementation automatically.
    */
-  public abstract FileBasedReader<T> createSingleFileReader(PipelineOptions options,
-                                                            ExecutionContext executionContext);
+  public abstract FileBasedReader<T> createSingleFileReader(PipelineOptions options);
 
   @Override
   public final long getEstimatedSizeBytes(PipelineOptions options) throws Exception {
@@ -170,11 +188,15 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
       long startTime = System.currentTimeMillis();
       long totalSize = 0;
       Collection<String> inputs = factory.match(fileOrPatternSpec);
-      for (String input : inputs) {
-        totalSize += factory.getSizeBytes(input);
+      if (inputs.size() <= MAX_NUMBER_OF_FILES_FOR_AN_EXACT_STAT) {
+        totalSize = getExactTotalSizeOfFiles(inputs, factory);
+        LOG.debug("Size estimation of all files of pattern " + fileOrPatternSpec + " took "
+           + (System.currentTimeMillis() - startTime) + " ms");
+      } else {
+        totalSize = getEstimatedSizeOfFilesBySampling(inputs, factory);
+        LOG.debug("Size estimation of pattern " + fileOrPatternSpec + " by sampling took "
+           + (System.currentTimeMillis() - startTime) + " ms");
       }
-      LOG.debug("Size estimation of file pattern " + fileOrPatternSpec + " took "
-          + (System.currentTimeMillis() - startTime) + " ms");
       return totalSize;
     } else {
       long start = getStartOffset();
@@ -183,9 +205,48 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
     }
   }
 
+  // Get the exact total size of the given set of files.
+  private static long getExactTotalSizeOfFiles(
+      Collection<String> files, IOChannelFactory ioChannelFactory) throws IOException {
+    long totalSize = 0;
+    for (String file : files) {
+      totalSize += ioChannelFactory.getSizeBytes(file);
+    }
+    return totalSize;
+  }
+
+  // Estimate the total size of the given set of files through sampling and extrapolation.
+  // Currently we use uniform sampling which requires a linear sampling size for a reasonable
+  // estimate.
+  // TODO: Implement a more efficient sampling mechanism.
+  private static long getEstimatedSizeOfFilesBySampling(
+      Collection<String> files, IOChannelFactory ioChannelFactory) throws IOException {
+    int sampleSize = (int) (FRACTION_OF_FILES_TO_STAT * files.size());
+    sampleSize = Math.max(MAX_NUMBER_OF_FILES_FOR_AN_EXACT_STAT, sampleSize);
+
+    List<String> selectedFiles = new ArrayList<String>(files);
+    Collections.shuffle(selectedFiles);
+    selectedFiles = selectedFiles.subList(0, sampleSize);
+
+    return files.size() * getExactTotalSizeOfFiles(selectedFiles, ioChannelFactory)
+        / selectedFiles.size();
+  }
+
+  private ListenableFuture<List<? extends FileBasedSource<T>>> createFuture(final String file,
+      final long desiredBundleSizeBytes, final PipelineOptions options,
+      ListeningExecutorService service) {
+    return service.submit(new Callable<List<? extends FileBasedSource<T>>>() {
+      @Override
+      public List<? extends FileBasedSource<T>> call() throws Exception {
+        return createForSubrangeOfFile(file, 0, Long.MAX_VALUE)
+            .splitIntoBundles(desiredBundleSizeBytes, options);
+      }
+    });
+  }
+
   @Override
-  public final List<? extends FileBasedSource<T>> splitIntoBundles(long desiredBundleSizeBytes,
-      PipelineOptions options) throws Exception {
+  public final List<? extends FileBasedSource<T>> splitIntoBundles(
+      long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
     // This implementation of method splitIntoBundles is provided to simplify subclasses. Here we
     // split a FileBasedSource based on a file pattern to FileBasedSources based on full single
     // files. For files that can be efficiently seeked, we further split FileBasedSources based on
@@ -193,22 +254,21 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
 
     if (mode == Mode.FILEPATTERN) {
       long startTime = System.currentTimeMillis();
-      List<FileBasedSource<T>> splitResults = new ArrayList<>();
-      for (String file : FileBasedSource.expandFilePattern(fileOrPatternSpec)) {
-        splitResults.addAll(createForSubrangeOfFile(file, 0, Long.MAX_VALUE).splitIntoBundles(
-            desiredBundleSizeBytes, options));
+      List<ListenableFuture<List<? extends FileBasedSource<T>>>> futures = new ArrayList<>();
+
+      for (final String file : FileBasedSource.expandFilePattern(fileOrPatternSpec)) {
+        futures.add(createFuture(file, desiredBundleSizeBytes, options, service));
       }
+      List<? extends FileBasedSource<T>> splitResults =
+          ImmutableList.copyOf(Iterables.concat(Futures.allAsList(futures).get()));
+
       LOG.debug("Splitting the source based on file pattern " + fileOrPatternSpec + " took "
           + (System.currentTimeMillis() - startTime) + " ms");
       return splitResults;
     } else {
-      // We split a file-based source into subranges only if the file is seekable. If a file is not
-      // seekable it will be highly inefficient to create and read a source based on a subrange of
-      // that file.
-      IOChannelFactory factory = IOChannelUtils.getFactory(fileOrPatternSpec);
-      if (factory.isReadSeekEfficient(fileOrPatternSpec)) {
+      if (isSplittable()) {
         List<FileBasedSource<T>> splitResults = new ArrayList<>();
-        for (ByteOffsetBasedSource<T> split :
+        for (OffsetBasedSource<T> split :
             super.splitIntoBundles(desiredBundleSizeBytes, options)) {
           splitResults.add((FileBasedSource<T>) split);
         }
@@ -221,9 +281,22 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
     }
   }
 
+  /**
+   * Determines whether a file represented by this source is can be split into bundles.
+   *
+   * <p>By default, a file is splittable if it is on a file system that supports efficient read
+   * seeking. Subclasses may override to provide different behavior.
+   */
+  protected boolean isSplittable() throws Exception {
+    // We split a file-based source into subranges only if the file is efficiently seekable.
+    // If a file is not efficiently seekable it would be highly inefficient to create and read a
+    // source based on a subrange of that file.
+    IOChannelFactory factory = IOChannelUtils.getFactory(fileOrPatternSpec);
+    return factory.isReadSeekEfficient(fileOrPatternSpec);
+  }
+
   @Override
-  public final BoundedReader<T> createReader(PipelineOptions options,
-                                             ExecutionContext executionContext) throws IOException {
+  public final BoundedReader<T> createReader(PipelineOptions options) throws IOException {
     // Validate the current source prior to creating a reader for it.
     this.validate();
 
@@ -239,14 +312,14 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
           LOG.warn("Failed to get size of " + fileName, e);
           endOffset = Long.MAX_VALUE;
         }
-        fileReaders.add(createForSubrangeOfFile(fileName, 0, endOffset).createSingleFileReader(
-            options, executionContext));
+        fileReaders.add(
+            createForSubrangeOfFile(fileName, 0, endOffset).createSingleFileReader(options));
       }
       LOG.debug("Creating a reader for file pattern " + fileOrPatternSpec + " took "
           + (System.currentTimeMillis() - startTime) + " ms");
       return new FilePatternReader(this, fileReaders);
     } else {
-      return createSingleFileReader(options, executionContext);
+      return createSingleFileReader(options);
     }
   }
 
@@ -297,7 +370,9 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
 
   private static Collection<String> expandFilePattern(String fileOrPatternSpec) throws IOException {
     IOChannelFactory factory = IOChannelUtils.getFactory(fileOrPatternSpec);
-    return factory.match(fileOrPatternSpec);
+    Collection<String> matches = factory.match(fileOrPatternSpec);
+    LOG.info("Matched {} files for pattern {}", matches.size(), fileOrPatternSpec);
+    return matches;
   }
 
   /**
@@ -314,47 +389,18 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
    * {@link SeekableByteChannel}, which may be used by subclass to traverse back in the channel to
    * determine the correct starting position.
    *
-   * <h2>Split Points</h2>
-   *
-   * <p>Simple record-based formats (such as reading lines, reading CSV etc.), where each record can
-   * be identified by a unique offset, should interpret a range [A, B) as "read from the first
-   * record starting at or after offset A, up to but not including the first record starting at or
-   * after offset B".
-   *
-   * <p>More complex formats, such as some block-based formats, may have records that are not
-   * directly addressable: i.e., for some records, there is no way to describe the location of a
-   * record using a single offset number. For example, imagine a file format consisting of a
-   * sequence of blocks, where each block is compressed using some block compression algorithm. Then
-   * blocks have offsets, but individual records don't. More complex cases are also possible.
-   *
-   * <p>Many such formats still admit reading a range of offsets in a way consistent with the
-   * semantics of {@code ByteOffsetBasedReader}, i.e. reading [A, B) and [B, C) is equivalent to
-   * reading [A, C). E.g., for the compressed block-based format discussed above, reading [A, B)
-   * would mean "read all the records in all blocks whose starting offset is in [A, B)".
-   *
-   * <p>To support such complex formats in {@code FileBasedReader}, we introduce the notion of
-   * <i>split points</i>. We say that a record is a split point if there exists an offset A such
-   * that the record is the first one to be read for a range [A, {@code Long.MAX_VALUE}). E.g. for
-   * the block-based format above, the only split points would be the first records in each block.
-   *
-   * <p>With the above definition of split points an extended definition of the offset of a record
-   * can be specified. For a record that is at a split point, its offset is defined to be the
-   * largest A such that reading a source with the range [A, Long.MAX_VALUE) includes this record;
-   * offsets of other records are only required to be non-strictly increasing. Offsets of records of
-   * a {@code FileBasedReader} should be set based on this definition.
-   *
    * <h2>Reading Records</h2>
    *
    * <p>Sequential reading is implemented using {@link #readNextRecord}.
    *
    * <p>Then {@code FileBasedReader} implements "reading a range [A, B)" in the following way.
    * <ol>
-   * <li>{@code start()} opens the file
-   * <li>{@code start()} seeks the {@code SeekableByteChannel} to A (reading offset ranges for
+   * <li>{@link #start} opens the file
+   * <li>{@link #start} seeks the {@code SeekableByteChannel} to A (reading offset ranges for
    * non-seekable files is not supported) and calls {@code startReading()}
-   * <li>the subclass must do whatever is needed to move to the first split point at or after this
-   * position in the channel
-   * <li>{@code start()} calls {@code advance()} once
+   * <li>{@link #start} calls {@link #advance} once, which, via {@link #readNextRecord},
+   * locates the first record which is at a split point AND its offset is at or after A.
+   * If this record is at or after B, {@link #advance} returns false and reading is finished.
    * <li>if the previous advance call returned {@code true} sequential reading starts and
    * {@code advance()} will be called repeatedly
    * </ol>
@@ -366,13 +412,8 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
    * <p> Since this class implements {@link Source.Reader} it guarantees thread safety. Abstract
    * methods defined here will not be accessed by more than one thread concurrently.
    */
-  public abstract static class FileBasedReader<T> extends ByteOffsetBasedReader<T> {
+  public abstract static class FileBasedReader<T> extends OffsetBasedReader<T> {
     private ReadableByteChannel channel = null;
-    private boolean finished = false; // Reader has finished advancing.
-    private boolean endPositionReached = false; // If true, records have been read up to the ending
-                                                // offset but the last split point may not have been
-                                                // reached.
-    private boolean startCalled = false;
 
     /**
      * Subclasses should not perform IO operations at the constructor. All IO operations should be
@@ -390,9 +431,8 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
     }
 
     @Override
-    public final boolean start() throws IOException {
+    protected final boolean startImpl() throws IOException {
       FileBasedSource<T> source = getCurrentSource();
-      Preconditions.checkState(!startCalled, "start() should only be called once");
       IOChannelFactory factory = IOChannelUtils.getFactory(source.getFileOrPatternSpec());
       this.channel = factory.open(source.getFileOrPatternSpec());
 
@@ -410,40 +450,14 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
       }
 
       startReading(channel);
-      startCalled = true;
 
       // Advance once to load the first record.
-      return advance();
+      return advanceImpl();
     }
 
     @Override
-    public final boolean advance() throws IOException {
-      FileBasedSource<T> source = getCurrentSource();
-      Preconditions.checkState(startCalled, "advance() called before calling start()");
-      if (finished) {
-        return false;
-      }
-
-      if (!readNextRecord()) {
-        // End of the stream reached.
-        finished = true;
-        return false;
-      }
-      if (getCurrentOffset() >= source.getEndOffset()) {
-        // Current record is at or after the end position defined by the source. The reader should
-        // continue reading until the next split point is reached.
-        endPositionReached = true;
-      }
-
-      // If the current record is at or after the end position defined by the source and if the
-      // current record is at a split point, then the current record, and any record after that
-      // does not belong to the offset range of the source.
-      if (endPositionReached && isAtSplitPoint()) {
-        finished = true;
-        return false;
-      }
-
-      return true;
+    protected final boolean advanceImpl() throws IOException {
+      return readNextRecord();
     }
 
     /**
@@ -459,15 +473,6 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
     }
 
     /**
-     * Specifies if the current record of the reader is at a split point.
-     *
-     * <p>This returns {@code true} if the last record returned by {@link #readNextRecord} is at a
-     * split point, {@code false} otherwise. Please refer to {@link FileBasedSource.FileBasedReader
-     * FileBasedReader} for the definition of split points.
-     */
-    protected abstract boolean isAtSplitPoint();
-
-    /**
      * Performs any initialization of the subclass of {@code FileBasedReader} that involves IO
      * operations. Will only be invoked once and before that invocation the base class will seek the
      * channel to the source's starting offset.
@@ -476,14 +481,8 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
      * reader. Subclass may use the {@code channel} to build a higher level IO abstraction, e.g., a
      * BufferedReader or an XML parser.
      *
-     * <p>A subclass may additionally use this to adjust the starting position prior to reading
-     * records. For example, the channel of a reader that reads text lines may point to the middle
-     * of a line after the position adjustment done at {@code FileBasedReader}. In this case the
-     * subclass could adjust the position of the channel to the beginning of the next line. If the
-     * corresponding source is for a subrange of a file, {@code channel} is guaranteed to be an
-     * instance of the type {@link SeekableByteChannel} in which case the subclass may traverse back
-     * in the channel to determine if the channel is already at the correct starting position (e.g.,
-     * to check if the previous character was a newline).
+     * <p>If the corresponding source is for a subrange of a file, {@code channel} is guaranteed to
+     * be an instance of the type {@link SeekableByteChannel}.
      *
      * <p>After this method is invoked the base class will not be reading data from the channel or
      * adjusting the position of the channel. But the base class is responsible for properly closing
@@ -498,6 +497,10 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
      * {@link #getCurrent}, {@link #getCurrentOffset}, and {@link #isAtSplitPoint()} should return
      * the corresponding information about the record read by the last invocation of this method.
      *
+     * <p>Note that this method will be called the same way for reading the first record in the
+     * source (file or offset range in the file) and for reading subsequent records. It is up to the
+     * subclass to do anything special for locating and reading the first record, if necessary.
+     *
      * @return {@code true} if a record was successfully read, {@code false} if the end of the
      *         channel was reached before successfully reading a new record.
      */
@@ -505,7 +508,7 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
   }
 
   // An internal Reader implementation that concatenates a sequence of FileBasedReaders.
-  private class FilePatternReader extends AbstractBoundedReader<T> {
+  private class FilePatternReader extends BoundedReader<T> {
     private final FileBasedSource<T> source;
     private final List<FileBasedReader<T>> fileReaders;
     final ListIterator<FileBasedReader<T>> fileReadersIterator;
@@ -559,7 +562,10 @@ public abstract class FileBasedSource<T> extends ByteOffsetBasedSource<T> {
     @Override
     public void close() throws IOException {
       // Close all readers that may have not yet been closed.
-      currentReader.close();
+      // If this reader has not been started, currentReader is null.
+      if (currentReader != null) {
+        currentReader.close();
+      }
       while (fileReadersIterator.hasNext()) {
         fileReadersIterator.next().close();
       }

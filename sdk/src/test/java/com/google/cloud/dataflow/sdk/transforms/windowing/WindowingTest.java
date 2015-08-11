@@ -131,10 +131,10 @@ public class WindowingTest implements Serializable {
 
     DataflowAssert.that(output).containsInAnyOrder(
         output("a", 1, 1, -5, 5),
-        output("a", 2, 1, 0, 10),
-        output("a", 1, 7, 5, 15),
+        output("a", 2, 5, 0, 10),
+        output("a", 1, 10, 5, 15),
         output("b", 1, 8, 0, 10),
-        output("b", 1, 8, 5, 15));
+        output("b", 1, 10, 5, 15));
 
     p.run();
   }
@@ -165,12 +165,12 @@ public class WindowingTest implements Serializable {
   @Category(RunnableOnService.class)
   public void testWindowPreservation() {
     Pipeline p = TestPipeline.create();
-    PCollection<String> input1 = p.apply(
+    PCollection<String> input1 = p.apply("Create12",
         Create.timestamped(
             TimestampedValue.of("a", new Instant(1)),
             TimestampedValue.of("b", new Instant(2))));
 
-    PCollection<String> input2 = p.apply(
+    PCollection<String> input2 = p.apply("Create34",
         Create.timestamped(
             TimestampedValue.of("a", new Instant(3)),
             TimestampedValue.of("b", new Instant(4))));
@@ -229,8 +229,8 @@ public class WindowingTest implements Serializable {
   public void testEmptyInput() {
     Pipeline p = TestPipeline.create();
     PCollection<String> input =
-        p.apply(Create.<String>timestamped())
-        .setCoder(StringUtf8Coder.of());
+        p.apply(Create.<String>timestamped()
+            .withCoder(StringUtf8Coder.of()));
 
     PCollection<String> output =
         input

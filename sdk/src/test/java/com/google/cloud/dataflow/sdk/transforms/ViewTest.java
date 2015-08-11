@@ -16,29 +16,41 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
-import static org.hamcrest.CoreMatchers.isA;
+import static org.hamcrest.Matchers.isA;
+import static org.junit.Assert.assertEquals;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
+import com.google.cloud.dataflow.sdk.Pipeline.PipelineExecutionException;
 import com.google.cloud.dataflow.sdk.coders.VarIntCoder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
+import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
+import com.google.cloud.dataflow.sdk.options.DirectPipelineOptions;
+import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
+import com.google.cloud.dataflow.sdk.runners.DataflowPipelineRunner;
+import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
 import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.transforms.windowing.FixedWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
+import com.google.cloud.dataflow.sdk.transforms.windowing.InvalidWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
+import com.google.cloud.dataflow.sdk.util.NoopPathValidator;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.values.KV;
+import com.google.cloud.dataflow.sdk.values.PBegin;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
 import com.google.cloud.dataflow.sdk.values.TimestampedValue;
 import com.google.common.base.Preconditions;
 
+import org.hamcrest.Matchers;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
-
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.internal.matchers.ThrowableMessageMatcher;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -68,12 +80,12 @@ public class ViewTest implements Serializable {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<Integer> view = pipeline
-        .apply(Create.of(47))
+        .apply("Create47", Create.of(47))
         .apply(View.<Integer>asSingleton());
 
     PCollection<Integer> output = pipeline
-        .apply(Create.of(1, 2, 3))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("Create123", Create.of(1, 2, 3))
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<Integer, Integer>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -92,13 +104,12 @@ public class ViewTest implements Serializable {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<Integer> view = pipeline
-        .apply(Create.<Integer>of())
-        .setCoder(VarIntCoder.of())
+        .apply("CreateEmptyIntegers", Create.<Integer>of().withCoder(VarIntCoder.of()))
         .apply(View.<Integer>asSingleton());
 
     pipeline
-        .apply(Create.of(1, 2, 3))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("Create123", Create.of(1, 2, 3))
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<Integer, Integer>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -106,7 +117,7 @@ public class ViewTest implements Serializable {
               }
             }));
 
-    thrown.expect(RuntimeException.class);
+    thrown.expect(PipelineExecutionException.class);
     thrown.expectCause(isA(NoSuchElementException.class));
     thrown.expectMessage("Empty");
     thrown.expectMessage("PCollection");
@@ -119,13 +130,12 @@ public class ViewTest implements Serializable {
   public void testNonSingletonSideInput() throws Exception {
     Pipeline pipeline = TestPipeline.create();
 
-    final PCollectionView<Integer> view = pipeline
-        .apply(Create.<Integer>of(1, 2, 3))
+    PCollection<Integer> oneTwoThree = pipeline.apply(Create.<Integer>of(1, 2, 3));
+    final PCollectionView<Integer> view = oneTwoThree
         .apply(View.<Integer>asSingleton());
 
-    pipeline
-        .apply(Create.of(1, 2, 3))
-        .apply(ParDo.withSideInputs(view).of(
+    oneTwoThree
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<Integer, Integer>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -133,7 +143,7 @@ public class ViewTest implements Serializable {
               }
             }));
 
-    thrown.expect(RuntimeException.class);
+    thrown.expect(PipelineExecutionException.class);
     thrown.expectCause(isA(IllegalArgumentException.class));
     thrown.expectMessage("PCollection");
     thrown.expectMessage("more than one");
@@ -148,12 +158,12 @@ public class ViewTest implements Serializable {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<List<Integer>> view = pipeline
-        .apply(Create.of(11, 13, 17, 23))
+        .apply("CreateSideInput", Create.of(11, 13, 17, 23))
         .apply(View.<Integer>asList());
 
     PCollection<Integer> output = pipeline
-        .apply(Create.of(29, 31))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("CreateMainInput", Create.of(29, 31))
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<Integer, Integer>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -178,12 +188,12 @@ public class ViewTest implements Serializable {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<Iterable<Integer>> view = pipeline
-        .apply(Create.of(11, 13, 17, 23))
+        .apply("CreateSideInput", Create.of(11, 13, 17, 23))
         .apply(View.<Integer>asIterable());
 
     PCollection<Integer> output = pipeline
-        .apply(Create.of(29, 31))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("CreateMainInput", Create.of(29, 31))
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<Integer, Integer>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -202,16 +212,16 @@ public class ViewTest implements Serializable {
 
   @Test
   @Category(RunnableOnService.class)
-  public void testMapSideInput() {
+  public void testMultimapSideInput() {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<Map<String, Iterable<Integer>>> view = pipeline
-        .apply(Create.of(KV.of("a", 1), KV.of("a", 2), KV.of("b", 3)))
-        .apply(View.<String, Integer>asMap());
+        .apply("CreateSideInput", Create.of(KV.of("a", 1), KV.of("a", 2), KV.of("b", 3)))
+        .apply(View.<String, Integer>asMultimap());
 
     PCollection<KV<String, Integer>> output = pipeline
-        .apply(Create.of("apple", "banana", "blackberry"))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("CreateMainInput", Create.of("apple", "banana", "blackberry"))
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<String, KV<String, Integer>>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -230,16 +240,16 @@ public class ViewTest implements Serializable {
 
   @Test
   @Category(RunnableOnService.class)
-  public void testSingletonMapSideInput() {
+  public void testMapSideInput() {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<Map<String, Integer>> view = pipeline
-        .apply(Create.of(KV.of("a", 1), KV.of("b", 3)))
-        .apply(View.<String, Integer>asMap().withSingletonValues());
+        .apply("CreateSideInput", Create.of(KV.of("a", 1), KV.of("b", 3)))
+        .apply(View.<String, Integer>asMap());
 
     PCollection<KV<String, Integer>> output = pipeline
-        .apply(Create.of("apple", "banana", "blackberry"))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("CreateMainInput", Create.of("apple", "banana", "blackberry"))
+        .apply("OutputSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<String, KV<String, Integer>>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -260,12 +270,14 @@ public class ViewTest implements Serializable {
     Pipeline pipeline = TestPipeline.create();
 
     final PCollectionView<Map<String, Integer>> view = pipeline
-        .apply(Create.of(KV.of("a", 1), KV.of("a", 20), KV.of("b", 3)))
-        .apply(View.<String, Integer>asMap().withCombiner(new Sum.SumIntegerFn()));
+        .apply("CreateSideInput", Create.of(KV.of("a", 1), KV.of("a", 20), KV.of("b", 3)))
+        .apply("SumIntegers",
+            Combine.perKey(new Sum.SumIntegerFn().<String>asKeyedFn()))
+        .apply(View.<String, Integer>asMap());
 
     PCollection<KV<String, Integer>> output = pipeline
-        .apply(Create.of("apple", "banana", "blackberry"))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("CreateMainInput", Create.of("apple", "banana", "blackberry"))
+        .apply("Output", ParDo.withSideInputs(view).of(
             new DoFn<String, KV<String, Integer>>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -286,21 +298,21 @@ public class ViewTest implements Serializable {
     Pipeline p = TestPipeline.create();
 
     final PCollectionView<Integer> view = p
-        .apply(Create.timestamped(
+        .apply("CreateSideInput", Create.timestamped(
             TimestampedValue.of(1, new Instant(1)),
             TimestampedValue.of(2, new Instant(11)),
             TimestampedValue.of(3, new Instant(13))))
-        .apply(Window.<Integer>into(FixedWindows.of(Duration.millis(10))))
+        .apply("WindowSideInput", Window.<Integer>into(FixedWindows.of(Duration.millis(10))))
         .apply(Sum.integersGlobally().withoutDefaults())
         .apply(View.<Integer>asSingleton());
 
     PCollection<String> output = p
-        .apply(Create.timestamped(
+        .apply("CreateMainInput", Create.timestamped(
             TimestampedValue.of("A", new Instant(4)),
             TimestampedValue.of("B", new Instant(15)),
             TimestampedValue.of("C", new Instant(7))))
-        .apply(Window.<String>into(FixedWindows.of(Duration.millis(10))))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("WindowMainInput", Window.<String>into(FixedWindows.of(Duration.millis(10))))
+        .apply("OutputMainAndSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<String, String>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -319,21 +331,21 @@ public class ViewTest implements Serializable {
     Pipeline p = TestPipeline.create();
 
     final PCollectionView<Integer> view = p
-        .apply(Create.timestamped(
+        .apply("CreateSideInput", Create.timestamped(
             TimestampedValue.of(1, new Instant(1)),
             TimestampedValue.of(2, new Instant(11)),
             TimestampedValue.of(3, new Instant(13))))
-        .apply(Window.<Integer>into(new GlobalWindows()))
+        .apply("WindowSideInput", Window.<Integer>into(new GlobalWindows()))
         .apply(Sum.integersGlobally())
         .apply(View.<Integer>asSingleton());
 
     PCollection<String> output = p
-        .apply(Create.timestamped(
+        .apply("CreateMainInput", Create.timestamped(
             TimestampedValue.of("A", new Instant(4)),
             TimestampedValue.of("B", new Instant(15)),
             TimestampedValue.of("C", new Instant(7))))
-        .apply(Window.<String>into(FixedWindows.of(Duration.millis(10))))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("WindowMainInput", Window.<String>into(FixedWindows.of(Duration.millis(10))))
+        .apply("OutputMainAndSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<String, String>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -352,19 +364,19 @@ public class ViewTest implements Serializable {
     Pipeline p = TestPipeline.create();
 
     final PCollectionView<Integer> view = p
-        .apply(Create.timestamped(
+        .apply("CreateSideInput", Create.timestamped(
             TimestampedValue.of(2, new Instant(11)),
             TimestampedValue.of(3, new Instant(13))))
-        .apply(Window.<Integer>into(FixedWindows.of(Duration.millis(10))))
+        .apply("WindowSideInput", Window.<Integer>into(FixedWindows.of(Duration.millis(10))))
         .apply(Sum.integersGlobally().asSingletonView());
 
     PCollection<String> output = p
-        .apply(Create.timestamped(
+        .apply("CreateMainInput", Create.timestamped(
             TimestampedValue.of("A", new Instant(4)),
             TimestampedValue.of("B", new Instant(15)),
             TimestampedValue.of("C", new Instant(7))))
-        .apply(Window.<String>into(FixedWindows.of(Duration.millis(10))))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("WindowMainInput", Window.<String>into(FixedWindows.of(Duration.millis(10))))
+        .apply("OutputMainAndSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<String, String>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -383,7 +395,7 @@ public class ViewTest implements Serializable {
     Pipeline p = TestPipeline.create();
 
     final PCollectionView<Void> view = p
-        .apply(Create.of((Void) null)).setCoder(VoidCoder.of())
+        .apply("CreateSideInput", Create.of((Void) null).withCoder(VoidCoder.of()))
         .apply(Combine.globally(new SerializableFunction<Iterable<Void>, Void>() {
                   @Override
                   public Void apply(Iterable<Void> input) {
@@ -392,8 +404,8 @@ public class ViewTest implements Serializable {
                 }).asSingletonView());
 
     PCollection<String> output = p
-        .apply(Create.of(""))
-        .apply(ParDo.withSideInputs(view).of(
+        .apply("CreateMainInput", Create.of(""))
+        .apply("OutputMainAndSideInputs", ParDo.withSideInputs(view).of(
             new DoFn<String, String>() {
               @Override
               public void processElement(ProcessContext c) {
@@ -406,4 +418,220 @@ public class ViewTest implements Serializable {
     p.run();
   }
 
+  @Test
+  public void testViewGetName() {
+    assertEquals("View.AsSingleton", View.<Integer>asSingleton().getName());
+    assertEquals("View.AsIterable", View.<Integer>asIterable().getName());
+    assertEquals("View.AsMap", View.<String, Integer>asMap().getName());
+    assertEquals("View.AsMultimap", View.<String, Integer>asMultimap().getName());
+  }
+
+  private Pipeline createTestBatchRunner() {
+    DataflowPipelineOptions options = PipelineOptionsFactory.as(DataflowPipelineOptions.class);
+    options.setRunner(DataflowPipelineRunner.class);
+    options.setProject("someproject");
+    options.setStagingLocation("gs://staging");
+    options.setPathValidatorClass(NoopPathValidator.class);
+    options.setDataflowClient(null);
+    return Pipeline.create(options);
+  }
+
+  private Pipeline createTestStreamingRunner() {
+    DataflowPipelineOptions options = PipelineOptionsFactory.as(DataflowPipelineOptions.class);
+    options.setRunner(DataflowPipelineRunner.class);
+    options.setStreaming(true);
+    options.setProject("someproject");
+    options.setStagingLocation("gs://staging");
+    options.setPathValidatorClass(NoopPathValidator.class);
+    options.setDataflowClient(null);
+    return Pipeline.create(options);
+  }
+
+  private Pipeline createTestDirectRunner() {
+    DirectPipelineOptions options = PipelineOptionsFactory.as(DirectPipelineOptions.class);
+    options.setRunner(DirectPipelineRunner.class);
+    return Pipeline.create(options);
+  }
+
+  private void testViewUnbounded(Pipeline pipeline,
+      PTransform<PCollection<KV<String, Integer>>, ? extends PCollectionView<?>> view) {
+    thrown.expect(IllegalStateException.class);
+    thrown.expectMessage("Unable to create a side-input view from input");
+    thrown.expectCause(
+        ThrowableMessageMatcher.hasMessage(Matchers.containsString("non-bounded PCollection")));
+    pipeline
+        .apply(new PTransform<PBegin, PCollection<KV<String, Integer>>>() {
+          @Override
+          public PCollection<KV<String, Integer>> apply(PBegin input) {
+            return PCollection.createPrimitiveOutputInternal(input.getPipeline(),
+                WindowingStrategy.globalDefault(), PCollection.IsBounded.UNBOUNDED);
+          }
+        })
+        .apply(view);
+  }
+
+  private void testViewNonmerging(Pipeline pipeline,
+      PTransform<PCollection<KV<String, Integer>>, ? extends PCollectionView<?>> view) {
+    thrown.expect(IllegalStateException.class);
+    thrown.expectMessage("Unable to create a side-input view from input");
+    thrown.expectCause(
+        ThrowableMessageMatcher.hasMessage(Matchers.containsString("Consumed by GroupByKey")));
+    pipeline
+        .apply(Create.<KV<String, Integer>>of(KV.of("hello", 5)))
+        .apply(Window.<KV<String, Integer>>into(new InvalidWindows<>(
+            "Consumed by GroupByKey", FixedWindows.of(Duration.standardHours(1)))))
+        .apply(view);
+  }
+
+  @Test
+  public void testViewUnboundedAsSingletonBatch() {
+    testViewUnbounded(createTestBatchRunner(), View.<KV<String, Integer>>asSingleton());
+  }
+
+  @Test
+  public void testViewUnboundedAsSingletonStreaming() {
+    testViewUnbounded(createTestStreamingRunner(), View.<KV<String, Integer>>asSingleton());
+  }
+
+  @Test
+  public void testViewUnboundedAsSingletonDirect() {
+    testViewUnbounded(createTestDirectRunner(), View.<KV<String, Integer>>asSingleton());
+  }
+
+  @Test
+  public void testViewUnboundedAsIterableBatch() {
+    testViewUnbounded(createTestBatchRunner(), View.<KV<String, Integer>>asIterable());
+  }
+
+  @Test
+  public void testViewUnboundedAsIterableStreaming() {
+    testViewUnbounded(createTestStreamingRunner(), View.<KV<String, Integer>>asIterable());
+  }
+
+  @Test
+  public void testViewUnboundedAsIterableDirect() {
+    testViewUnbounded(createTestDirectRunner(), View.<KV<String, Integer>>asIterable());
+  }
+
+  @Test
+  public void testViewUnboundedAsListBatch() {
+    testViewUnbounded(createTestBatchRunner(), View.<KV<String, Integer>>asList());
+  }
+
+  @Test
+  public void testViewUnboundedAsListStreaming() {
+    testViewUnbounded(createTestStreamingRunner(), View.<KV<String, Integer>>asList());
+  }
+
+  @Test
+  public void testViewUnboundedAsListDirect() {
+    testViewUnbounded(createTestDirectRunner(), View.<KV<String, Integer>>asList());
+  }
+
+  @Test
+  public void testViewUnboundedAsMapBatch() {
+    testViewUnbounded(createTestBatchRunner(), View.<String, Integer>asMap());
+  }
+
+  @Test
+  public void testViewUnboundedAsMapStreaming() {
+    testViewUnbounded(createTestStreamingRunner(), View.<String, Integer>asMap());
+  }
+
+  @Test
+  public void testViewUnboundedAsMapDirect() {
+    testViewUnbounded(createTestDirectRunner(), View.<String, Integer>asMap());
+  }
+
+
+  @Test
+  public void testViewUnboundedAsMultimapBatch() {
+    testViewUnbounded(createTestBatchRunner(), View.<String, Integer>asMultimap());
+  }
+
+  @Test
+  public void testViewUnboundedAsMultimapStreaming() {
+    testViewUnbounded(createTestStreamingRunner(), View.<String, Integer>asMultimap());
+  }
+
+  @Test
+  public void testViewUnboundedAsMultimapDirect() {
+    testViewUnbounded(createTestDirectRunner(), View.<String, Integer>asMultimap());
+  }
+
+  @Test
+  public void testViewNonmergingAsSingletonBatch() {
+    testViewNonmerging(createTestBatchRunner(), View.<KV<String, Integer>>asSingleton());
+  }
+
+  @Test
+  public void testViewNonmergingAsSingletonStreaming() {
+    testViewNonmerging(createTestStreamingRunner(), View.<KV<String, Integer>>asSingleton());
+  }
+
+  @Test
+  public void testViewNonmergingAsSingletonDirect() {
+    testViewNonmerging(createTestDirectRunner(), View.<KV<String, Integer>>asSingleton());
+  }
+
+  @Test
+  public void testViewNonmergingAsIterableBatch() {
+    testViewNonmerging(createTestBatchRunner(), View.<KV<String, Integer>>asIterable());
+  }
+
+  @Test
+  public void testViewNonmergingAsIterableStreaming() {
+    testViewNonmerging(createTestStreamingRunner(), View.<KV<String, Integer>>asIterable());
+  }
+
+  @Test
+  public void testViewNonmergingAsIterableDirect() {
+    testViewNonmerging(createTestDirectRunner(), View.<KV<String, Integer>>asIterable());
+  }
+
+  @Test
+  public void testViewNonmergingAsListBatch() {
+    testViewNonmerging(createTestBatchRunner(), View.<KV<String, Integer>>asList());
+  }
+
+  @Test
+  public void testViewNonmergingAsListStreaming() {
+    testViewNonmerging(createTestStreamingRunner(), View.<KV<String, Integer>>asList());
+  }
+
+  @Test
+  public void testViewNonmergingAsListDirect() {
+    testViewNonmerging(createTestDirectRunner(), View.<KV<String, Integer>>asList());
+  }
+
+  @Test
+  public void testViewNonmergingAsMapBatch() {
+    testViewNonmerging(createTestBatchRunner(), View.<String, Integer>asMap());
+  }
+
+  @Test
+  public void testViewNonmergingAsMapStreaming() {
+    testViewNonmerging(createTestStreamingRunner(), View.<String, Integer>asMap());
+  }
+
+  @Test
+  public void testViewNonmergingAsMapDirect() {
+    testViewNonmerging(createTestDirectRunner(), View.<String, Integer>asMap());
+  }
+
+
+  @Test
+  public void testViewNonmergingAsMultimapBatch() {
+    testViewNonmerging(createTestBatchRunner(), View.<String, Integer>asMultimap());
+  }
+
+  @Test
+  public void testViewNonmergingAsMultimapStreaming() {
+    testViewNonmerging(createTestStreamingRunner(), View.<String, Integer>asMultimap());
+  }
+
+  @Test
+  public void testViewNonmergingAsMultimapDirect() {
+    testViewNonmerging(createTestDirectRunner(), View.<String, Integer>asMultimap());
+  }
 }

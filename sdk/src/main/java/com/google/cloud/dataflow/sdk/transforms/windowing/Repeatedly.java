@@ -19,6 +19,7 @@ package com.google.cloud.dataflow.sdk.transforms.windowing;
 import org.joda.time.Instant;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Repeat a trigger, either until some condition is met or forever.
@@ -58,36 +59,41 @@ public class Repeatedly<W extends BoundedWindow> extends Trigger<W> {
 
 
   @Override
-  public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e)
+  public TriggerResult onElement(OnElementContext c)
       throws Exception {
-    TriggerResult result = c.subTrigger(REPEATED).invokeElement(c, e);
+    TriggerResult result = c.trigger().subTrigger(REPEATED).invokeElement(c);
     if (result.isFinish()) {
-      c.forTrigger(c.subTrigger(REPEATED)).resetTree(e.window());
+      c.forTrigger(c.trigger().subTrigger(REPEATED)).trigger().resetTree();
     }
     return result.isFire() ? TriggerResult.FIRE : TriggerResult.CONTINUE;
   }
 
   @Override
-  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
-    MergeResult mergeResult = c.subTrigger(REPEATED).invokeMerge(c, e);
+  public MergeResult onMerge(OnMergeContext c) throws Exception {
+    MergeResult mergeResult = c.trigger().subTrigger(REPEATED).invokeMerge(c);
     if (mergeResult.isFinish()) {
-      c.forTrigger(c.subTrigger(REPEATED)).resetTree(e.newWindow());
+      c.forTrigger(c.trigger().subTrigger(REPEATED)).trigger().resetTree();
     }
     return mergeResult.isFire() ? MergeResult.FIRE : MergeResult.CONTINUE;
   }
 
   @Override
-  public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) throws Exception {
-    TriggerResult result = c.subTrigger(REPEATED).invokeTimer(c, e);
+  public TriggerResult onTimer(OnTimerContext c) throws Exception {
+    TriggerResult result = c.trigger().subTrigger(REPEATED).invokeTimer(c);
     if (result.isFinish()) {
-      c.forTrigger(c.subTrigger(REPEATED)).resetTree(e.window());
+      c.forTrigger(c.trigger().subTrigger(REPEATED)).trigger().resetTree();
     }
     return result.isFire() ? TriggerResult.FIRE : TriggerResult.CONTINUE;
   }
 
   @Override
-  public Instant getWatermarkCutoff(W window) {
+  public Instant getWatermarkThatGuaranteesFiring(W window) {
     // This trigger fires once the repeated trigger fires.
-    return subTriggers.get(REPEATED).getWatermarkCutoff(window);
+    return subTriggers.get(REPEATED).getWatermarkThatGuaranteesFiring(window);
+  }
+
+  @Override
+  public Trigger<W> getContinuationTrigger(List<Trigger<W>> continuationTriggers) {
+    return new Repeatedly<W>(continuationTriggers.get(REPEATED));
   }
 }

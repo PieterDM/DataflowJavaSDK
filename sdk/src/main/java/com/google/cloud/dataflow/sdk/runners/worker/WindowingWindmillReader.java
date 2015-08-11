@@ -16,20 +16,24 @@
 
 package com.google.cloud.dataflow.sdk.runners.worker;
 
-import static com.google.cloud.dataflow.sdk.util.TimerOrElement.TimerOrElementCoder;
-
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.runners.worker.windmill.Windmill;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
+import com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.StreamingModeExecutionContext;
+import com.google.cloud.dataflow.sdk.util.TimeDomain;
+import com.google.cloud.dataflow.sdk.util.TimerInternals.TimerData;
 import com.google.cloud.dataflow.sdk.util.TimerOrElement;
+import com.google.cloud.dataflow.sdk.util.TimerOrElement.TimerOrElementCoder;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
 import com.google.cloud.dataflow.sdk.util.WindowedValue.FullWindowedValueCoder;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
+import com.google.cloud.dataflow.sdk.util.state.StateNamespace;
+import com.google.cloud.dataflow.sdk.util.state.StateNamespaces;
 import com.google.cloud.dataflow.sdk.values.KV;
 
 import org.joda.time.Instant;
@@ -38,6 +42,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -46,6 +51,7 @@ import java.util.concurrent.TimeUnit;
  */
 class WindowingWindmillReader<T> extends Reader<WindowedValue<TimerOrElement<T>>> {
   private final Coder<T> valueCoder;
+  private final Coder<? extends BoundedWindow> windowCoder;
   private final Coder<Collection<? extends BoundedWindow>> windowsCoder;
   private StreamingModeExecutionContext context;
 
@@ -54,6 +60,7 @@ class WindowingWindmillReader<T> extends Reader<WindowedValue<TimerOrElement<T>>
     FullWindowedValueCoder<TimerOrElement<T>> inputCoder =
         (FullWindowedValueCoder<TimerOrElement<T>>) coder;
     this.windowsCoder = inputCoder.getWindowsCoder();
+    this.windowCoder = inputCoder.getWindowCoder();
     this.valueCoder = ((TimerOrElementCoder<T>) inputCoder.getValueCoder()).getElementCoder();
     this.context = context;
   }
@@ -74,7 +81,29 @@ class WindowingWindmillReader<T> extends Reader<WindowedValue<TimerOrElement<T>>
   extends AbstractReaderIterator<WindowedValue<TimerOrElement<T>>> {
     private int bundleIndex = 0;
     private int messageIndex = 0;
-    private int timerIndex = 0;
+    private int processingTimeTimerIndex = 0;
+    private int eventTimeTimerIndex = 0;
+    Object key = null;
+    private List<WindowedValue<TimerOrElement<T>>> eventTimeTimers;
+    private List<WindowedValue<TimerOrElement<T>>> processingTimeTimers;
+
+    private WindowingWindmillReaderIterator() throws IOException {
+      if (valueCoder instanceof KvCoder) {
+        key = ((KvCoder) valueCoder).getKeyCoder().decode(
+            context.getSerializedKey().newInput(), Coder.Context.OUTER);
+      }
+
+      eventTimeTimers = new ArrayList<>();
+      processingTimeTimers = new ArrayList<>();
+      for (Windmill.Timer rawTimer : context.getWork().getTimers().getTimersList()) {
+        WindowedValue<TimerOrElement<T>> timer = createTimer(rawTimer);
+        if (timer.getValue().getTimer().getDomain() == TimeDomain.EVENT_TIME) {
+          eventTimeTimers.add(timer);
+        } else {
+          processingTimeTimers.add(timer);
+        }
+      }
+    }
 
     private boolean hasMoreMessages() {
       Windmill.WorkItem work = context.getWork();
@@ -82,32 +111,59 @@ class WindowingWindmillReader<T> extends Reader<WindowedValue<TimerOrElement<T>>
           messageIndex < work.getMessageBundles(bundleIndex).getMessagesCount();
     }
 
-    private boolean hasMoreTimers() {
-      Windmill.WorkItem work = context.getWork();
-      return work.hasTimers() && timerIndex < work.getTimers().getTimersCount();
+    private boolean hasMoreProcessingTimeTimers() {
+      return processingTimeTimerIndex < processingTimeTimers.size();
+    }
+
+    private boolean hasMoreEventTimeTimers() {
+      return eventTimeTimerIndex < eventTimeTimers.size();
     }
 
     @Override
     public boolean hasNext() throws IOException {
-      return hasMoreMessages() || hasMoreTimers();
+      return hasMoreMessages() || hasMoreProcessingTimeTimers() || hasMoreEventTimeTimers();
+    }
+
+    private TimeDomain getTimeDomain(Windmill.Timer.Type type) {
+      switch (type) {
+        case REALTIME:
+          return TimeDomain.PROCESSING_TIME;
+        case DEPENDENT_REALTIME:
+          return TimeDomain.SYNCHRONIZED_PROCESSING_TIME;
+        case WATERMARK:
+          return TimeDomain.EVENT_TIME;
+        default:
+          throw new IllegalArgumentException("Unsupported timer type " + type);
+      }
+    }
+
+    private <W extends BoundedWindow> WindowedValue<TimerOrElement<T>> createTimer(
+        Windmill.Timer timer) {
+      String tag = timer.getTag().toStringUtf8();
+      String namespaceString = tag.substring(0, tag.indexOf('+'));
+      StateNamespace namespace = StateNamespaces.fromString(namespaceString, windowCoder);
+
+      Instant timestamp = new Instant(TimeUnit.MICROSECONDS.toMillis(timer.getTimestamp()));
+      TimerData timerData = TimerData.of(namespace, timestamp, getTimeDomain(timer.getType()));
+
+      return WindowedValue.<TimerOrElement<T>>of(
+          TimerOrElement.<T>timer(key, timerData),
+          timestamp,
+          new ArrayList<W>(),
+          PaneInfo.NO_FIRING);
     }
 
     @Override
     public WindowedValue<TimerOrElement<T>> next() throws IOException {
-      if (hasMoreTimers()) {
+      if (hasMoreEventTimeTimers()) {
         if (valueCoder instanceof KvCoder) {
-          Windmill.Timer timer = context.getWork().getTimers().getTimers(timerIndex++);
-          long timestampMillis = TimeUnit.MICROSECONDS.toMillis(timer.getTimestamp());
-
-          KvCoder kvCoder = (KvCoder) valueCoder;
-          Object key = kvCoder.getKeyCoder().decode(
-              context.getSerializedKey().newInput(), Coder.Context.OUTER);
-
-          return WindowedValue.of(TimerOrElement.<T>timer(timer.getTag().toStringUtf8(),
-                                                          new Instant(timestampMillis),
-                                                          key),
-                                  new Instant(timestampMillis),
-                                  new ArrayList());
+          return eventTimeTimers.get(eventTimeTimerIndex++);
+        } else {
+          throw new RuntimeException("Timer set on non-keyed DoFn");
+        }
+      } else if (hasMoreProcessingTimeTimers()) {
+        if (valueCoder instanceof KvCoder) {
+          return processingTimeTimers.get(processingTimeTimerIndex++);
         } else {
           throw new RuntimeException("Timer set on non-keyed DoFn");
         }
@@ -126,21 +182,22 @@ class WindowingWindmillReader<T> extends Reader<WindowedValue<TimerOrElement<T>>
             new Instant(TimeUnit.MICROSECONDS.toMillis(message.getTimestamp()));
         InputStream data = message.getData().newInput();
         InputStream metadata = message.getMetadata().newInput();
-        Collection<? extends BoundedWindow> windows = decode(windowsCoder, metadata);
+        Collection<? extends BoundedWindow> windows = WindmillSink.decodeMetadataWindows(
+            windowsCoder, message.getMetadata());
+        PaneInfo pane = WindmillSink.decodeMetadataPane(message.getMetadata());
         if (valueCoder instanceof KvCoder) {
           KvCoder kvCoder = (KvCoder) valueCoder;
-          InputStream key = context.getSerializedKey().newInput();
-          notifyElementRead(key.available() + data.available() + metadata.available());
+          notifyElementRead(
+              context.getSerializedKey().size() + data.available() + metadata.available());
           return WindowedValue.of(
-              TimerOrElement.element((T) KV.of(decode(kvCoder.getKeyCoder(), key),
-                                               decode(kvCoder.getValueCoder(), data))),
-              timestampMillis,
-              windows);
+              TimerOrElement.element((T) KV.of(key, decode(kvCoder.getValueCoder(), data))),
+              timestampMillis, windows, pane);
         } else {
           notifyElementRead(data.available() + metadata.available());
           return WindowedValue.of(TimerOrElement.element(decode(valueCoder, data)),
                                   timestampMillis,
-                                  windows);
+                                  windows,
+                                  pane);
         }
       }
     }

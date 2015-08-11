@@ -18,21 +18,40 @@ package com.google.cloud.dataflow.sdk.util;
 
 import static org.hamcrest.Matchers.contains;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.when;
 
-import com.google.api.client.auth.oauth2.Credential;
+import com.google.api.client.googleapis.json.GoogleJsonError.ErrorInfo;
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
+import com.google.api.client.http.HttpRequest;
+import com.google.api.client.http.HttpResponse;
+import com.google.api.client.http.HttpStatusCodes;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.http.LowLevelHttpRequest;
+import com.google.api.client.json.GenericJson;
+import com.google.api.client.json.Json;
+import com.google.api.client.json.JsonFactory;
+import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.testing.http.HttpTesting;
+import com.google.api.client.testing.http.MockHttpTransport;
+import com.google.api.client.testing.http.MockLowLevelHttpRequest;
+import com.google.api.client.testing.http.MockLowLevelHttpResponse;
+import com.google.api.client.util.BackOff;
 import com.google.api.client.util.Throwables;
 import com.google.api.services.storage.Storage;
+import com.google.api.services.storage.model.Bucket;
 import com.google.api.services.storage.model.Objects;
 import com.google.api.services.storage.model.StorageObject;
 import com.google.cloud.dataflow.sdk.options.GcsOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
+import com.google.cloud.dataflow.sdk.testing.FastNanoClockAndSleeper;
 import com.google.cloud.dataflow.sdk.util.gcsfs.GcsPath;
-import com.google.cloud.dataflow.sdk.util.gcsio.GoogleCloudStorageReadChannel;
+import com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadChannel;
+import com.google.cloud.hadoop.util.ClientRequestHelper;
 import com.google.common.collect.ImmutableList;
 
 import org.junit.Rule;
@@ -42,9 +61,13 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mockito;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.math.BigInteger;
+import java.net.SocketTimeoutException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -54,7 +77,7 @@ import java.util.concurrent.TimeUnit;
 /** Test case for {@link GcsUtil}. */
 @RunWith(JUnit4.class)
 public class GcsUtilTest {
-  @Rule public ExpectedException exception = ExpectedException.none();
+  @Rule public ExpectedException thrown = ExpectedException.none();
 
   @Test
   public void testGlobTranslation() {
@@ -67,14 +90,14 @@ public class GcsUtilTest {
   @Test
   public void testCreationWithDefaultOptions() {
     GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
-    pipelineOptions.setGcpCredential(Mockito.mock(Credential.class));
+    pipelineOptions.setGcpCredential(new TestCredential());
     assertNotNull(pipelineOptions.getGcpCredential());
   }
 
   @Test
   public void testCreationWithExecutorServiceProvided() {
     GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
-    pipelineOptions.setGcpCredential(Mockito.mock(Credential.class));
+    pipelineOptions.setGcpCredential(new TestCredential());
     pipelineOptions.setExecutorService(Executors.newCachedThreadPool());
     assertSame(pipelineOptions.getExecutorService(), pipelineOptions.getGcsUtil().executorService);
   }
@@ -92,7 +115,7 @@ public class GcsUtilTest {
     GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
     ExecutorService executorService = pipelineOptions.getExecutorService();
 
-    int numThreads = 1000;
+    int numThreads = 100;
     final CountDownLatch[] countDownLatches = new CountDownLatch[numThreads];
     for (int i = 0; i < numThreads; i++) {
       final int currentLatch = i;
@@ -123,7 +146,7 @@ public class GcsUtilTest {
   @Test
   public void testGlobExpansion() throws IOException {
     GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
-    pipelineOptions.setGcpCredential(Mockito.mock(Credential.class));
+    pipelineOptions.setGcpCredential(new TestCredential());
     GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
 
     Storage mockStorage = Mockito.mock(Storage.class);
@@ -205,12 +228,12 @@ public class GcsUtilTest {
   @Test
   public void testRecursiveGlobExpansionFails() throws IOException {
     GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
-    pipelineOptions.setGcpCredential(Mockito.mock(Credential.class));
+    pipelineOptions.setGcpCredential(new TestCredential());
     GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
     GcsPath pattern = GcsPath.fromUri("gs://testbucket/test**");
 
-    exception.expect(IllegalArgumentException.class);
-    exception.expectMessage("Unsupported wildcard usage");
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Unsupported wildcard usage");
     gcsUtil.expand(pattern);
   }
 
@@ -219,7 +242,7 @@ public class GcsUtilTest {
   @Test
   public void testNonExistent() throws IOException {
     GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
-    pipelineOptions.setGcpCredential(Mockito.mock(Credential.class));
+    pipelineOptions.setGcpCredential(new TestCredential());
     GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
 
     Storage mockStorage = Mockito.mock(Storage.class);
@@ -257,10 +280,182 @@ public class GcsUtilTest {
   }
 
   @Test
+  public void testGetSizeBytes() throws Exception {
+    GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
+    pipelineOptions.setGcpCredential(new TestCredential());
+    GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
+
+    Storage mockStorage = Mockito.mock(Storage.class);
+    gcsUtil.setStorageClient(mockStorage);
+
+    Storage.Objects mockStorageObjects = Mockito.mock(Storage.Objects.class);
+    Storage.Objects.Get mockStorageGet = Mockito.mock(Storage.Objects.Get.class);
+
+    when(mockStorage.objects()).thenReturn(mockStorageObjects);
+    when(mockStorageObjects.get("testbucket", "testobject")).thenReturn(mockStorageGet);
+    when(mockStorageGet.execute()).thenReturn(
+        new StorageObject().setSize(BigInteger.valueOf(1000)));
+
+    assertEquals(1000, gcsUtil.fileSize(GcsPath.fromComponents("testbucket", "testobject")));
+  }
+
+  @Test
+  public void testGetSizeBytesWhenFileNotFound() throws Exception {
+    MockLowLevelHttpResponse notFoundResponse = new MockLowLevelHttpResponse();
+    notFoundResponse.setContent("");
+    notFoundResponse.setStatusCode(HttpStatusCodes.STATUS_CODE_NOT_FOUND);
+
+    MockHttpTransport mockTransport =
+        new MockHttpTransport.Builder().setLowLevelHttpResponse(notFoundResponse).build();
+
+    GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
+    pipelineOptions.setGcpCredential(new TestCredential());
+    GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
+
+    gcsUtil.setStorageClient(new Storage(mockTransport, Transport.getJsonFactory(), null));
+
+    thrown.expect(FileNotFoundException.class);
+    gcsUtil.fileSize(GcsPath.fromComponents("testbucket", "testobject"));
+  }
+
+  @Test
+  public void testRetryFileSize() throws IOException {
+    GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
+    pipelineOptions.setGcpCredential(new TestCredential());
+    GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
+
+    Storage mockStorage = Mockito.mock(Storage.class);
+    gcsUtil.setStorageClient(mockStorage);
+
+    Storage.Objects mockStorageObjects = Mockito.mock(Storage.Objects.class);
+    Storage.Objects.Get mockStorageGet = Mockito.mock(Storage.Objects.Get.class);
+
+    BackOff mockBackOff = new AttemptBoundedExponentialBackOff(3, 200);
+
+    when(mockStorage.objects()).thenReturn(mockStorageObjects);
+    when(mockStorageObjects.get("testbucket", "testobject")).thenReturn(mockStorageGet);
+    when(mockStorageGet.execute())
+        .thenThrow(new SocketTimeoutException("SocketException"))
+        .thenThrow(new SocketTimeoutException("SocketException"))
+        .thenReturn(new StorageObject().setSize(BigInteger.valueOf(1000)));
+
+    assertEquals(1000, gcsUtil.fileSize(GcsPath.fromComponents("testbucket", "testobject"),
+        mockBackOff, new FastNanoClockAndSleeper()));
+    assertEquals(mockBackOff.nextBackOffMillis(), BackOff.STOP);
+  }
+
+  @Test
+  public void testBucketExists() throws IOException {
+    GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
+    pipelineOptions.setGcpCredential(new TestCredential());
+    GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
+
+    Storage mockStorage = Mockito.mock(Storage.class);
+    gcsUtil.setStorageClient(mockStorage);
+
+    Storage.Buckets mockStorageObjects = Mockito.mock(Storage.Buckets.class);
+    Storage.Buckets.Get mockStorageGet = Mockito.mock(Storage.Buckets.Get.class);
+
+    BackOff mockBackOff = new AttemptBoundedExponentialBackOff(3, 200);
+
+    when(mockStorage.buckets()).thenReturn(mockStorageObjects);
+    when(mockStorageObjects.get("testbucket")).thenReturn(mockStorageGet);
+    when(mockStorageGet.execute())
+        .thenThrow(new SocketTimeoutException("SocketException"))
+        .thenReturn(new Bucket());
+
+    assertTrue(gcsUtil.bucketExists(GcsPath.fromComponents("testbucket", "testobject"),
+        mockBackOff, new FastNanoClockAndSleeper()));
+  }
+
+  @Test
+  public void testBucketDoesNotExistBecauseOfAccessError() throws IOException {
+    GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
+    pipelineOptions.setGcpCredential(new TestCredential());
+    GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
+
+    Storage mockStorage = Mockito.mock(Storage.class);
+    gcsUtil.setStorageClient(mockStorage);
+
+    Storage.Buckets mockStorageObjects = Mockito.mock(Storage.Buckets.class);
+    Storage.Buckets.Get mockStorageGet = Mockito.mock(Storage.Buckets.Get.class);
+
+    BackOff mockBackOff = new AttemptBoundedExponentialBackOff(3, 200);
+    GoogleJsonResponseException expectedException =
+        googleJsonResponseException(HttpStatusCodes.STATUS_CODE_FORBIDDEN,
+            "Waves hand mysteriously", "These aren't the buckets your looking for");
+
+    when(mockStorage.buckets()).thenReturn(mockStorageObjects);
+    when(mockStorageObjects.get("testbucket")).thenReturn(mockStorageGet);
+    when(mockStorageGet.execute())
+        .thenThrow(expectedException);
+
+    assertFalse(gcsUtil.bucketExists(GcsPath.fromComponents("testbucket", "testobject"),
+        mockBackOff, new FastNanoClockAndSleeper()));
+  }
+
+  @Test
+  public void testBucketDoesNotExist() throws IOException {
+    GcsOptions pipelineOptions = PipelineOptionsFactory.as(GcsOptions.class);
+    pipelineOptions.setGcpCredential(new TestCredential());
+    GcsUtil gcsUtil = pipelineOptions.getGcsUtil();
+
+    Storage mockStorage = Mockito.mock(Storage.class);
+    gcsUtil.setStorageClient(mockStorage);
+
+    Storage.Buckets mockStorageObjects = Mockito.mock(Storage.Buckets.class);
+    Storage.Buckets.Get mockStorageGet = Mockito.mock(Storage.Buckets.Get.class);
+
+    BackOff mockBackOff = new AttemptBoundedExponentialBackOff(3, 200);
+
+    when(mockStorage.buckets()).thenReturn(mockStorageObjects);
+    when(mockStorageObjects.get("testbucket")).thenReturn(mockStorageGet);
+    when(mockStorageGet.execute())
+        .thenThrow(googleJsonResponseException(HttpStatusCodes.STATUS_CODE_NOT_FOUND,
+            "It don't exist", "Nothing here to see"));
+
+    assertFalse(gcsUtil.bucketExists(GcsPath.fromComponents("testbucket", "testobject"),
+        mockBackOff, new FastNanoClockAndSleeper()));
+  }
+
+  @Test
   public void testGCSChannelCloseIdempotent() throws IOException {
     SeekableByteChannel channel =
-        new GoogleCloudStorageReadChannel(null, "dummybucket", "dummyobject", null);
+        new GoogleCloudStorageReadChannel(null, "dummybucket", "dummyobject", null,
+        new ClientRequestHelper<StorageObject>());
     channel.close();
     channel.close();
+  }
+
+  /**
+   * Builds a fake GoogleJsonResponseException for testing API error handling.
+   */
+  private static GoogleJsonResponseException googleJsonResponseException(
+      final int status, final String reason, final String message) throws IOException {
+    final JsonFactory jsonFactory = new JacksonFactory();
+    HttpTransport transport = new MockHttpTransport() {
+      @Override
+      public LowLevelHttpRequest buildRequest(String method, String url) throws IOException {
+        ErrorInfo errorInfo = new ErrorInfo();
+        errorInfo.setReason(reason);
+        errorInfo.setMessage(message);
+        errorInfo.setFactory(jsonFactory);
+        GenericJson error = new GenericJson();
+        error.set("code", status);
+        error.set("errors", Arrays.asList(errorInfo));
+        error.setFactory(jsonFactory);
+        GenericJson errorResponse = new GenericJson();
+        errorResponse.set("error", error);
+        errorResponse.setFactory(jsonFactory);
+        return new MockLowLevelHttpRequest().setResponse(
+            new MockLowLevelHttpResponse().setContent(errorResponse.toPrettyString())
+            .setContentType(Json.MEDIA_TYPE).setStatusCode(status));
+        }
+    };
+    HttpRequest request =
+        transport.createRequestFactory().buildGetRequest(HttpTesting.SIMPLE_GENERIC_URL);
+    request.setThrowExceptionOnExecuteError(false);
+    HttpResponse response = request.execute();
+    return GoogleJsonResponseException.from(jsonFactory, response);
   }
 }

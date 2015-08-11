@@ -16,7 +16,10 @@
 
 package com.google.cloud.dataflow.sdk.util;
 
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
+import com.google.api.client.util.BackOff;
 import com.google.api.client.util.Preconditions;
+import com.google.api.client.util.Sleeper;
 import com.google.api.services.storage.Storage;
 import com.google.api.services.storage.model.Objects;
 import com.google.api.services.storage.model.StorageObject;
@@ -24,16 +27,25 @@ import com.google.cloud.dataflow.sdk.options.DefaultValueFactory;
 import com.google.cloud.dataflow.sdk.options.GcsOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.util.gcsfs.GcsPath;
-import com.google.cloud.dataflow.sdk.util.gcsio.GoogleCloudStorageReadChannel;
-import com.google.cloud.dataflow.sdk.util.gcsio.GoogleCloudStorageWriteChannel;
+import com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadChannel;
+import com.google.cloud.hadoop.gcsio.GoogleCloudStorageWriteChannel;
+import com.google.cloud.hadoop.gcsio.ObjectWriteConditions;
+import com.google.cloud.hadoop.util.ApiErrorExtractor;
+import com.google.cloud.hadoop.util.AsyncWriteChannelOptions;
+import com.google.cloud.hadoop.util.ClientRequestHelper;
+import com.google.cloud.hadoop.util.ResilientOperation;
+import com.google.cloud.hadoop.util.RetryDeterminer;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -116,9 +128,9 @@ public class GcsUtil {
   }
 
   /**
-   * Expands a pattern into matched paths. The pattern path may contain globs, which are expanded in
-   * the result. This function may return non-existent files so this should not be used to validate
-   * the existence of files in GCS.
+   * Expands a pattern into matched paths. The pattern path may contain globs, which are expanded
+   * in the result. This function may return non-existent files so this should not be used to
+   * validate the existence of files in GCS.
    */
   public List<GcsPath> expand(GcsPath gcsPattern) throws IOException {
     Preconditions.checkArgument(isGcsPatternSupported(gcsPattern.getObject()));
@@ -151,7 +163,18 @@ public class GcsUtil {
         listObject.setPageToken(pageToken);
       }
 
-      Objects objects = listObject.execute();
+      Objects objects;
+      try {
+        objects = ResilientOperation.retry(
+            ResilientOperation.getGoogleRequestCallable(listObject),
+            new AttemptBoundedExponentialBackOff(3, 200),
+            RetryDeterminer.SOCKET_ERRORS,
+            IOException.class);
+      } catch (Exception e) {
+        throw new IOException("Unable to match files in bucket " + gcsPattern.getBucket()
+            +  ", prefix " + prefix + " against pattern " + p.toString(), e);
+      }
+      //Objects objects = listObject.execute();
       Preconditions.checkNotNull(objects);
 
       if (objects.getItems() == null) {
@@ -175,23 +198,35 @@ public class GcsUtil {
   }
 
   /**
-   * Returns the file size from GCS, or -1 if the file does not exist.
+   * Returns the file size from GCS or throws {@link FileNotFoundException}
+   * if the resource does not exist.
    */
   public long fileSize(GcsPath path) throws IOException {
-    try {
+    return fileSize(path, new AttemptBoundedExponentialBackOff(4, 200), Sleeper.DEFAULT);
+  }
+
+  /**
+   * Returns the file size from GCS or throws {@link FileNotFoundException}
+   * if the resource does not exist.
+   */
+  @VisibleForTesting
+  long fileSize(GcsPath path, BackOff backoff, Sleeper sleeper) throws IOException {
       Storage.Objects.Get getObject =
           storage.objects().get(path.getBucket(), path.getObject());
-
-      StorageObject object = getObject.execute();
-      return object.getSize().longValue();
-    } catch (IOException e) {
-      if (errorExtractor.itemNotFound(e)) {
-        return -1;
-      }
-
-      // Re-throw any other error.
-      throw e;
-    }
+      try {
+        StorageObject object = ResilientOperation.retry(
+            ResilientOperation.getGoogleRequestCallable(getObject),
+            backoff,
+            RetryDeterminer.SOCKET_ERRORS,
+            IOException.class,
+            sleeper);
+        return object.getSize().longValue();
+      } catch (Exception e) {
+        if (e instanceof IOException && errorExtractor.itemNotFound((IOException) e)) {
+          throw new FileNotFoundException(path.toString());
+        }
+        throw new IOException("Unable to get file size", e);
+     }
   }
 
   /**
@@ -206,7 +241,8 @@ public class GcsUtil {
   public SeekableByteChannel open(GcsPath path)
       throws IOException {
     return new GoogleCloudStorageReadChannel(storage, path.getBucket(),
-            path.getObject(), errorExtractor);
+            path.getObject(), errorExtractor,
+            new ClientRequestHelper<StorageObject>());
   }
 
   /**
@@ -222,12 +258,63 @@ public class GcsUtil {
    */
   public WritableByteChannel create(GcsPath path,
       String type) throws IOException {
-    return new GoogleCloudStorageWriteChannel(
+    GoogleCloudStorageWriteChannel channel = new GoogleCloudStorageWriteChannel(
         executorService,
         storage,
+        new ClientRequestHelper<StorageObject>(),
         path.getBucket(),
         path.getObject(),
+        (new AsyncWriteChannelOptions.Builder()).build(),
+        new ObjectWriteConditions(),
+        Collections.<String, String>emptyMap(),
         type);
+    channel.initialize();
+    return channel;
+  }
+
+  /**
+   * Returns whether the GCS bucket exists. If the bucket exists, it must
+   * be accessible otherwise the permissions exception will be propagated.
+   */
+  public boolean bucketExists(GcsPath path) throws IOException {
+    return bucketExists(path, new AttemptBoundedExponentialBackOff(4, 200), Sleeper.DEFAULT);
+  }
+
+  /**
+   * Returns whether the GCS bucket exists. This will return false if the bucket
+   * is inaccessible due to permissions.
+   */
+  @VisibleForTesting
+  boolean bucketExists(GcsPath path, BackOff backoff, Sleeper sleeper) throws IOException {
+    Storage.Buckets.Get getBucket =
+        storage.buckets().get(path.getBucket());
+
+      try {
+        ResilientOperation.retry(
+            ResilientOperation.getGoogleRequestCallable(getBucket),
+            backoff,
+            new RetryDeterminer<IOException>() {
+              @Override
+              public boolean shouldRetry(IOException e) {
+                if (errorExtractor.itemNotFound(e) || errorExtractor.accessDenied(e)) {
+                  return false;
+                }
+                return RetryDeterminer.SOCKET_ERRORS.shouldRetry(e);
+              }
+            },
+            IOException.class,
+            sleeper);
+        return true;
+      } catch (GoogleJsonResponseException e) {
+        if (errorExtractor.itemNotFound(e) || errorExtractor.accessDenied(e)) {
+          return false;
+        }
+        throw e;
+      } catch (InterruptedException e) {
+        throw new IOException(
+            String.format("Error while attempting to verify existence of bucket gs://%s",
+                path.getBucket()), e);
+     }
   }
 
   /**

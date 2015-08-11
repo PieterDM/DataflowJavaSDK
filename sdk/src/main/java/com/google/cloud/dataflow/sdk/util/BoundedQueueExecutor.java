@@ -33,6 +33,7 @@ public class BoundedQueueExecutor extends ThreadPoolExecutor {
       super(permits);
     }
 
+    @Override
     public void reducePermits(int permits) {
       super.reducePermits(permits);
     }
@@ -44,7 +45,7 @@ public class BoundedQueueExecutor extends ThreadPoolExecutor {
                    TimeUnit unit,
                    int maximumQueueSize,
                    ThreadFactory threadFactory) {
-    super(maximumQueueSize, maximumPoolSize, keepAliveTime, unit,
+    super(maximumPoolSize, maximumPoolSize, keepAliveTime, unit,
         new LinkedBlockingQueue<Runnable>(), threadFactory);
     this.semaphore = new ReducableSemaphore(maximumQueueSize);
     allowCoreThreadTimeOut(true);

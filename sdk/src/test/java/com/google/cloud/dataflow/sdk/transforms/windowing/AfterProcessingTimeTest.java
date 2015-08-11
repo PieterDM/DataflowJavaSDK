@@ -21,6 +21,7 @@ import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 import com.google.cloud.dataflow.sdk.WindowMatchers;
+import com.google.cloud.dataflow.sdk.util.TimeDomain;
 import com.google.cloud.dataflow.sdk.util.TriggerTester;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 
@@ -37,6 +38,24 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class AfterProcessingTimeTest {
   @Test
+  public void testAfterProcessingTimeIgnoresTimer() throws Exception {
+    Duration windowDuration = Duration.millis(10);
+    TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
+        FixedWindows.of(windowDuration),
+        AfterProcessingTime
+            .<IntervalWindow>pastFirstElementInPane()
+            .plusDelayOf(Duration.millis(5)),
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
+
+    tester.fireTimer(new IntervalWindow(new Instant(0), new Instant(10)),
+        new Instant(15), TimeDomain.PROCESSING_TIME);
+    tester.injectElement(1, new Instant(1));
+    tester.fireTimer(new IntervalWindow(new Instant(0), new Instant(10)),
+        new Instant(5), TimeDomain.PROCESSING_TIME);
+  }
+
+  @Test
   public void testAfterProcessingTimeWithFixedWindow() throws Exception {
     Duration windowDuration = Duration.millis(10);
     TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
@@ -44,7 +63,8 @@ public class AfterProcessingTimeTest {
         AfterProcessingTime
             .<IntervalWindow>pastFirstElementInPane()
             .plusDelayOf(Duration.millis(5)),
-        AccumulationMode.DISCARDING_FIRED_PANES);
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
 
     tester.advanceProcessingTime(new Instant(10));
 
@@ -71,50 +91,53 @@ public class AfterProcessingTimeTest {
     assertThat(tester.extractOutput(), Matchers.containsInAnyOrder(
         WindowMatchers.isSingleWindowedValue(Matchers.contains(4), 19, 10, 20),
         WindowMatchers.isSingleWindowedValue(Matchers.contains(5), 30, 30, 40)));
-    assertTrue(tester.isDone(new IntervalWindow(new Instant(0), new Instant(10))));
-    assertThat(tester.getKeyedStateInUse(), Matchers.containsInAnyOrder(
-        tester.finishedSet(new IntervalWindow(new Instant(0), new Instant(10))),
-        tester.finishedSet(new IntervalWindow(new Instant(10), new Instant(20))),
-        tester.finishedSet(new IntervalWindow(new Instant(30), new Instant(40)))));
+    assertTrue(tester.isMarkedFinished(new IntervalWindow(new Instant(0), new Instant(10))));
+
+    tester.assertHasOnlyGlobalAndFinishedSetsFor(
+        new IntervalWindow(new Instant(0), new Instant(10)),
+        new IntervalWindow(new Instant(10), new Instant(20)),
+        new IntervalWindow(new Instant(30), new Instant(40)));
   }
 
   @Test
-  public void testAfterProcessingTimeWithMergingWindowAlreadyFired() throws Exception {
+  public void testAfterProcessingTimeWithMergingWindow() throws Exception {
     Duration windowDuration = Duration.millis(10);
     TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         Sessions.withGapDuration(windowDuration),
         AfterProcessingTime
             .<IntervalWindow>pastFirstElementInPane()
             .plusDelayOf(Duration.millis(5)),
-        AccumulationMode.DISCARDING_FIRED_PANES);
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
 
     tester.advanceProcessingTime(new Instant(10));
-    assertThat(tester.extractOutput(), Matchers.emptyIterable());
-
     tester.injectElement(1, new Instant(1)); // in [1, 11), timer for 15
+    tester.advanceProcessingTime(new Instant(11));
+    tester.injectElement(2, new Instant(2)); // in [2, 12), timer for 16
 
-    tester.advanceProcessingTime(new Instant(16));
+    tester.advanceProcessingTime(new Instant(15));
+    // This fires, because the earliest element in [1, 12) arrived at time 10
     assertThat(tester.extractOutput(), Matchers.contains(
-        WindowMatchers.isSingleWindowedValue(Matchers.contains(1), 1, 1, 11)));
+        WindowMatchers.isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2), 1, 1, 12)));
 
-    // Because we discarded the previous window, we don't have it around to merge with.
-    tester.injectElement(2, new Instant(2)); // in [2, 12), timer for 21
-
-
-    tester.advanceProcessingTime(new Instant(100));
-    assertThat(tester.extractOutput(), Matchers.contains(
-        WindowMatchers.isSingleWindowedValue(Matchers.contains(2), 2, 2, 12)));
-
-    assertTrue(tester.isDone(new IntervalWindow(new Instant(2), new Instant(12))));
-    assertThat(tester.getKeyedStateInUse(), Matchers.containsInAnyOrder(
-        tester.finishedSet(new IntervalWindow(new Instant(1), new Instant(11))),
-        tester.finishedSet(new IntervalWindow(new Instant(2), new Instant(12)))));
+    assertTrue(tester.isMarkedFinished(new IntervalWindow(new Instant(1), new Instant(12))));
+    tester.assertHasOnlyGlobalAndFinishedSetsFor(
+        new IntervalWindow(new Instant(1), new Instant(12)));
   }
 
   @Test
   public void testFireDeadline() throws Exception {
     assertEquals(BoundedWindow.TIMESTAMP_MAX_VALUE,
-        AfterProcessingTime.pastFirstElementInPane().getWatermarkCutoff(
+        AfterProcessingTime.pastFirstElementInPane().getWatermarkThatGuaranteesFiring(
             new IntervalWindow(new Instant(0), new Instant(10))));
+  }
+
+  @Test
+  public void testContinuation() throws Exception {
+    TimeTrigger<?> firstElementPlus1 =
+        AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardHours(1));
+    assertEquals(
+        new AfterSynchronizedProcessingTime<>(),
+        firstElementPlus1.getContinuationTrigger());
   }
 }

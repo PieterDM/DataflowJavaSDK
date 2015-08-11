@@ -23,7 +23,6 @@ import com.google.cloud.dataflow.sdk.annotations.Experimental;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.transforms.Combine.CombineFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn.DelegatingAggregator;
-import com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.util.WindowingInternals;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
@@ -70,7 +69,7 @@ import java.util.Map;
  * PCollection<String> lines = ... ;
  * PCollection<String> words =
  *     lines.apply(ParDo.of(new DoFnWithContext<String, String>() {
- *         @ProcessElement
+ *         {@literal @}ProcessElement
  *         public void processElement(ProcessContext c, BoundedWindow window) {
  *
  *         }}));
@@ -97,9 +96,13 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
     /**
      * Adds the given element to the main output {@code PCollection}.
      *
+     * <p> Once passed to {@code output} the element should not be modified in
+     * any way.
+     *
      * <p> If invoked from {@link ProcessElement}, the output
      * element will have the same timestamp and be in the same windows
-     * as the input element passed to {@link @ProcessElement}).
+     * as the input element passed to the method annotated with
+     * {@code @ProcessElement}.
      *
      * <p> If invoked from {@link StartBundle} or {@link FinishBundle},
      * this will attempt to use the
@@ -114,6 +117,9 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
     /**
      * Adds the given element to the main output {@code PCollection},
      * with the given timestamp.
+     *
+     * <p> Once passed to {@code outputWithTimestamp} the element should not be
+     * modified in any way.
      *
      * <p> If invoked from {@link ProcessElement}), the timestamp
      * must not be older than the input element's timestamp minus
@@ -133,6 +139,9 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
     /**
      * Adds the given element to the side output {@code PCollection} with the
      * given tag.
+     *
+     * <p> Once passed to {@code sideOutput} the element should not be modified
+     * in any way.
      *
      * <p> The caller of {@code ParDo} uses {@link ParDo#withOutputTags} to
      * specify the tags of side outputs that it consumes. Non-consumed side
@@ -159,6 +168,9 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
     /**
      * Adds the given element to the specified side output {@code PCollection},
      * with the given timestamp.
+     *
+     * <p> Once passed to {@code sideOutputWithTimestamp} the element should not be
+     * modified in any way.
      *
      * <p> If invoked from {@link ProcessElement}), the timestamp
      * must not be older than the input element's timestamp minus
@@ -188,6 +200,9 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
 
     /**
      * Returns the input element to be processed.
+     *
+     * <p> The element will not be changed -- it is safe to cache, etc.
+     * without copying.
      */
     public abstract InputT element();
 
@@ -264,15 +279,6 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
    */
   public interface ExtraContextFactory<InputT, OutputT> {
     /**
-     * Construct the {@link KeyedState} interface for use within a {@link DoFnWithContext} that
-     * needs it. This is called if the {@link ProcessElement} method has a parameter of type
-     * {@link KeyedState}.
-     *
-     * @return {@link KeyedState} interface for interacting with keyed state.
-     */
-    KeyedState keyedState();
-
-    /**
      * Construct the {@link BoundedWindow} to use within a {@link DoFnWithContext} that
      * needs it. This is called if the {@link ProcessElement} method has a parameter of type
      * {@link BoundedWindow}.
@@ -311,8 +317,8 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
    * <ul>
    *   <li>It must have at least one argument.
    *   <li>Its first argument must be a {@link DoFnWithContext.ProcessContext}.
-   *   <li>Its remaining arguments must be {@link KeyedState}, {@link BoundedWindow}, or
-   *   {@link WindowingInternals WindowingInternals<InputT, OutputT>}.
+   *   <li>Its remaining arguments must be {@link BoundedWindow}, or
+   *   {@link WindowingInternals WindowingInternals&lt;InputT, OutputT&gt;}.
    * </ul>
    */
   @Documented
@@ -376,6 +382,6 @@ public abstract class DoFnWithContext<InputT, OutputT> implements Serializable {
   public final <AggInputT> Aggregator<AggInputT, AggInputT> createAggregator(
       String name, SerializableFunction<Iterable<AggInputT>, AggInputT> combiner) {
     checkNotNull(combiner, "combiner cannot be null.");
-    return createAggregator(name, Combine.SimpleCombineFn.of(combiner));
+    return createAggregator(name, Combine.IterableCombineFn.of(combiner));
   }
 }

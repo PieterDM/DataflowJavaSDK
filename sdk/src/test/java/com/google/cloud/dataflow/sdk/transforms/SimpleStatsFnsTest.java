@@ -18,19 +18,13 @@ package com.google.cloud.dataflow.sdk.transforms;
 
 import static org.junit.Assert.assertEquals;
 
-import com.google.cloud.dataflow.sdk.Pipeline;
-import com.google.cloud.dataflow.sdk.coders.DoubleCoder;
-import com.google.cloud.dataflow.sdk.coders.KvCoder;
-import com.google.cloud.dataflow.sdk.coders.VarLongCoder;
-import com.google.cloud.dataflow.sdk.testing.TestPipeline;
-import com.google.cloud.dataflow.sdk.values.KV;
-import com.google.cloud.dataflow.sdk.values.PCollection;
-
+import org.joda.time.Instant;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -83,6 +77,23 @@ public class SimpleStatsFnsTest {
       new TestCase<>(Integer.MAX_VALUE, Integer.MIN_VALUE, 0));
 
   @Test
+  public void testInstantStats() {
+    assertEquals(new Instant(1000), Min.MinFn.<Instant>naturalOrder().apply(
+        Arrays.asList(new Instant(1000), new Instant(2000))));
+    assertEquals(null, Min.MinFn.<Instant>naturalOrder().apply(
+        Collections.<Instant>emptyList()));
+    assertEquals(new Instant(5000), Min.MinFn.<Instant>naturalOrder(new Instant(5000)).apply(
+        Collections.<Instant>emptyList()));
+
+    assertEquals(new Instant(2000), Max.MaxFn.<Instant>naturalOrder().apply(
+        Arrays.asList(new Instant(1000), new Instant(2000))));
+    assertEquals(null, Max.MaxFn.<Instant>naturalOrder().apply(
+        Collections.<Instant>emptyList()));
+    assertEquals(new Instant(5000), Max.MaxFn.<Instant>naturalOrder(new Instant(5000)).apply(
+        Collections.<Instant>emptyList()));
+  }
+
+  @Test
   public void testDoubleStats() {
     for (TestCase<Double> t : DOUBLE_CASES) {
       assertEquals(t.sum, new Sum.SumDoubleFn().apply(t.data),
@@ -114,19 +125,5 @@ public class SimpleStatsFnsTest {
       assertEquals(t.max, new Max.MaxLongFn().apply(t.data));
       assertEquals(t.mean, new Mean.MeanFn<Long>().apply(t.data));
     }
-  }
-
-  @Test
-  @SuppressWarnings("unchecked")
-  public void testMeanCountSumSerializable() {
-    Pipeline p = TestPipeline.create();
-
-    PCollection<KV<Long, Double>> input = p
-        .apply(Create.of(KV.of(1L, 1.5), KV.of(2L, 7.3)))
-        .setCoder(KvCoder.of(VarLongCoder.of(), DoubleCoder.of()));
-
-    input.apply(Mean.<Long, Double>perKey());
-
-    p.run();
   }
 }

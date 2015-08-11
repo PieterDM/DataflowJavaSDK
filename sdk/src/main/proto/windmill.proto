@@ -41,8 +41,10 @@ message Timer {
   enum Type {
     WATERMARK = 0;
     REALTIME = 1;
+    DEPENDENT_REALTIME = 2;
   }
   optional Type type = 3 [default = WATERMARK];
+  optional string state_family = 4;
 }
 
 message InputMessageBundle {
@@ -53,6 +55,7 @@ message InputMessageBundle {
 message KeyedMessageBundle {
   required bytes key = 1;
   repeated Message messages = 2;
+  repeated bytes messages_ids = 3;
 }
 
 message OutputMessageBundle {
@@ -64,6 +67,8 @@ message OutputMessageBundle {
 message PubSubMessageBundle {
   required string topic = 1;
   repeated Message messages = 2;
+  optional string timestamp_label = 3;
+  optional string id_label = 4;
 }
 
 message TimerBundle {
@@ -78,12 +83,14 @@ message Value {
 message TagValue {
   required bytes tag = 1;
   optional Value value = 2;
+  optional string state_family = 3;
 }
 
 message TagList {
   required bytes tag = 1;
   optional int64 end_timestamp = 2 [default=-0x8000000000000000];
   repeated Value values = 3;
+  optional string state_family = 4;
 }
 
 message GlobalDataId {
@@ -95,15 +102,31 @@ message GlobalData {
   required GlobalDataId data_id = 1;
   optional bool is_ready = 2;
   optional bytes data = 3;
+  optional string state_family = 4;
+}
+
+message SourceState {
+  optional bytes state = 1;
+  repeated fixed64 finalize_ids = 2;
+}
+
+message WatermarkHold {
+  required bytes tag = 1;
+  repeated int64 timestamps = 2 [packed=true];
+  optional bool reset = 3;
+  optional string state_family = 4;
 }
 
 message WorkItem {
   required bytes key = 1;
   required fixed64 work_token = 2;
 
+  optional fixed64 cache_token = 7;
+
   repeated InputMessageBundle message_bundles = 3;
   optional TimerBundle timers = 4;
   repeated GlobalDataId global_data_id_notifications = 5;
+  optional SourceState source_state = 6;
 }
 
 message ComputationWorkItems {
@@ -133,6 +156,7 @@ message KeyedGetDataRequest {
   required fixed64 work_token = 2;
   repeated TagValue values_to_fetch = 3;
   repeated TagList lists_to_fetch = 4;
+  repeated WatermarkHold watermark_holds_to_fetch = 5;
 }
 
 message ComputationGetDataRequest {
@@ -154,6 +178,7 @@ message KeyedGetDataResponse {
   optional bool failed = 2;
   repeated TagValue values = 3;
   repeated TagList lists = 4;
+  repeated WatermarkHold watermark_holds = 5;
 }
 
 message ComputationGetDataResponse {
@@ -185,14 +210,21 @@ message Counter {
 
   // Only set for MEAN. Count of elements contributing to the sum.
   optional int64 mean_count = 6;
+
+  // True if this metric is reported as the total cumulative aggregate
+  // value accumulated since the worker started working on this WorkItem.
+  // By default this is false, indicating that this metric is reported
+  // as a delta that is not associated with any WorkItem.
+   optional bool cumulative = 7;
 }
 
 message GlobalDataRequest {
   required GlobalDataId data_id = 1;
   optional int64 existence_watermark_deadline = 2 [default=0x7FFFFFFFFFFFFFFF];
+  optional string state_family = 3;
 }
 
-// next id: 12
+// next id: 15
 message WorkItemCommitRequest {
   required bytes key = 1;
   required fixed64 work_token = 2;
@@ -204,6 +236,9 @@ message WorkItemCommitRequest {
   repeated Counter counter_updates = 8;
   repeated GlobalDataRequest global_data_requests = 11;
   repeated GlobalData global_data_updates = 10;
+  optional SourceState source_state_updates = 12;
+  optional int64 source_watermark = 13 [default=-0x8000000000000000];
+  repeated WatermarkHold watermark_holds = 14;
 
   // DEPRECATED
   repeated GlobalDataId global_data_id_requests = 9;
@@ -228,6 +263,21 @@ message GetConfigRequest {
 
 message GetConfigResponse {
   repeated string cloud_works = 1;
+
+  message NameMapEntry {
+    optional string user_name = 1;
+    optional string system_name = 2;
+  }
+
+  // Map of user names to system names
+  repeated NameMapEntry name_map = 2;
+
+  message SystemNameToComputationIdMapEntry {
+    optional string system_name = 1;
+    optional string computation_id = 2;
+  }
+  repeated SystemNameToComputationIdMapEntry
+    system_name_to_computation_id_map = 3;
 }
 
 // Reporting
@@ -238,10 +288,11 @@ message Exception {
 }
 
 message ReportStatsRequest {
-  required string computation_id = 1;
-  required bytes key = 2;
-  required fixed64 work_token = 3;
+  optional string computation_id = 1;
+  optional bytes key = 2;
+  optional fixed64 work_token = 3;
   repeated Exception exceptions = 4;
+  repeated Counter counter_updates = 5;
 }
 
 message ReportStatsResponse {

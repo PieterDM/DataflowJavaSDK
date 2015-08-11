@@ -16,23 +16,29 @@
 
 package com.google.cloud.dataflow.sdk.runners.worker;
 
+import static com.google.cloud.dataflow.sdk.runners.worker.SourceOperationExecutor.SPLIT_RESPONSE_TOO_LARGE_ERROR;
+import static com.google.cloud.dataflow.sdk.runners.worker.SourceOperationExecutor.isSplitResponseTooLarge;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.cloudSourceOperationResponseToSourceOperationResponse;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.readerProgressToCloudProgress;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.sourceOperationResponseToCloudSourceOperationResponse;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.toCloudPosition;
 
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.services.dataflow.model.MetricUpdate;
+import com.google.api.services.dataflow.model.SideInputInfo;
 import com.google.api.services.dataflow.model.Status;
 import com.google.api.services.dataflow.model.WorkItem;
 import com.google.api.services.dataflow.model.WorkItemServiceState;
 import com.google.api.services.dataflow.model.WorkItemStatus;
 import com.google.cloud.dataflow.sdk.options.DataflowWorkerHarnessOptions;
+import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.runners.dataflow.BasicSerializableSourceFormat;
-import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingFormatter;
-import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
+import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingHandler;
 import com.google.cloud.dataflow.sdk.util.CloudCounterUtils;
 import com.google.cloud.dataflow.sdk.util.CloudMetricUtils;
-import com.google.cloud.dataflow.sdk.util.ExecutionContext;
+import com.google.cloud.dataflow.sdk.util.PCollectionViewWindow;
+import com.google.cloud.dataflow.sdk.util.SideInputReader;
+import com.google.cloud.dataflow.sdk.util.Sized;
 import com.google.cloud.dataflow.sdk.util.UserCodeException;
 import com.google.cloud.dataflow.sdk.util.common.Counter;
 import com.google.cloud.dataflow.sdk.util.common.CounterSet;
@@ -40,17 +46,28 @@ import com.google.cloud.dataflow.sdk.util.common.Metric;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
 import com.google.cloud.dataflow.sdk.util.common.worker.SourceFormat;
 import com.google.cloud.dataflow.sdk.util.common.worker.WorkExecutor;
+import com.google.cloud.dataflow.sdk.values.PCollectionView;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.handler.AbstractHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import javax.annotation.Nullable;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 
 /**
  * This is a semi-abstract harness for executing WorkItem tasks in
@@ -75,9 +92,34 @@ public class DataflowWorker {
    */
   private final DataflowWorkerHarnessOptions options;
 
+  /**
+   * A side input cache shared between all execution contexts.
+   */
+  private final Cache<PCollectionViewWindow<?>, Sized<Object>> sideInputCache;
+
+  /**
+   * Status server returning health of worker.
+   */
+  private Server statusServer;
+
+  /**
+   * A weight in "bytes" for the overhead of a {@link Sized} wrapper in the cache. It is just an
+   * approximation so it is OK for it to be fairly arbitrary as long as it is nonzero.
+   */
+  private static final int OVERHEAD_WEIGHT = 8;
+
+  private static final int MEGABYTES = 1024 * 1024;
+
+  public static final int DEFAULT_STATUS_PORT = 18081;
+
   public DataflowWorker(WorkUnitClient workUnitClient, DataflowWorkerHarnessOptions options) {
     this.workUnitClient = workUnitClient;
     this.options = options;
+    this.sideInputCache = CacheBuilder.newBuilder()
+        .maximumWeight(options.getWorkerCacheMb() * MEGABYTES) // weights are in bytes
+        .weigher(new SizedWeigher<PCollectionViewWindow<?>, Object>(OVERHEAD_WEIGHT))
+        .softValues()
+        .build();
   }
 
   /**
@@ -104,11 +146,14 @@ public class DataflowWorker {
     LOG.debug("Executing: {}", workItem);
 
     WorkExecutor worker = null;
+    SourceFormat.OperationResponse operationResponse = null;
+    long nextReportIndex = workItem.getInitialReportIndex();
     try {
       // Populate PipelineOptions with data from work unit.
       options.setProject(workItem.getProjectId());
 
-      ExecutionContext executionContext = new BatchModeExecutionContext();
+      DataflowExecutionContext executionContext =
+          new DataflowWorkerExecutionContext(sideInputCache, options);
 
       if (workItem.getMapTask() != null) {
         worker = MapTaskExecutorFactory.create(options, workItem.getMapTask(), executionContext);
@@ -122,12 +167,16 @@ public class DataflowWorker {
 
       DataflowWorkProgressUpdater progressUpdater =
           new DataflowWorkProgressUpdater(workItem, worker, workUnitClient, options);
-
-      executeWork(worker, progressUpdater);
+      try {
+        executeWork(worker, progressUpdater);
+      } finally {
+        // Grab nextReportIndex so we can use it in handleWorkError if there is an exception.
+        nextReportIndex = progressUpdater.getNextReportIndex();
+      }
 
       // Log all counter values for debugging purposes.
       CounterSet counters = worker.getOutputCounters();
-      for (Counter counter : counters) {
+      for (Counter<?> counter : counters) {
         LOG.trace("COUNTER {}.", counter);
       }
 
@@ -140,19 +189,29 @@ public class DataflowWorker {
       // Report job success.
       // TODO: Find out a generic way for the WorkExecutor to report work-specific results
       // into the work update.
-      SourceFormat.OperationResponse operationResponse =
+      operationResponse =
           (worker instanceof SourceOperationExecutor)
               ? cloudSourceOperationResponseToSourceOperationResponse(
                   ((SourceOperationExecutor) worker).getResponse())
               : null;
-      reportStatus(
+
+      try {
+        reportStatus(
           options, "Success", workItem, counters, metrics, operationResponse, null/*errors*/,
-          progressUpdater.getNextReportIndex());
+          nextReportIndex);
+      } catch (GoogleJsonResponseException e) {
+        if ((operationResponse != null) && (worker instanceof SourceOperationExecutor)) {
+          if (isSplitResponseTooLarge(operationResponse)) {
+            throw new RuntimeException(SPLIT_RESPONSE_TOO_LARGE_ERROR, e);
+          }
+        }
+        throw e;
+      }
 
       return true;
 
     } catch (Throwable e) {
-      handleWorkError(workItem, worker, e);
+      handleWorkError(workItem, worker, nextReportIndex, e);
       return false;
 
     } finally {
@@ -182,8 +241,8 @@ public class DataflowWorker {
 
 
   /** Handles the exception thrown when reading and executing the work. */
-  private void handleWorkError(WorkItem workItem, WorkExecutor worker, Throwable e)
-      throws IOException {
+  private void handleWorkError(WorkItem workItem, WorkExecutor worker, long nextReportIndex,
+      Throwable e) throws IOException {
     LOG.warn("Uncaught exception occurred during work unit execution:", e);
 
     // TODO: Look into moving the stack trace thinning
@@ -192,17 +251,17 @@ public class DataflowWorker {
     Status error = new Status();
     error.setCode(2); // Code.UNKNOWN.  TODO: Replace with a generated definition.
     // TODO: Attach the stack trace as exception details, not to the message.
-    error.setMessage(DataflowWorkerLoggingFormatter.formatException(t));
+    error.setMessage(DataflowWorkerLoggingHandler.formatException(t));
 
     reportStatus(options, "Failure", workItem, worker == null ? null : worker.getOutputCounters(),
         worker == null ? null : worker.getOutputMetrics(), null/*sourceOperationResponse*/,
-        error == null ? null : Collections.singletonList(error), 0);
+        error == null ? null : Collections.singletonList(error), nextReportIndex);
   }
 
   private void reportStatus(DataflowWorkerHarnessOptions options, String status, WorkItem workItem,
       @Nullable CounterSet counters, @Nullable Collection<Metric<?>> metrics,
       @Nullable SourceFormat.OperationResponse operationResponse, @Nullable List<Status> errors,
-      long finalReportIndex)
+      long reportIndex)
       throws IOException {
     String message = "{} processing work item {}";
     if (null != errors && errors.size() > 0) {
@@ -211,7 +270,7 @@ public class DataflowWorker {
       LOG.debug(message, status, uniqueId(workItem));
     }
     WorkItemStatus workItemStatus = buildStatus(workItem, true/*completed*/, counters, metrics,
-        options, null, null, operationResponse, errors, finalReportIndex);
+        options, null, null, operationResponse, errors, reportIndex);
     workUnitClient.reportWorkItemStatus(workItemStatus);
   }
 
@@ -220,11 +279,11 @@ public class DataflowWorker {
       DataflowWorkerHarnessOptions options, @Nullable Reader.Progress progress,
       @Nullable Reader.DynamicSplitResult dynamicSplitResult,
       @Nullable SourceFormat.OperationResponse operationResponse, @Nullable List<Status> errors,
-      long finalReportIndex) {
+      long reportIndex) {
     WorkItemStatus status = new WorkItemStatus();
     status.setWorkItemId(Long.toString(workItem.getId()));
     status.setCompleted(completed);
-    status.setReportIndex(finalReportIndex);
+    status.setReportIndex(reportIndex);
 
     List<MetricUpdate> counterUpdates = null;
     List<MetricUpdate> metricUpdates = null;
@@ -267,9 +326,10 @@ public class DataflowWorker {
       Reader.DynamicSplitResultWithPosition asPosition =
           (Reader.DynamicSplitResultWithPosition) dynamicSplitResult;
       status.setStopPosition(toCloudPosition(asPosition.getAcceptedPosition()));
-    } else if (dynamicSplitResult instanceof BasicSerializableSourceFormat.SourceSplit) {
-      status.setDynamicSourceSplit(BasicSerializableSourceFormat.toSourceSplit(
-          (BasicSerializableSourceFormat.SourceSplit) dynamicSplitResult, options));
+    } else if (dynamicSplitResult instanceof BasicSerializableSourceFormat.BoundedSourceSplit) {
+      status.setDynamicSourceSplit(
+          BasicSerializableSourceFormat.toSourceSplit(
+              (BasicSerializableSourceFormat.BoundedSourceSplit<?>) dynamicSplitResult, options));
     } else if (dynamicSplitResult != null) {
       throw new IllegalArgumentException(
           "Unexpected type of dynamic split result: " + dynamicSplitResult);
@@ -305,5 +365,93 @@ public class DataflowWorker {
      */
     public abstract WorkItemServiceState reportWorkItemStatus(WorkItemStatus workItemStatus)
         throws IOException;
+  }
+
+  /**
+   * A {@link DataflowExecutionContext} that provides a caching side input reader using
+   * the worker's shared cache.
+   */
+  private static class DataflowWorkerExecutionContext extends DataflowExecutionContext {
+
+    private final Cache<PCollectionViewWindow<?>, Sized<Object>> cache;
+    private final PipelineOptions options;
+
+    public DataflowWorkerExecutionContext(
+        Cache<PCollectionViewWindow<?>, Sized<Object>> cache, PipelineOptions options) {
+      this.cache = cache;
+      this.options = options;
+    }
+
+    @Override
+    public SideInputReader getSideInputReader(Iterable<? extends SideInputInfo> sideInputInfos)
+      throws Exception {
+      return CachingSideInputReader.of(
+          DataflowSideInputReader.of(sideInputInfos, options, this),
+          cache);
+    }
+
+    @Override
+    public SideInputReader getSideInputReaderForViews(
+        Iterable<? extends PCollectionView<?>> sideInputViews) {
+      throw new UnsupportedOperationException(
+        "Cannot call getSideInputReaderForViews for batch DataflowWorker: "
+        + "the MapTask specification should have had SideInputInfo descriptors "
+        + "for each side input, and a SideInputReader provided via getSideInputReader");
+    }
+  }
+
+  /**
+   * Runs the status server to report worker health on the specified port.
+   */
+  public void runStatusServer(int statusPort) {
+    LOG.info("Status server started on port {}", statusPort);
+    runStatusServer(new Server(statusPort));
+  }
+
+  // @VisibleForTesting
+  void runStatusServer(Server server) {
+    statusServer = server;
+    statusServer.setHandler(new StatusHandler());
+    try {
+      // Run status server in separate thread.
+      statusServer.start();
+    } catch (Exception e) {
+      LOG.warn("Status server failed to start: ", e);
+    }
+  }
+
+  private class StatusHandler extends AbstractHandler {
+    @Override
+    public void handle(String target, Request baseRequest, HttpServletRequest request,
+        HttpServletResponse response) throws IOException, ServletException {
+      response.setContentType("text/html;charset=utf-8");
+      baseRequest.setHandled(true);
+
+      PrintWriter responseWriter = response.getWriter();
+
+      if (target.equals("/healthz")) {
+        response.setStatus(HttpServletResponse.SC_OK);
+        // Right now, we always return "ok".
+        responseWriter.println("ok");
+      } else if (target.equals("/threadz")) {
+        response.setStatus(HttpServletResponse.SC_OK);
+        printThreads(responseWriter);
+      } else {
+        response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+        responseWriter.println("not found");
+      }
+    }
+
+    private void printThreads(PrintWriter response) {
+      Map<Thread, StackTraceElement[]> stacks = Thread.getAllStackTraces();
+      for (Map.Entry<Thread,  StackTraceElement[]> entry : stacks.entrySet()) {
+        Thread thread = entry.getKey();
+        response.println("--- Thread: " + thread + " State: "
+            + thread.getState() + " stack: ---");
+        for (StackTraceElement element : entry.getValue()) {
+          response.println("  " + element);
+        }
+      }
+    }
   }
 }

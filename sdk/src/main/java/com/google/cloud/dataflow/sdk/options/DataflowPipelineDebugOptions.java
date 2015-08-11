@@ -28,6 +28,7 @@ import com.google.cloud.dataflow.sdk.util.Transport;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Internal. Options used to control execution of the Dataflow SDK for
@@ -37,21 +38,6 @@ import java.util.List;
     + "debugging and testing purposes.")
 @Hidden
 public interface DataflowPipelineDebugOptions extends PipelineOptions {
-  /**
-   * Dataflow endpoint to use.
-   *
-   * <p> Defaults to the current version of the Google Cloud Dataflow
-   * API, at the time the current SDK version was released.
-   *
-   * <p> If the string contains "://", then this is treated as a url,
-   * otherwise {@link #getApiRootUrl()} is used as the root
-   * url.
-   */
-  @Description("The URL for the Dataflow API. If the string contains \"://\""
-      + " will be treated as the entire URL, otherwise will be treated relative to apiRootUrl.")
-  @Default.String("v1b3/projects/")
-  String getDataflowEndpoint();
-  void setDataflowEndpoint(String value);
 
   /**
    * The list of backend experiments to enable.
@@ -64,20 +50,37 @@ public interface DataflowPipelineDebugOptions extends PipelineOptions {
   @Description("[Experimental] Dataflow provides a number of experimental features that can "
       + "be enabled with this flag. Please sync with the Dataflow team before enabling any "
       + "experiments.")
+  @Experimental
   List<String> getExperiments();
   void setExperiments(List<String> value);
 
   /**
-   * The endpoint to use with the Dataflow API. dataflowEndpoint can override this value
-   * if it contains an absolute URL, otherwise apiRootUrl will be combined with dataflowEndpoint
-   * to generate the full URL to communicate with the Dataflow API.
+   * The root URL for the Dataflow API. {@code dataflowEndpoint} can override this value
+   * if it contains an absolute URL, otherwise {@code apiRootUrl} will be combined with
+   * {@code dataflowEndpoint} to generate the full URL to communicate with the Dataflow API.
    */
-  @Description("The endpoint to use with the Dataflow API. dataflowEndpoint can override this "
+  @Description("The root URL for the Dataflow API. dataflowEndpoint can override this "
       + "value if it contains an absolute URL, otherwise apiRootUrl will be combined with "
       + "dataflowEndpoint to generate the full URL to communicate with the Dataflow API.")
-  @Default.String("https://dataflow.googleapis.com/")
+  @Default.String(Dataflow.DEFAULT_ROOT_URL)
   String getApiRootUrl();
   void setApiRootUrl(String value);
+
+  /**
+   * Dataflow endpoint to use.
+   *
+   * <p> Defaults to the current version of the Google Cloud Dataflow
+   * API, at the time the current SDK version was released.
+   *
+   * <p> If the string contains "://", then this is treated as a url,
+   * otherwise {@link #getApiRootUrl()} is used as the root
+   * url.
+   */
+  @Description("The URL for the Dataflow API. If the string contains \"://\""
+      + " will be treated as the entire URL, otherwise will be treated relative to apiRootUrl.")
+  @Default.String(Dataflow.DEFAULT_SERVICE_PATH)
+  String getDataflowEndpoint();
+  void setDataflowEndpoint(String value);
 
   /**
    * The path to write the translated Dataflow job specification out to
@@ -159,14 +162,40 @@ public interface DataflowPipelineDebugOptions extends PipelineOptions {
   }
 
   /**
-   * Whether to reload the currently running pipeline with the same name as this one.
+   * Root URL for use with the Pubsub API.
+   */
+  @Description("Root URL for use with the Pubsub API")
+  @Default.String("https://pubsub.googleapis.com")
+  String getPubsubRootUrl();
+  void setPubsubRootUrl(String value);
+
+  /**
+   * Whether to update the currently running pipeline with the same name as this one.
    */
   @JsonIgnore
   @Description("If set, replace the existing pipeline with the name specified by --jobName with "
       + "this pipeline, preserving state.")
-  @Experimental
-  boolean getReload();
-  void setReload(boolean value);
+  boolean getUpdate();
+  void setUpdate(boolean value);
+
+  /**
+   * Mapping of old PTranform names to new ones, specified as a semicolon-separated list of
+   * oldName=newName pairs. To mark a transform as deleted, omit newName.
+   */
+  @JsonIgnore
+  @Description(
+      "Mapping of old PTranform names to new ones, specified as JSON "
+      + "{\"oldName\":\"newName\",...}. To mark a transform as deleted, make newName the empty "
+      + "string.")
+  Map<String, String> getTransformNameMapping();
+  void setTransformNameMapping(Map<String, String> value);
+
+  /**
+   * Custom windmill_main binary to use with the streaming runner.
+   */
+  @Description("Custom windmill_main binary to use with the streaming runner")
+  String getOverrideWindmillBinary();
+  void setOverrideWindmillBinary(String value);
 
   /**
    * Creates a {@link PathValidator} object using the class specified in

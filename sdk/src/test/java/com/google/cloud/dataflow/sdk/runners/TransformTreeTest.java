@@ -39,7 +39,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.IOException;
 import java.util.Arrays;
 import java.util.EnumSet;
 
@@ -76,7 +75,8 @@ public class TransformTreeTest {
       return PCollectionList.of(
           Arrays.asList(result, PCollection.<String>createPrimitiveOutputInternal(
               b.getPipeline(),
-              WindowingStrategy.globalDefault())));
+              WindowingStrategy.globalDefault(),
+              result.isBounded())));
     }
   }
 
@@ -168,7 +168,7 @@ public class TransformTreeTest {
   }
 
   @Test
-  public void testMultiGraphSetup() throws IOException {
+  public void testMultiGraphSetup() {
     Pipeline p = DirectPipeline.createForTest();
 
     PCollection<Integer> input = p.begin()

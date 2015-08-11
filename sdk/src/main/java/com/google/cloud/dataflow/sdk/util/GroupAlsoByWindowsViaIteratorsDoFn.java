@@ -17,11 +17,16 @@
 package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
+import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
+import com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 import com.google.cloud.dataflow.sdk.util.common.PeekingReiterator;
 import com.google.cloud.dataflow.sdk.util.common.Reiterable;
 import com.google.cloud.dataflow.sdk.util.common.Reiterator;
 import com.google.cloud.dataflow.sdk.values.KV;
+import com.google.common.base.MoreObjects;
 import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.ListMultimap;
 
 import org.joda.time.Instant;
@@ -36,10 +41,41 @@ import java.util.NoSuchElementException;
 /**
  * {@link GroupAlsoByWindowsDoFn} that uses reiterators to handle non-merging window functions with
  * the default triggering strategy.
+ *
+ * @param <K> key type
+ * @param <V> value element type
+ * @param <W> window type
  */
+@SystemDoFnInternal
 @SuppressWarnings("serial")
 class GroupAlsoByWindowsViaIteratorsDoFn<K, V, W extends BoundedWindow>
     extends GroupAlsoByWindowsDoFn<K, V, Iterable<V>, W> {
+  private final WindowingStrategy<?, W> strategy;
+
+  public static boolean isSupported(WindowingStrategy<?, ?> strategy) {
+    if (!strategy.getWindowFn().isNonMerging()) {
+      return false;
+    }
+
+    // TODO: Add support for other triggers.
+    if (!(strategy.getTrigger().getSpec() instanceof DefaultTrigger)) {
+      return false;
+    }
+
+    // Right now, we support ACCUMULATING_FIRED_PANES because it is the same as
+    // DISCARDING_FIRED_PANES. In Batch mode there is no late data so the default
+    // trigger (after watermark) will only fire once.
+    if (!strategy.getMode().equals(AccumulationMode.DISCARDING_FIRED_PANES)
+        && !strategy.getMode().equals(AccumulationMode.ACCUMULATING_FIRED_PANES)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  public GroupAlsoByWindowsViaIteratorsDoFn(WindowingStrategy<?, W> strategy) {
+    this.strategy = strategy;
+  }
 
   @Override
   public void processElement(ProcessContext c) throws Exception {
@@ -67,13 +103,17 @@ class GroupAlsoByWindowsViaIteratorsDoFn<K, V, W extends BoundedWindow>
         // If this window is not already in the active set, emit a new WindowReiterable
         // corresponding to this window, starting at this element in the input Reiterable.
         if (!windows.containsEntry(window.maxTimestamp(), window)) {
+          // This window was produced by strategy.getWindowFn()
+          @SuppressWarnings("unchecked")
+          W typedWindow = (W) window;
           // Iterating through the WindowReiterable may advance iterator as an optimization
           // for as long as it detects that there are no new windows.
           windows.put(window.maxTimestamp(), window);
           c.windowingInternals().outputWindowedValue(
               KV.of(key, (Iterable<V>) new WindowReiterable<V>(iterator, window)),
-              e.getTimestamp(),
-              Arrays.asList(window));
+              strategy.getWindowFn().getOutputTime(e.getTimestamp(), typedWindow),
+              Arrays.asList(window),
+              PaneInfo.ON_TIME_AND_ONLY_FIRING);
         }
       }
       // Copy the iterator in case the next DoFn cached its version of the iterator instead
@@ -120,13 +160,9 @@ class GroupAlsoByWindowsViaIteratorsDoFn<K, V, W extends BoundedWindow>
 
     @Override
     public String toString() {
-      StringBuilder result = new StringBuilder();
-      result.append("WR{");
-      for (V v : this) {
-        result.append(v.toString()).append(',');
-      }
-      result.append("}");
-      return result.toString();
+      return MoreObjects.toStringHelper(this)
+          .addValue(Iterables.toString(this))
+          .toString();
     }
   }
 

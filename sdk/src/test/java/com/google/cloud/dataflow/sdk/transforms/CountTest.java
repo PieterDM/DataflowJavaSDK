@@ -17,9 +17,10 @@
 package com.google.cloud.dataflow.sdk.transforms;
 
 import static com.google.cloud.dataflow.sdk.TestUtils.NO_LINES;
-import static com.google.cloud.dataflow.sdk.TestUtils.createStrings;
+import static org.junit.Assert.assertEquals;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
+import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
 import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
@@ -51,7 +52,7 @@ public class CountTest {
   public void testCountPerElementBasic() {
     Pipeline p = TestPipeline.create();
 
-    PCollection<String> input = createStrings(p, WORDS);
+    PCollection<String> input = p.apply(Create.of(WORDS));
 
     PCollection<KV<String, Long>> output =
         input.apply(Count.<String>perElement());
@@ -73,7 +74,7 @@ public class CountTest {
   public void testCountPerElementEmpty() {
     Pipeline p = TestPipeline.create();
 
-    PCollection<String> input = createStrings(p, NO_LINES);
+    PCollection<String> input = p.apply(Create.of(NO_LINES).withCoder(StringUtf8Coder.of()));
 
     PCollection<KV<String, Long>> output =
         input.apply(Count.<String>perElement());
@@ -87,7 +88,7 @@ public class CountTest {
   public void testCountGloballyBasic() {
     Pipeline p = TestPipeline.create();
 
-    PCollection<String> input = createStrings(p, WORDS);
+    PCollection<String> input = p.apply(Create.of(WORDS));
 
     PCollection<Long> output =
         input.apply(Count.<String>globally());
@@ -102,7 +103,7 @@ public class CountTest {
   public void testCountGloballyEmpty() {
     Pipeline p = TestPipeline.create();
 
-    PCollection<String> input = createStrings(p, NO_LINES);
+    PCollection<String> input = p.apply(Create.of(NO_LINES).withCoder(StringUtf8Coder.of()));
 
     PCollection<Long> output =
         input.apply(Count.<String>globally());
@@ -110,5 +111,11 @@ public class CountTest {
     DataflowAssert.that(output)
         .containsInAnyOrder(0L);
     p.run();
+  }
+
+  @Test
+  public void testCountGetName() {
+    assertEquals("Count.PerElement", Count.perElement().getName());
+    assertEquals("Count.Globally", Count.globally().getName());
   }
 }

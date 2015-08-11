@@ -16,6 +16,8 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import static org.junit.Assert.assertEquals;
+
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.coders.BigEndianIntegerCoder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
@@ -57,8 +59,8 @@ public class ValuesTest {
     Pipeline p = TestPipeline.create();
 
     PCollection<KV<String, Integer>> input =
-        p.apply(Create.of(Arrays.asList(TABLE))).setCoder(
-            KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        p.apply(Create.of(Arrays.asList(TABLE)).withCoder(
+            KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of())));
 
     PCollection<Integer> output = input.apply(Values.<Integer>create());
 
@@ -74,8 +76,8 @@ public class ValuesTest {
     Pipeline p = TestPipeline.create();
 
     PCollection<KV<String, Integer>> input =
-        p.apply(Create.of(Arrays.asList(EMPTY_TABLE))).setCoder(
-            KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        p.apply(Create.of(Arrays.asList(EMPTY_TABLE)).withCoder(
+            KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of())));
 
     PCollection<Integer> output = input.apply(Values.<Integer>create());
 
@@ -83,5 +85,10 @@ public class ValuesTest {
         .containsInAnyOrder();
 
     p.run();
+  }
+
+  @Test
+  public void testValuesGetName() {
+    assertEquals("Values", Values.<Integer>create().getName());
   }
 }

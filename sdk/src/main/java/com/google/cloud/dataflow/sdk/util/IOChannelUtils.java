@@ -19,6 +19,7 @@ package com.google.cloud.dataflow.sdk.util;
 import com.google.cloud.dataflow.sdk.options.GcsOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.channels.WritableByteChannel;
 import java.text.DecimalFormat;
@@ -87,6 +88,8 @@ public class IOChannelUtils {
                     mimeType);
     }
 
+    // It is the callers responsibility to close this channel.
+    @SuppressWarnings("resource")
     ShardingWritableByteChannel shardingChannel =
         new ShardingWritableByteChannel();
 
@@ -109,6 +112,8 @@ public class IOChannelUtils {
    * Returns the size in bytes for the given specification.
    *
    * <p>The specification is not expanded; it is used verbatim.
+   *
+   * <p>{@link FileNotFoundException} will be thrown if the resource does not exist.
    */
   public static long getSizeBytes(String spec) throws IOException {
     return getFactory(spec).getSizeBytes(spec);

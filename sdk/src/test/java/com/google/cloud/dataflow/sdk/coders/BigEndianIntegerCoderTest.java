@@ -31,6 +31,8 @@ import java.util.List;
 @RunWith(JUnit4.class)
 public class BigEndianIntegerCoderTest {
 
+  private static final Coder<Integer> TEST_CODER = BigEndianIntegerCoder.of();
+
   private static final List<Integer> TEST_VALUES = Arrays.asList(
       -11, -3, -1, 0, 1, 5, 13, 29,
       Integer.MAX_VALUE,
@@ -38,9 +40,37 @@ public class BigEndianIntegerCoderTest {
 
   @Test
   public void testDecodeEncodeEqual() throws Exception {
-    Coder<Integer> coder = BigEndianIntegerCoder.of();
     for (Integer value : TEST_VALUES) {
-      CoderProperties.coderDecodeEncodeEqual(coder, value);
+      CoderProperties.coderDecodeEncodeEqual(TEST_CODER, value);
     }
+  }
+
+  // This should never change. The definition of big endian encoding is fixed.
+  private static final String EXPECTED_ENCODING_ID = "";
+
+  @Test
+  public void testEncodingId() throws Exception {
+    CoderProperties.coderHasEncodingId(TEST_CODER, EXPECTED_ENCODING_ID);
+  }
+
+  /**
+   * Generated data to check that the wire format has not changed. To regenerate, see
+   * {@link com.google.cloud.dataflow.sdk.coders.PrintBase64Encodings}.
+   */
+  private static final List<String> TEST_ENCODINGS = Arrays.asList(
+      "____9Q",
+      "_____Q",
+      "_____w",
+      "AAAAAA",
+      "AAAAAQ",
+      "AAAABQ",
+      "AAAADQ",
+      "AAAAHQ",
+      "f____w",
+      "gAAAAA");
+
+  @Test
+  public void testWireFormatEncode() throws Exception {
+    CoderProperties.coderEncodesBase64(TEST_CODER, TEST_VALUES, TEST_ENCODINGS);
   }
 }

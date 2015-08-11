@@ -34,8 +34,10 @@ import java.io.OutputStream;
  * <p> If in a nested context, prefixes the encoded array with its
  * length, encoded via a {@link VarIntCoder}.
  */
-@SuppressWarnings("serial")
 public class ByteArrayCoder extends AtomicCoder<byte[]> {
+
+  private static final long serialVersionUID = 0L;
+
   @JsonCreator
   public static ByteArrayCoder of() {
     return INSTANCE;
@@ -54,6 +56,22 @@ public class ByteArrayCoder extends AtomicCoder<byte[]> {
     if (value == null) {
       throw new CoderException("cannot encode a null byte[]");
     }
+    if (!context.isWholeStream) {
+      VarInt.encode(value.length, outStream);
+      outStream.write(value);
+    } else {
+      outStream.write(value);
+    }
+  }
+
+  /**
+   * Encodes the provided {@code value} with the identical encoding to {@link #encode}, but with
+   * optimizations that take ownership of the value.
+   *
+   * <p>Once passed to this method, {@code value} should never be observed or mutated again.
+   */
+  public void encodeAndOwn(byte[] value, OutputStream outStream, Context context)
+      throws IOException, CoderException {
     if (!context.isWholeStream) {
       VarInt.encode(value.length, outStream);
       outStream.write(value);

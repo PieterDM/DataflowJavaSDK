@@ -16,8 +16,12 @@
 
 package com.google.cloud.dataflow.sdk.values;
 
+import com.google.cloud.dataflow.sdk.transforms.SerializableComparator;
+import com.google.common.base.MoreObjects;
+
 import java.io.Serializable;
-import java.util.Comparator;
+import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * An immutable key/value pair.
@@ -61,24 +65,23 @@ public class KV<K, V> implements Serializable {
   }
 
   @Override
-  public boolean equals(Object o) {
-    if (this == o) {
+  public boolean equals(Object other) {
+    if (this == other) {
       return true;
     }
-    if (o instanceof KV) {
-      KV<?, ?> that = (KV<?, ?>) o;
-      return (this.key == null ? that.key == null
-              : this.key.equals(that.key))
-          && (this.value == null ? that.value == null
-              : this.value.equals(that.value));
+    if (!(other instanceof KV)) {
+      return false;
     }
-    return false;
+    KV<?, ?> otherKv = (KV<?, ?>) other;
+    // Arrays are very common as values and keys, so deepEquals is mandatory
+    return Objects.deepEquals(this.key, otherKv.key)
+        && Objects.deepEquals(this.value, otherKv.value);
   }
 
   /** Orders the {@link KV} by the key. A null key is less than any non-null key. */
   @SuppressWarnings("serial")
   public static class OrderByKey<K extends Comparable<? super K>, V> implements
-      Comparator<KV<K, V>>, Serializable {
+      SerializableComparator<KV<K, V>> {
     @Override
     public int compare(KV<K, V> a, KV<K, V> b) {
       if (a.key == null) {
@@ -94,7 +97,7 @@ public class KV<K, V> implements Serializable {
   /** Orders the {@link KV} by the value. A null value is less than any non-null value. */
   @SuppressWarnings("serial")
   public static class OrderByValue<K, V extends Comparable<? super V>>
-      implements Comparator<KV<K, V>>, Serializable {
+      implements SerializableComparator<KV<K, V>> {
     @Override
     public int compare(KV<K, V> a, KV<K, V> b) {
       if (a.value == null) {
@@ -109,13 +112,15 @@ public class KV<K, V> implements Serializable {
 
   @Override
   public int hashCode() {
-    return getClass().hashCode()
-        + (key == null ? 0 : key.hashCode())
-        + (value == null ? 0 : value.hashCode());
+    // Objects.deepEquals requires Arrays.deepHashCode for correctness
+    return Arrays.deepHashCode(new Object[]{key, value});
   }
 
   @Override
   public String toString() {
-    return "KV(" + key + ", " + value + ")";
+    return MoreObjects.toStringHelper(this)
+        .addValue(key)
+        .addValue(value)
+        .toString();
   }
 }

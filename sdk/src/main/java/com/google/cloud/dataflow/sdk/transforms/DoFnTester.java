@@ -18,7 +18,8 @@ package com.google.cloud.dataflow.sdk.transforms;
 
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
-import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
+import com.google.cloud.dataflow.sdk.util.DirectModeExecutionContext;
+import com.google.cloud.dataflow.sdk.util.DirectSideInputReader;
 import com.google.cloud.dataflow.sdk.util.DoFnRunner;
 import com.google.cloud.dataflow.sdk.util.PTuple;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
@@ -229,14 +230,15 @@ public class DoFnTester<InputT, OutputT> {
    */
   public List<OutputT> peekOutputElements() {
     // TODO: Should we return an unmodifiable list?
-    return Lists.transform(fnRunner.getReceiver(mainOutputTag),
-                           new Function<Object, OutputT>() {
-                             @Override
-                             @SuppressWarnings("unchecked")
-                             public OutputT apply(Object input) {
-                               return ((WindowedValue<OutputT>) input).getValue();
-                             }
-                           });
+    return Lists.transform(
+        outputManager.getOutput(mainOutputTag),
+        new Function<Object, OutputT>() {
+          @Override
+          @SuppressWarnings("unchecked")
+          public OutputT apply(Object input) {
+            return ((WindowedValue<OutputT>) input).getValue();
+          }
+        });
 
   }
 
@@ -271,12 +273,13 @@ public class DoFnTester<InputT, OutputT> {
    */
   public <T> List<T> peekSideOutputElements(TupleTag<T> tag) {
     // TODO: Should we return an unmodifiable list?
-    return Lists.transform(fnRunner.getReceiver(tag),
-                           new Function<Object, T>() {
-                             @Override
-                             public T apply(Object input) {
-                               return ((WindowedValue<T>) input).getValue();
-                             }});
+    return Lists.transform(
+        outputManager.getOutput(tag),
+        new Function<Object, T>() {
+          @Override
+          public T apply(Object input) {
+            return ((WindowedValue<T>) input).getValue();
+          }});
   }
 
   /**
@@ -322,8 +325,11 @@ public class DoFnTester<InputT, OutputT> {
   /** The original DoFn under test, if started. */
   DoFn<InputT, OutputT> fn;
 
+  /** The ListOutputManager to examine the outputs. */
+  DoFnRunner.ListOutputManager outputManager;
+
   /** The DoFnRunner if processing is in progress. */
-  DoFnRunner<InputT, OutputT, List> fnRunner;
+  DoFnRunner<InputT, OutputT> fnRunner;
 
   /** Counters for user-defined Aggregators if processing is in progress. */
   CounterSet counterSet;
@@ -340,6 +346,7 @@ public class DoFnTester<InputT, OutputT> {
 
   void resetState() {
     fn = null;
+    outputManager = null;
     fnRunner = null;
     counterSet = null;
     state = State.UNSTARTED;
@@ -357,13 +364,15 @@ public class DoFnTester<InputT, OutputT> {
         : sideInputs.entrySet()) {
       runnerSideInputs = runnerSideInputs.and(entry.getKey().getTagInternal(), entry.getValue());
     }
-    fnRunner = DoFnRunner.createWithListOutputs(
+    outputManager = new DoFnRunner.ListOutputManager();
+    fnRunner = DoFnRunner.create(
         options,
         fn,
-        runnerSideInputs,
+        DirectSideInputReader.of(runnerSideInputs),
+        outputManager,
         mainOutputTag,
         sideOutputTags,
-        (new BatchModeExecutionContext()).createStepContext("stepName"),
+        DirectModeExecutionContext.create().createStepContext("stepName", "stepName"),
         counterSet.getAddCounterMutator(),
         WindowingStrategy.globalDefault());
   }

@@ -16,21 +16,22 @@
 
 package com.google.cloud.dataflow.sdk.options;
 
+import com.google.cloud.dataflow.sdk.options.Validation.Required;
 import com.google.cloud.dataflow.sdk.runners.PipelineRunner;
 import com.google.cloud.dataflow.sdk.runners.PipelineRunnerRegistrar;
 import com.google.cloud.dataflow.sdk.runners.worker.DataflowWorkerHarness;
+import com.google.cloud.dataflow.sdk.util.StringUtils;
 import com.google.cloud.dataflow.sdk.util.common.ReflectHelpers;
-import com.google.common.base.Equivalence;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
+import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.FluentIterable;
-import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -39,8 +40,9 @@ import com.google.common.collect.Iterators;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
+import com.google.common.collect.SortedSetMultimap;
+import com.google.common.collect.TreeMultimap;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JavaType;
@@ -73,6 +75,8 @@ import java.util.SortedMap;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
+import javax.annotation.Nullable;
+
 /**
  * Constructs a {@link PipelineOptions} or any derived interface that is composable to any other
  * derived interface of {@link PipelineOptions} via the {@link PipelineOptions#as} method. Being
@@ -93,7 +97,6 @@ import java.util.TreeSet;
  * specification</a> for more details as to what constitutes a property.
  */
 public class PipelineOptionsFactory {
-
   /**
    * Creates and returns an object that implements {@link PipelineOptions}.
    * This sets the {@link ApplicationNameOptions#getAppName() "appName"} to the calling
@@ -129,18 +132,23 @@ public class PipelineOptionsFactory {
    *   --readOnly (shorthand for boolean properties, will set the "readOnly" property to "true")
    *   --x=1 --x=2 --x=3 (list style property, will set the "x" property to [1, 2, 3])
    *   --x=1,2,3 (shorthand list style property, will set the "x" property to [1, 2, 3])
+   *   --complexObject='{"key1":"value1",...} (JSON format for all other complex types)
    * </pre>
-   * Properties are able to bound to {@link String} and Java primitives {@code boolean},
-   * {@code byte}, {@code short}, {@code int}, {@code long}, {@code float}, {@code double} and
-   * their primitive wrapper classes.
    * <p>
-   * List style properties are able to be bound to {@code boolean[]}, {@code char[]},
+   * Simple properties are able to bound to {@link String}, {@link Class}, enums and Java
+   * primitives {@code boolean}, {@code byte}, {@code short}, {@code int}, {@code long},
+   * {@code float}, {@code double} and their primitive wrapper classes.
+   * <p>
+   * Simple list style properties are able to be bound to {@code boolean[]}, {@code char[]},
    * {@code short[]}, {@code int[]}, {@code long[]}, {@code float[]}, {@code double[]},
-   * {@code String[]} and {@code List<String>}.
+   * {@code Class[]}, enum arrays, {@code String[]}, and {@code List<String>}.
+   * <p>
+   * JSON format is required for all other types.
    * <p>
    * By default, strict parsing is enabled and arguments must conform to be either
    * {@code --booleanArgName} or {@code --argName=argValue}. Strict parsing can be disabled with
-   * {@link Builder#withoutStrictParsing()}.
+   * {@link Builder#withoutStrictParsing()}. Empty or null arguments will be ignored whether
+   * or not strict parsing is enabled.
    * <p>
    * Help information can be output to {@link System#out} by specifying {@code --help} as an
    * argument. After help is printed, the application will exit. Specifying only {@code --help}
@@ -195,18 +203,23 @@ public class PipelineOptionsFactory {
      *   --readOnly (shorthand for boolean properties, will set the "readOnly" property to "true")
      *   --x=1 --x=2 --x=3 (list style property, will set the "x" property to [1, 2, 3])
      *   --x=1,2,3 (shorthand list style property, will set the "x" property to [1, 2, 3])
+     *   --complexObject='{"key1":"value1",...} (JSON format for all other complex types)
      * </pre>
-     * Properties are able to bound to {@link String} and Java primitives {@code boolean},
-     * {@code byte}, {@code short}, {@code int}, {@code long}, {@code float}, {@code double} and
-     * their primitive wrapper classes.
      * <p>
-     * List style properties are able to be bound to {@code boolean[]}, {@code char[]},
+     * Simple properties are able to bound to {@link String}, {@link Class}, enums and Java
+     * primitives {@code boolean}, {@code byte}, {@code short}, {@code int}, {@code long},
+     * {@code float}, {@code double} and their primitive wrapper classes.
+     * <p>
+     * Simple list style properties are able to be bound to {@code boolean[]}, {@code char[]},
      * {@code short[]}, {@code int[]}, {@code long[]}, {@code float[]}, {@code double[]},
-     * {@code String[]} and {@code List<String>}.
+     * {@code Class[]}, enum arrays, {@code String[]}, and {@code List<String>}.
+     * <p>
+     * JSON format is required for all other types.
      * <p>
      * By default, strict parsing is enabled and arguments must conform to be either
      * {@code --booleanArgName} or {@code --argName=argValue}. Strict parsing can be disabled with
-     * {@link Builder#withoutStrictParsing()}.
+     * {@link Builder#withoutStrictParsing()}. Empty or null arguments will be ignored whether
+     * or not strict parsing is enabled.
      * <p>
      * Help information can be output to {@link System#out} by specifying {@code --help} as an
      * argument. After help is printed, the application will exit. Specifying only {@code --help}
@@ -405,7 +418,23 @@ public class PipelineOptionsFactory {
     }
   }
 
-
+  private static final Set<Class<?>> SIMPLE_TYPES = ImmutableSet.<Class<?>>builder()
+      .add(boolean.class)
+      .add(Boolean.class)
+      .add(char.class)
+      .add(Character.class)
+      .add(short.class)
+      .add(Short.class)
+      .add(int.class)
+      .add(Integer.class)
+      .add(long.class)
+      .add(Long.class)
+      .add(float.class)
+      .add(Float.class)
+      .add(double.class)
+      .add(Double.class)
+      .add(String.class)
+      .add(Class.class).build();
   private static final Logger LOG = LoggerFactory.getLogger(PipelineOptionsFactory.class);
   @SuppressWarnings("rawtypes")
   private static final Class<?>[] EMPTY_CLASS_ARRAY = new Class[0];
@@ -654,6 +683,8 @@ public class PipelineOptionsFactory {
       if (propertyNamesToGetters.isEmpty()) {
         continue;
       }
+      SortedSetMultimap<String, String> requiredGroupNameToProperties =
+          getRequiredGroupNamesToProperties(propertyNamesToGetters);
 
       out.format("%s:%n", currentIface.getName());
       prettyPrintDescription(out, currentIface.getAnnotation(Description.class));
@@ -674,22 +705,51 @@ public class PipelineOptionsFactory {
           out.format("    Default: %s%n", defaultValue.get());
         }
         prettyPrintDescription(out, method.getAnnotation(Description.class));
+        prettyPrintRequiredGroups(out, method.getAnnotation(Validation.Required.class),
+            requiredGroupNameToProperties);
       }
       out.println();
     }
   }
 
   /**
-   * Outputs the value of the description, breaking up long lines on white space characters
-   * and attempting to honor a line limit of {@code TERMINAL_WIDTH}.
+   * Output the requirement groups that the property is a member of, including all properties that
+   * satisfy the group requirement, breaking up long lines on white space characters and attempting
+   * to honor a line limit of {@code TERMINAL_WIDTH}.
+   */
+  private static void prettyPrintRequiredGroups(PrintStream out, Required annotation,
+      SortedSetMultimap<String, String> requiredGroupNameToProperties) {
+    if (annotation == null || annotation.groups() == null) {
+      return;
+    }
+    for (String group : annotation.groups()) {
+      SortedSet<String> groupMembers = requiredGroupNameToProperties.get(group);
+      String requirement;
+      if (groupMembers.size() == 1) {
+        requirement = Iterables.getOnlyElement(groupMembers) + " is required.";
+      } else {
+        requirement = "At least one of " + groupMembers + " is required";
+      }
+      terminalPrettyPrint(out, requirement.split("\\s+"));
+    }
+  }
+
+  /**
+   * Outputs the value of the description, breaking up long lines on white space characters and
+   * attempting to honor a line limit of {@code TERMINAL_WIDTH}.
    */
   private static void prettyPrintDescription(PrintStream out, Description description) {
-    final String spacing = "   ";
     if (description == null || description.value() == null) {
       return;
     }
 
     String[] words = description.value().split("\\s+");
+    terminalPrettyPrint(out, words);
+  }
+
+  private static void terminalPrettyPrint(PrintStream out, String[] words) {
+    final String spacing = "   ";
+
     if (words.length == 0) {
       return;
     }
@@ -875,6 +935,24 @@ public class PipelineOptionsFactory {
   }
 
   /**
+   * Returns a map of required groups of arguments to the properties that satisfy the requirement.
+   */
+  private static SortedSetMultimap<String, String> getRequiredGroupNamesToProperties(
+      Map<String, Method> propertyNamesToGetters) {
+    SortedSetMultimap<String, String> result = TreeMultimap.create();
+    for (Map.Entry<String, Method> propertyEntry : propertyNamesToGetters.entrySet()) {
+      Required requiredAnnotation =
+          propertyEntry.getValue().getAnnotation(Validation.Required.class);
+      if (requiredAnnotation != null) {
+        for (String groupName : requiredAnnotation.groups()) {
+          result.put(groupName, propertyEntry.getKey());
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
    * Validates that a given class conforms to the following properties:
    * <ul>
    *   <li>Any property with the same name must have the same return type for all derived
@@ -919,12 +997,12 @@ public class PipelineOptionsFactory {
     Iterable<Method> interfaceMethods = FluentIterable
         .from(ReflectHelpers.getClosureOfMethodsOnInterface(iface))
         .toSortedSet(MethodComparator.INSTANCE);
-    SetMultimap<Equivalence.Wrapper<Method>, Method> methodNameToMethodMap =
-        HashMultimap.create();
+    SortedSetMultimap<Method, Method> methodNameToMethodMap =
+        TreeMultimap.create(MethodNameComparator.INSTANCE, MethodComparator.INSTANCE);
     for (Method method : interfaceMethods) {
-      methodNameToMethodMap.put(MethodNameEquivalence.INSTANCE.wrap(method), method);
+      methodNameToMethodMap.put(method, method);
     }
-    for (Map.Entry<Equivalence.Wrapper<Method>, Collection<Method>> entry
+    for (Map.Entry<Method, Collection<Method>> entry
         : methodNameToMethodMap.asMap().entrySet()) {
       Set<Class<?>> returnTypes = FluentIterable.from(entry.getValue())
           .transform(ReturnTypeFetchingFunction.INSTANCE).toSet();
@@ -932,7 +1010,7 @@ public class PipelineOptionsFactory {
           .toSortedSet(MethodComparator.INSTANCE);
       Preconditions.checkArgument(returnTypes.size() == 1,
           "Method [%s] has multiple definitions %s with different return types for [%s].",
-          entry.getKey().get().getName(),
+          entry.getKey().getName(),
           collidingMethods,
           iface.getName());
     }
@@ -943,24 +1021,23 @@ public class PipelineOptionsFactory {
         .from(ReflectHelpers.getClosureOfMethodsOnInterfaces(validatedPipelineOptionsInterfaces))
         .append(ReflectHelpers.getClosureOfMethodsOnInterface(iface))
         .toSortedSet(MethodComparator.INSTANCE);
-    SetMultimap<Equivalence.Wrapper<Method>, Method> methodNameToAllMethodMap =
-        HashMultimap.create();
+    SortedSetMultimap<Method, Method> methodNameToAllMethodMap =
+        TreeMultimap.create(MethodNameComparator.INSTANCE, MethodComparator.INSTANCE);
     for (Method method : allInterfaceMethods) {
-      methodNameToAllMethodMap.put(MethodNameEquivalence.INSTANCE.wrap(method), method);
+      methodNameToAllMethodMap.put(method, method);
     }
 
     List<PropertyDescriptor> descriptors = getPropertyDescriptors(klass);
 
     for (PropertyDescriptor descriptor : descriptors) {
-      if (IGNORED_METHODS.contains(descriptor.getReadMethod())
+      if (descriptor.getReadMethod() == null
+          || descriptor.getWriteMethod() == null
+          || IGNORED_METHODS.contains(descriptor.getReadMethod())
           || IGNORED_METHODS.contains(descriptor.getWriteMethod())) {
         continue;
       }
-      Set<Method> getters =
-          methodNameToAllMethodMap.get(
-              MethodNameEquivalence.INSTANCE.wrap(descriptor.getReadMethod()));
-      Set<Method> gettersWithJsonIgnore =
-          FluentIterable.from(getters).filter(JsonIgnorePredicate.INSTANCE).toSet();
+      SortedSet<Method> getters = methodNameToAllMethodMap.get(descriptor.getReadMethod());
+      SortedSet<Method> gettersWithJsonIgnore = Sets.filter(getters, JsonIgnorePredicate.INSTANCE);
 
       Iterable<String> getterClassNames = FluentIterable.from(getters)
           .transform(MethodToDeclaringClassFunction.INSTANCE)
@@ -975,10 +1052,9 @@ public class PipelineOptionsFactory {
           + "found only on %s",
           descriptor.getName(), getterClassNames, gettersWithJsonIgnoreClassNames);
 
-      Set<Method> settersWithJsonIgnore = FluentIterable.from(
-          methodNameToAllMethodMap.get(
-              MethodNameEquivalence.INSTANCE.wrap(descriptor.getWriteMethod())))
-                  .filter(JsonIgnorePredicate.INSTANCE).toSet();
+      SortedSet<Method> settersWithJsonIgnore =
+          Sets.filter(methodNameToAllMethodMap.get(descriptor.getWriteMethod()),
+              JsonIgnorePredicate.INSTANCE);
 
       Iterable<String> settersWithJsonIgnoreClassNames = FluentIterable.from(settersWithJsonIgnore)
           .transform(MethodToDeclaringClassFunction.INSTANCE)
@@ -1010,7 +1086,8 @@ public class PipelineOptionsFactory {
     }
 
     // Verify that no additional methods are on an interface that aren't a bean property.
-    Set<Method> unknownMethods = Sets.difference(Sets.newHashSet(klass.getMethods()), methods);
+    SortedSet<Method> unknownMethods = new TreeSet<>(MethodComparator.INSTANCE);
+    unknownMethods.addAll(Sets.difference(Sets.newHashSet(klass.getMethods()), methods));
     Preconditions.checkArgument(unknownMethods.isEmpty(),
         "Methods %s on [%s] do not conform to being bean properties.",
         FluentIterable.from(unknownMethods).transform(ReflectHelpers.METHOD_FORMATTER),
@@ -1046,6 +1123,15 @@ public class PipelineOptionsFactory {
     }
   }
 
+  /** A {@link Comparator} that uses the methods name to compare them. */
+  static class MethodNameComparator implements Comparator<Method> {
+    static final MethodNameComparator INSTANCE = new MethodNameComparator();
+    @Override
+    public int compare(Method o1, Method o2) {
+      return o1.getName().compareTo(o2.getName());
+    }
+  }
+
   /** A {@link Function} that gets the method's return type. */
   private static class ReturnTypeFetchingFunction implements Function<Method, Class<?>> {
     static final ReturnTypeFetchingFunction INSTANCE = new ReturnTypeFetchingFunction();
@@ -1061,20 +1147,6 @@ public class PipelineOptionsFactory {
     @Override
     public Class<?> apply(Method input) {
       return input.getDeclaringClass();
-    }
-  }
-
-  /** An {@link Equivalence} that considers two methods equivalent if they share the same name. */
-  private static class MethodNameEquivalence extends Equivalence<Method> {
-    static final MethodNameEquivalence INSTANCE = new MethodNameEquivalence();
-    @Override
-    protected boolean doEquivalent(Method a, Method b) {
-      return a.getName().equals(b.getName());
-    }
-
-    @Override
-    protected int doHash(Method t) {
-      return t.getName().hashCode();
     }
   }
 
@@ -1099,25 +1171,32 @@ public class PipelineOptionsFactory {
    *   --project=MyProject (simple property, will set the "project" property to "MyProject")
    *   --readOnly=true (for boolean properties, will set the "readOnly" property to "true")
    *   --readOnly (shorthand for boolean properties, will set the "readOnly" property to "true")
-   *   --x=1 --x=2 --x=3 (list style property, will set the "x" property to [1, 2, 3])
-   *   --x=1,2,3 (shorthand list style property, will set the "x" property to [1, 2, 3])
+   *   --x=1 --x=2 --x=3 (list style simple property, will set the "x" property to [1, 2, 3])
+   *   --x=1,2,3 (shorthand list style simple property, will set the "x" property to [1, 2, 3])
+   *   --complexObject='{"key1":"value1",...} (JSON format for all other complex types)
    * </pre>
    *
-   * <p> Properties are able to bound to {@link String} and Java primitives {@code boolean},
-   * {@code byte}, {@code short}, {@code int}, {@code long}, {@code float}, {@code double}
-   * and their primitive wrapper classes.
+   * <p> Simple properties are able to bound to {@link String}, {@link Class}, enums and Java
+   * primitives {@code boolean}, {@code byte}, {@code short}, {@code int}, {@code long},
+   * {@code float}, {@code double} and their primitive wrapper classes.
    *
-   * <p> List style properties are able to be bound to {@code boolean[]}, {@code char[]},
+   * <p> Simple list style properties are able to be bound to {@code boolean[]}, {@code char[]},
    * {@code short[]}, {@code int[]}, {@code long[]}, {@code float[]}, {@code double[]},
-   * {@code String[]}, and {@code List<String>}.
+   * {@code Class[]}, enum arrays, {@code String[]}, and {@code List<String>}.
+   *
+   * <p> JSON format is required for all other types.
    *
    * <p> If strict parsing is enabled, options must start with '--', and not have an empty argument
-   * name or value based upon the positioning of the '='.
+   * name or value based upon the positioning of the '='. Empty or null arguments will be ignored
+   * whether or not strict parsing is enabled.
    */
   private static ListMultimap<String, String> parseCommandLine(
       String[] args, boolean strictParsing) {
     ImmutableListMultimap.Builder<String, String> builder = ImmutableListMultimap.builder();
     for (String arg : args) {
+      if (Strings.isNullOrEmpty(arg)) {
+        continue;
+      }
       try {
         Preconditions.checkArgument(arg.startsWith("--"),
             "Argument '%s' does not begin with '--'", arg);
@@ -1167,10 +1246,33 @@ public class PipelineOptionsFactory {
       propertyNamesToGetters.put(descriptor.getName(), descriptor.getReadMethod());
     }
     Map<String, Object> convertedOptions = Maps.newHashMap();
-    for (Map.Entry<String, Collection<String>> entry : options.asMap().entrySet()) {
+    for (final Map.Entry<String, Collection<String>> entry : options.asMap().entrySet()) {
       try {
-        Preconditions.checkArgument(propertyNamesToGetters.containsKey(entry.getKey()),
-            "Class %s missing a property named '%s'", klass, entry.getKey());
+        // Search for close matches for missing properties.
+        // Either off by one or off by two character errors.
+        if (!propertyNamesToGetters.containsKey(entry.getKey())) {
+          SortedSet<String> closestMatches = new TreeSet<String>(
+              Sets.filter(propertyNamesToGetters.keySet(), new Predicate<String>() {
+                @Override
+                public boolean apply(@Nullable String input) {
+                  return StringUtils.getLevenshteinDistance(entry.getKey(), input) <= 2;
+                }
+          }));
+          switch (closestMatches.size()) {
+            case 0:
+              throw new IllegalArgumentException(
+                  String.format("Class %s missing a property named '%s'.",
+                      klass, entry.getKey()));
+            case 1:
+              throw new IllegalArgumentException(
+                  String.format("Class %s missing a property named '%s'. Did you mean '%s'?",
+                      klass, entry.getKey(), Iterables.getOnlyElement(closestMatches)));
+            default:
+              throw new IllegalArgumentException(
+                  String.format("Class %s missing a property named '%s'. Did you mean one of %s?",
+                      klass, entry.getKey(), closestMatches));
+          }
+        }
 
         Method method = propertyNamesToGetters.get(entry.getKey());
         // Only allow empty argument values for String, String Array, and Collection.
@@ -1182,7 +1284,9 @@ public class PipelineOptionsFactory {
               "Unknown 'runner' specified '%s', supported pipeline runners %s",
               runner, Sets.newTreeSet(SUPPORTED_PIPELINE_RUNNERS.keySet()));
           convertedOptions.put("runner", SUPPORTED_PIPELINE_RUNNERS.get(runner));
-        } else if (returnType.isArray() || Collection.class.isAssignableFrom(returnType)) {
+        } else if ((returnType.isArray() && (SIMPLE_TYPES.contains(returnType.getComponentType())
+                || returnType.getComponentType().isEnum()))
+            || Collection.class.isAssignableFrom(returnType)) {
           // Split any strings with ","
           List<String> values = FluentIterable.from(entry.getValue())
               .transformAndConcat(new Function<String, Iterable<String>>() {
@@ -1200,12 +1304,22 @@ public class PipelineOptionsFactory {
             }
           }
           convertedOptions.put(entry.getKey(), MAPPER.convertValue(values, type));
-        } else {
+        } else if (SIMPLE_TYPES.contains(returnType) || returnType.isEnum()) {
           String value = Iterables.getOnlyElement(entry.getValue());
           Preconditions.checkArgument(returnType.equals(String.class) || !value.isEmpty(),
               "Empty argument value is only allowed for String, String Array, and Collection,"
                + " but received: " + returnType);
           convertedOptions.put(entry.getKey(), MAPPER.convertValue(value, type));
+        } else {
+          String value = Iterables.getOnlyElement(entry.getValue());
+          Preconditions.checkArgument(returnType.equals(String.class) || !value.isEmpty(),
+              "Empty argument value is only allowed for String, String Array, and Collection,"
+               + " but received: " + returnType);
+          try {
+            convertedOptions.put(entry.getKey(), MAPPER.readValue(value, type));
+          } catch (IOException e) {
+            throw new IllegalArgumentException("Unable to parse JSON value " + value, e);
+          }
         }
       } catch (IllegalArgumentException e) {
         if (strictParsing) {

@@ -17,13 +17,20 @@
 package com.google.cloud.dataflow.sdk.transforms.windowing;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
-import com.google.cloud.dataflow.sdk.coders.VarIntCoder;
+import com.google.cloud.dataflow.sdk.coders.VarLongCoder;
+import com.google.cloud.dataflow.sdk.transforms.Sum;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.OnceTrigger;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
+import com.google.cloud.dataflow.sdk.util.ReduceFn.MergingStateContext;
+import com.google.cloud.dataflow.sdk.util.ReduceFn.StateContext;
+import com.google.cloud.dataflow.sdk.util.state.CombiningValueState;
+import com.google.cloud.dataflow.sdk.util.state.StateContents;
+import com.google.cloud.dataflow.sdk.util.state.StateTag;
+import com.google.cloud.dataflow.sdk.util.state.StateTags;
 
 import org.joda.time.Instant;
 
-import java.util.Map.Entry;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * {@link Trigger}s that fire based on properties of the elements in the current pane.
@@ -36,8 +43,9 @@ public class AfterPane<W extends BoundedWindow> extends OnceTrigger<W>{
 
   private static final long serialVersionUID = 0L;
 
-  private static final CodedTupleTag<Integer> ELEMENTS_IN_PANE_TAG =
-      CodedTupleTag.of("elements-in-pane", VarIntCoder.of());
+  private static final StateTag<CombiningValueState<Long, Long>> ELEMENTS_IN_PANE_TAG =
+      StateTags.makeSystemTagInternal(StateTags.combiningValueFromInputInternal(
+          "count", VarLongCoder.of(), new Sum.SumLongFn()));
 
   private final int countElems;
 
@@ -54,60 +62,90 @@ public class AfterPane<W extends BoundedWindow> extends OnceTrigger<W>{
   }
 
   @Override
-  public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e) throws Exception {
-    Integer count = c.lookup(ELEMENTS_IN_PANE_TAG, e.window());
-    if (count == null) {
-      count = 0;
-    }
-    count++;
+  public TriggerResult onElement(OnElementContext c) throws Exception {
+    CombiningValueState<Long, Long> elementsInPane = c.state().access(ELEMENTS_IN_PANE_TAG);
+    StateContents<Long> countContents = elementsInPane.get();
+    elementsInPane.add(1L);
 
-    c.store(ELEMENTS_IN_PANE_TAG, e.window(), count);
+    // TODO: Consider waiting to read the value until the end of a bundle, since we don't need to
+    // fire immediately when the count exceeds countElems.
+    long count = countContents.read();
     return count >= countElems ? TriggerResult.FIRE_AND_FINISH : TriggerResult.CONTINUE;
   }
 
   @Override
-  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+  public MergeResult onMerge(OnMergeContext c) throws Exception {
     // If we've already received enough elements and finished in some window, then this trigger
     // is just finished.
-    if (e.finishedInAnyMergingWindow(c.current())) {
+    if (c.trigger().finishedInAnyMergingWindow()) {
       return MergeResult.ALREADY_FINISHED;
     }
 
     // Otherwise, compute the sum of elements in all the active panes
-    int count = 0;
-    for (Entry<W, Integer> old : c.lookup(ELEMENTS_IN_PANE_TAG, e.oldWindows()).entrySet()) {
-      if (old.getValue() != null) {
-        count += old.getValue();
-      }
-    }
-
-    // And determine the final status from that.
-    if (count >= countElems) {
-      return MergeResult.FIRE_AND_FINISH;
-    } else {
-      c.store(ELEMENTS_IN_PANE_TAG, e.newWindow(), count);
-      return MergeResult.CONTINUE;
-    }
+    CombiningValueState<Long, Long> elementsInPane =
+        c.state().accessAcrossMergingWindows(ELEMENTS_IN_PANE_TAG);
+    long count = elementsInPane.get().read();
+    return count >= countElems ? MergeResult.FIRE_AND_FINISH : MergeResult.CONTINUE;
   }
 
   @Override
-  public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) {
+  public TriggerResult onTimer(OnTimerContext c) {
     return TriggerResult.CONTINUE;
   }
 
   @Override
-  public void clear(TriggerContext<W> c, W window) throws Exception {
-    c.remove(ELEMENTS_IN_PANE_TAG, window);
+  public void prefetchOnElement(StateContext state) {
+    state.access(ELEMENTS_IN_PANE_TAG).get();
+  }
+
+  @Override
+  public void prefetchOnMerge(MergingStateContext state) {
+    state.accessAcrossMergingWindows(ELEMENTS_IN_PANE_TAG).get();
+  }
+
+  @Override
+  public void prefetchOnTimer(StateContext state) {
+  }
+
+  @Override
+  public void clear(TriggerContext c) throws Exception {
+    c.state().access(ELEMENTS_IN_PANE_TAG).clear();
   }
 
   @Override
   public boolean isCompatible(Trigger<?> other) {
-    return (other instanceof AfterPane)
-        && countElems == ((AfterPane<?>) other).countElems;
+    return this.equals(other);
   }
 
   @Override
-  public Instant getWatermarkCutoff(W window) {
+  public Instant getWatermarkThatGuaranteesFiring(W window) {
     return BoundedWindow.TIMESTAMP_MAX_VALUE;
+  }
+
+  @Override
+  public OnceTrigger<W> getContinuationTrigger(List<Trigger<W>> continuationTriggers) {
+    return AfterPane.elementCountAtLeast(1);
+  }
+
+  @Override
+  public String toString() {
+    return "AfterPane.elementCountAtLeast(" + countElems + ")";
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof AfterPane)) {
+      return false;
+    }
+    AfterPane<?> that = (AfterPane<?>) obj;
+    return this.countElems == that.countElems;
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(countElems);
   }
 }

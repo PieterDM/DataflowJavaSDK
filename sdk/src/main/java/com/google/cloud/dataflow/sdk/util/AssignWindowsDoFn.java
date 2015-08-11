@@ -18,6 +18,7 @@ package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
+import com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo;
 import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
 
 import org.joda.time.Instant;
@@ -31,6 +32,7 @@ import java.util.Collection;
  * @param <W> Window type
  */
 @SuppressWarnings("serial")
+@SystemDoFnInternal
 public class AssignWindowsDoFn<T, W extends BoundedWindow> extends DoFn<T, T> {
   private WindowFn<? super T, W> fn;
 
@@ -60,6 +62,7 @@ public class AssignWindowsDoFn<T, W extends BoundedWindow> extends DoFn<T, T> {
                 }
               });
 
-    c.windowingInternals().outputWindowedValue(c.element(), c.timestamp(), windows);
+    c.windowingInternals()
+        .outputWindowedValue(c.element(), c.timestamp(), windows, PaneInfo.NO_FIRING);
   }
 }

@@ -23,10 +23,10 @@ import com.google.cloud.dataflow.sdk.options.BigQueryOptions;
 import com.google.cloud.dataflow.sdk.util.BigQueryTableRowIterator;
 import com.google.cloud.dataflow.sdk.util.Transport;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
+import com.google.cloud.dataflow.sdk.util.common.worker.AbstractBoundedReaderIterator;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
 
 import java.io.IOException;
-import java.util.NoSuchElementException;
 
 /**
  * A source that reads a BigQuery table and yields TableRow objects.
@@ -40,6 +40,8 @@ public class BigQueryReader extends Reader<WindowedValue<TableRow>> {
   final TableReference tableRef;
   final BigQueryOptions bigQueryOptions;
   final Bigquery bigQueryClient;
+  final String query;
+  final String projectId;
 
   /** Builds a BigQuery source using pipeline options to instantiate a Bigquery client. */
   public BigQueryReader(BigQueryOptions bigQueryOptions, TableReference tableRef) {
@@ -48,6 +50,16 @@ public class BigQueryReader extends Reader<WindowedValue<TableRow>> {
     this.bigQueryOptions = bigQueryOptions;
     this.tableRef = tableRef;
     this.bigQueryClient = null;
+    this.query = null;
+    this.projectId = null;
+  }
+
+  public BigQueryReader(BigQueryOptions bigQueryOptions, String query, String projectId) {
+    this.bigQueryOptions = bigQueryOptions;
+    this.tableRef = null;
+    this.bigQueryClient = null;
+    this.query = query;
+    this.projectId = projectId;
   }
 
   /** Builds a BigQueryReader directly using a BigQuery client. */
@@ -55,36 +67,54 @@ public class BigQueryReader extends Reader<WindowedValue<TableRow>> {
     this.bigQueryOptions = null;
     this.tableRef = tableRef;
     this.bigQueryClient = bigQueryClient;
+    this.query = null;
+    this.projectId = null;
+  }
+
+  public BigQueryReader(Bigquery bigQueryClient, String query, String projectId) {
+    this.bigQueryOptions = null;
+    this.tableRef = null;
+    this.bigQueryClient = bigQueryClient;
+    this.query = query;
+    this.projectId = projectId;
   }
 
   @Override
   public ReaderIterator<WindowedValue<TableRow>> iterator() throws IOException {
-    return new BigQueryReaderIterator(
-        bigQueryClient != null
-            ? bigQueryClient : Transport.newBigQueryClient(bigQueryOptions).build(),
-        tableRef);
+    if (tableRef != null) {
+      return new BigQueryReaderIterator(
+          bigQueryClient != null
+              ? bigQueryClient : Transport.newBigQueryClient(bigQueryOptions).build(),
+          tableRef);
+    } else {
+      return new BigQueryReaderIterator(
+          bigQueryClient != null
+              ? bigQueryClient : Transport.newBigQueryClient(bigQueryOptions).build(),
+          query, projectId);
+    }
   }
 
   /**
    * A ReaderIterator that yields TableRow objects for each row of a BigQuery table.
    */
-  class BigQueryReaderIterator extends AbstractReaderIterator<WindowedValue<TableRow>> {
+  class BigQueryReaderIterator extends AbstractBoundedReaderIterator<WindowedValue<TableRow>> {
     private BigQueryTableRowIterator rowIterator;
 
     public BigQueryReaderIterator(Bigquery bigQueryClient, TableReference tableRef) {
       rowIterator = new BigQueryTableRowIterator(bigQueryClient, tableRef);
     }
 
+    public BigQueryReaderIterator(Bigquery bigQueryClient, String query, String projectId) {
+      rowIterator = new BigQueryTableRowIterator(bigQueryClient, query, projectId);
+    }
+
     @Override
-    public boolean hasNext() {
+    protected boolean hasNextImpl() {
       return rowIterator.hasNext();
     }
 
     @Override
-    public WindowedValue<TableRow> next() throws IOException {
-      if (!hasNext()) {
-        throw new NoSuchElementException();
-      }
+    protected WindowedValue<TableRow> nextImpl() throws IOException {
       return WindowedValue.valueInGlobalWindow(rowIterator.next());
     }
 
@@ -92,7 +122,7 @@ public class BigQueryReader extends Reader<WindowedValue<TableRow>> {
     public Progress getProgress() {
       // For now reporting progress is not supported because this source is used only when
       // an entire table needs to be read by each worker (used as a side input for instance).
-      throw new UnsupportedOperationException();
+      return null;
     }
 
     @Override
@@ -100,7 +130,12 @@ public class BigQueryReader extends Reader<WindowedValue<TableRow>> {
       // For now dynamic splitting is not supported because this source
       // is used only when an entire table needs to be read by each worker (used
       // as a side input for instance).
-      throw new UnsupportedOperationException();
+      return null;
+    }
+
+    @Override
+    public void close() throws IOException {
+      rowIterator.close();
     }
   }
 }

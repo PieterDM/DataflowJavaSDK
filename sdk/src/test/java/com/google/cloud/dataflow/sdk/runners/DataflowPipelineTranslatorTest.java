@@ -20,6 +20,9 @@ import static com.google.cloud.dataflow.sdk.util.Structs.addObject;
 import static com.google.cloud.dataflow.sdk.util.Structs.getDictionary;
 import static com.google.cloud.dataflow.sdk.util.Structs.getString;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.argThat;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
@@ -37,6 +40,7 @@ import com.google.cloud.dataflow.sdk.coders.VarIntCoder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
 import com.google.cloud.dataflow.sdk.io.TextIO;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
+import com.google.cloud.dataflow.sdk.options.DataflowPipelineWorkerPoolOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.runners.DataflowPipelineTranslator.TranslationContext;
 import com.google.cloud.dataflow.sdk.transforms.Count;
@@ -46,6 +50,7 @@ import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.cloud.dataflow.sdk.transforms.ParDo;
 import com.google.cloud.dataflow.sdk.transforms.Sum;
 import com.google.cloud.dataflow.sdk.transforms.View;
+import com.google.cloud.dataflow.sdk.util.GcsUtil;
 import com.google.cloud.dataflow.sdk.util.OutputReference;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.TestCredential;
@@ -53,10 +58,8 @@ import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.util.gcsfs.GcsPath;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PCollectionTuple;
-import com.google.cloud.dataflow.sdk.values.PCollectionView;
 import com.google.cloud.dataflow.sdk.values.PDone;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 
@@ -86,6 +89,7 @@ public class DataflowPipelineTranslatorTest {
   // A Custom Mockito matcher for an initial Job that checks that all
   // expected fields are set.
   private static class IsValidCreateRequest extends ArgumentMatcher<Job> {
+    @Override
     public boolean matches(Object o) {
       Job job = (Job) o;
       return job.getId() == null
@@ -101,8 +105,7 @@ public class DataflowPipelineTranslatorTest {
     }
   }
 
-  private DataflowPipeline buildPipeline(DataflowPipelineOptions options)
-      throws IOException {
+  private DataflowPipeline buildPipeline(DataflowPipelineOptions options) {
     DataflowPipeline p = DataflowPipeline.create(options);
 
     p.apply(TextIO.Read.named("ReadMyFile").from("gs://bucket/object"))
@@ -114,14 +117,12 @@ public class DataflowPipelineTranslatorTest {
   private static Dataflow buildMockDataflow(
       ArgumentMatcher<Job> jobMatcher) throws IOException {
     Dataflow mockDataflowClient = mock(Dataflow.class);
-    Dataflow.V1b3 mockV1b3 = mock(Dataflow.V1b3.class);
-    Dataflow.V1b3.Projects mockProjects = mock(Dataflow.V1b3.Projects.class);
-    Dataflow.V1b3.Projects.Jobs mockJobs = mock(Dataflow.V1b3.Projects.Jobs.class);
-    Dataflow.V1b3.Projects.Jobs.Create mockRequest = mock(
-        Dataflow.V1b3.Projects.Jobs.Create.class);
+    Dataflow.Projects mockProjects = mock(Dataflow.Projects.class);
+    Dataflow.Projects.Jobs mockJobs = mock(Dataflow.Projects.Jobs.class);
+    Dataflow.Projects.Jobs.Create mockRequest = mock(
+        Dataflow.Projects.Jobs.Create.class);
 
-    when(mockDataflowClient.v1b3()).thenReturn(mockV1b3);
-    when(mockV1b3.projects()).thenReturn(mockProjects);
+    when(mockDataflowClient.projects()).thenReturn(mockProjects);
     when(mockProjects.jobs()).thenReturn(mockJobs);
     when(mockJobs.create(eq("someProject"), argThat(jobMatcher)))
         .thenReturn(mockRequest);
@@ -133,6 +134,10 @@ public class DataflowPipelineTranslatorTest {
   }
 
   private static DataflowPipelineOptions buildPipelineOptions() throws IOException {
+    GcsUtil mockGcsUtil = mock(GcsUtil.class);
+    when(mockGcsUtil.bucketExists(any(GcsPath.class))).thenReturn(true);
+    when(mockGcsUtil.isGcsPatternSupported(anyString())).thenCallRealMethod();
+
     DataflowPipelineOptions options = PipelineOptionsFactory.as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
     options.setJobName("some-job-name");
@@ -140,6 +145,7 @@ public class DataflowPipelineTranslatorTest {
     options.setTempLocation(GcsPath.fromComponents("somebucket", "some/path").toString());
     options.setFilesToStage(new LinkedList<String>());
     options.setDataflowClient(buildMockDataflow(new IsValidCreateRequest()));
+    options.setGcsUtil(mockGcsUtil);
     return options;
   }
 
@@ -150,9 +156,14 @@ public class DataflowPipelineTranslatorTest {
 
     Pipeline p = buildPipeline(options);
     p.traverseTopologically(new RecordingPipelineVisitor());
-    Job job = DataflowPipelineTranslator.fromOptions(options).translate(
-        p, Collections.<DataflowPackage>emptyList());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
 
+    // Note that the contents of this materialized map may be changed by the act of reading an
+    // option, which will cause the default to get materialized whereas it would otherwise be
+    // left absent. It is permissible to simply alter this test to reflect current behavior.
     assertEquals(ImmutableMap.of("options",
         ImmutableMap.builder()
           .put("appName", "DataflowPipelineTranslatorTest")
@@ -161,10 +172,91 @@ public class DataflowPipelineTranslatorTest {
           .put("runner", "com.google.cloud.dataflow.sdk.runners.DataflowPipelineRunner")
           .put("jobName", "some-job-name")
           .put("tempLocation", "gs://somebucket/some/path")
-          .put("filesToStage", ImmutableList.of())
           .put("stagingLocation", "gs://somebucket/some/path/staging")
+          .put("stableUniqueNames", "WARNING")
+          .put("streaming", false)
           .build()),
         job.getEnvironment().getSdkPipelineOptions());
+  }
+
+  @Test
+  public void testNetworkConfig() throws IOException {
+    final String testNetwork = "test-network";
+
+    DataflowPipelineOptions options = buildPipelineOptions();
+    options.setNetwork(testNetwork);
+
+    Pipeline p = buildPipeline(options);
+    p.traverseTopologically(new RecordingPipelineVisitor());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
+
+    assertEquals(1, job.getEnvironment().getWorkerPools().size());
+    assertEquals(testNetwork,
+        job.getEnvironment().getWorkerPools().get(0).getNetwork());
+  }
+
+  @Test
+  public void testNetworkConfigMissing() throws IOException {
+    DataflowPipelineOptions options = buildPipelineOptions();
+
+    Pipeline p = buildPipeline(options);
+    p.traverseTopologically(new RecordingPipelineVisitor());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
+
+    assertEquals(1, job.getEnvironment().getWorkerPools().size());
+    assertNull(job.getEnvironment().getWorkerPools().get(0).getNetwork());
+  }
+
+  @Test
+  public void testScalingAlgorithmMissing() throws IOException {
+    DataflowPipelineOptions options = buildPipelineOptions();
+
+    Pipeline p = buildPipeline(options);
+    p.traverseTopologically(new RecordingPipelineVisitor());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
+
+    assertEquals(1, job.getEnvironment().getWorkerPools().size());
+    assertNull(
+        job
+            .getEnvironment()
+            .getWorkerPools()
+            .get(0)
+            .getAutoscalingSettings());
+  }
+
+  @Test
+  public void testScalingAlgorithmNone() throws IOException {
+    final DataflowPipelineWorkerPoolOptions.AutoscalingAlgorithmType noScaling =
+        DataflowPipelineWorkerPoolOptions.AutoscalingAlgorithmType.NONE;
+
+    DataflowPipelineOptions options = buildPipelineOptions();
+    options.setAutoscalingAlgorithm(noScaling);
+
+    Pipeline p = buildPipeline(options);
+    p.traverseTopologically(new RecordingPipelineVisitor());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
+
+    assertEquals(1, job.getEnvironment().getWorkerPools().size());
+    assertEquals(
+        "AUTOSCALING_ALGORITHM_NONE",
+        job
+            .getEnvironment()
+            .getWorkerPools()
+            .get(0)
+            .getAutoscalingSettings()
+            .getAlgorithm());
   }
 
   @Test
@@ -173,12 +265,13 @@ public class DataflowPipelineTranslatorTest {
 
     DataflowPipelineOptions options = buildPipelineOptions();
     options.setZone(testZone);
-    options.setRunner(DataflowPipelineRunner.class);
 
     Pipeline p = buildPipeline(options);
     p.traverseTopologically(new RecordingPipelineVisitor());
-    Job job = DataflowPipelineTranslator.fromOptions(options).translate(
-        p, Collections.<DataflowPackage>emptyList());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
 
     assertEquals(1, job.getEnvironment().getWorkerPools().size());
     assertEquals(testZone,
@@ -194,32 +287,15 @@ public class DataflowPipelineTranslatorTest {
 
     Pipeline p = buildPipeline(options);
     p.traverseTopologically(new RecordingPipelineVisitor());
-    Job job = DataflowPipelineTranslator.fromOptions(options).translate(
-        p, Collections.<DataflowPackage>emptyList());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
 
     assertEquals(1, job.getEnvironment().getWorkerPools().size());
 
     WorkerPool workerPool = job.getEnvironment().getWorkerPools().get(0);
     assertEquals(testMachineType, workerPool.getMachineType());
-  }
-
-  @Test
-  public void testDebuggerConfig() throws IOException {
-    final String cdbgVersion = "test-v1";
-    DataflowPipelineOptions options = buildPipelineOptions();
-    options.setCdbgVersion(cdbgVersion);
-    String expectedConfig = "{\"version\":\"test-v1\"}";
-
-    Pipeline p = buildPipeline(options);
-    p.traverseTopologically(new RecordingPipelineVisitor());
-    Job job = DataflowPipelineTranslator.fromOptions(options).translate(
-        p, Collections.<DataflowPackage>emptyList());
-
-    for (WorkerPool pool : job.getEnvironment().getWorkerPools()) {
-      if ("harness".equals(pool.getKind())) {
-        assertEquals(pool.getMetadata().get("debugger"), expectedConfig);
-      }
-    }
   }
 
   @Test
@@ -231,8 +307,10 @@ public class DataflowPipelineTranslatorTest {
 
     Pipeline p = buildPipeline(options);
     p.traverseTopologically(new RecordingPipelineVisitor());
-    Job job = DataflowPipelineTranslator.fromOptions(options).translate(
-        p, Collections.<DataflowPackage>emptyList());
+    Job job =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(p, Collections.<DataflowPackage>emptyList())
+            .getJob();
 
     assertEquals(1, job.getEnvironment().getWorkerPools().size());
     assertEquals(diskSizeGb,
@@ -256,7 +334,7 @@ public class DataflowPipelineTranslatorTest {
         .apply(ParDo.of(new NoOpFn()))
         .apply(new EmbeddedTransform(predefinedStep.clone()))
         .apply(TextIO.Write.named("WriteMyFile").to("gs://bucket/out"));
-    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList());
+    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList()).getJob();
 
     List<Step> steps = job.getSteps();
     assertEquals(4, steps.size());
@@ -304,7 +382,7 @@ public class DataflowPipelineTranslatorTest {
     pipeline.apply(TextIO.Read.named("ReadMyFile").from("gs://bucket/in"))
         .apply(ParDo.of(new NoOpFn()).named(stepName))
         .apply(TextIO.Write.named("WriteMyFile").to("gs://bucket/out"));
-    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList());
+    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList()).getJob();
 
     assertEquals(3, job.getSteps().size());
     Step step = job.getSteps().get(1);
@@ -333,7 +411,8 @@ public class DataflowPipelineTranslatorTest {
     public PCollection<String> apply(PCollection<String> input) {
       return PCollection.createPrimitiveOutputInternal(
           input.getPipeline(),
-          WindowingStrategy.globalDefault());
+          WindowingStrategy.globalDefault(),
+          input.isBounded());
     }
 
     @Override
@@ -416,7 +495,8 @@ public class DataflowPipelineTranslatorTest {
       return PCollectionTuple.of(sumTag, sum)
           .and(doneTag, PCollection.<Void>createPrimitiveOutputInternal(
               input.getPipeline(),
-              WindowingStrategy.globalDefault()));
+              WindowingStrategy.globalDefault(),
+              input.isBounded()));
     }
   }
 
@@ -459,23 +539,27 @@ public class DataflowPipelineTranslatorTest {
     Pipeline pipeline = DataflowPipeline.create(options);
     DataflowPipelineTranslator t = DataflowPipelineTranslator.fromOptions(options);
 
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/*"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/?"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/[0-9]"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/*baz*"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/*baz?"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/[0-9]baz?"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/baz/*"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/baz/*wonka*"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo/*/baz*"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo*/baz"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo?/baz"));
-    pipeline.apply(TextIO.Read.from("gs://bucket/foo[0-9]/baz"));
+    applyRead(pipeline, "gs://bucket/foo");
+    applyRead(pipeline, "gs://bucket/foo/");
+    applyRead(pipeline, "gs://bucket/foo/*");
+    applyRead(pipeline, "gs://bucket/foo/?");
+    applyRead(pipeline, "gs://bucket/foo/[0-9]");
+    applyRead(pipeline, "gs://bucket/foo/*baz*");
+    applyRead(pipeline, "gs://bucket/foo/*baz?");
+    applyRead(pipeline, "gs://bucket/foo/[0-9]baz?");
+    applyRead(pipeline, "gs://bucket/foo/baz/*");
+    applyRead(pipeline, "gs://bucket/foo/baz/*wonka*");
+    applyRead(pipeline, "gs://bucket/foo/*baz/wonka*");
+    applyRead(pipeline, "gs://bucket/foo*/baz");
+    applyRead(pipeline, "gs://bucket/foo?/baz");
+    applyRead(pipeline, "gs://bucket/foo[0-9]/baz");
 
     // Check that translation doesn't fail.
     t.translate(pipeline, Collections.<DataflowPackage>emptyList());
+  }
+
+  private void applyRead(Pipeline pipeline, String path) {
+    pipeline.apply("Read(" + path + ")", TextIO.Read.from(path));
   }
 
   /**
@@ -506,10 +590,9 @@ public class DataflowPipelineTranslatorTest {
     DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
 
     DataflowPipeline pipeline = DataflowPipeline.create(options);
-    PCollectionView<Integer> view =  pipeline
-        .apply(Create.of(1))
+    pipeline.apply(Create.of(1))
         .apply(View.<Integer>asSingleton());
-    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList());
+    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList()).getJob();
 
     List<Step> steps = job.getSteps();
     assertEquals(2, steps.size());
@@ -532,10 +615,9 @@ public class DataflowPipelineTranslatorTest {
     DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
 
     DataflowPipeline pipeline = DataflowPipeline.create(options);
-    PCollectionView<Iterable<Integer>> view =  pipeline
-        .apply(Create.of(1, 2, 3))
+    pipeline.apply(Create.of(1, 2, 3))
         .apply(View.<Integer>asIterable());
-    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList());
+    Job job = translator.translate(pipeline, Collections.<DataflowPackage>emptyList()).getJob();
 
     List<Step> steps = job.getSteps();
     assertEquals(2, steps.size());

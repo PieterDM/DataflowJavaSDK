@@ -66,6 +66,38 @@ import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
  * @param <T> the type of the elements of this PCollection
  */
 public class PCollection<T> extends TypedPValue<T> {
+
+  /**
+   * The PCollection IsBounded property.
+   */
+  public enum IsBounded {
+    /**
+     * {@code PCollection} contains bounded data elements, such as
+     * {@code PCollection}s from {@code TextIO}, {@code BigQueryIO},
+     * {@code Create} e.t.c.
+     */
+    BOUNDED,
+    /**
+     * {@code PCollection} contains unbounded data elements, such as
+     * {@code PCollection}s from {@code PubsubIO}.
+     */
+    UNBOUNDED;
+
+    /**
+     * Returns the composed IsBounded property.
+     *
+     * <p> The composed property is BOUNDED only if all components are BOUNDED.
+     * Otherwise, it is UNBOUNDED.
+     */
+    public IsBounded and(IsBounded that) {
+      if (this == BOUNDED && that == BOUNDED) {
+        return BOUNDED;
+      } else {
+        return UNBOUNDED;
+      }
+    }
+  }
+
   /**
    * Returns the name of this PCollection.
    *
@@ -120,11 +152,22 @@ public class PCollection<T> extends TypedPValue<T> {
   }
 
   /**
-   * Applies the given PTransform to this input PCollection, and
-   * returns the PTransform's Output.
+   * Like {@link IsBounded#apply(String, PTransform)} but defaulting to the name
+   * of the {@link PTransform}.
    */
   public <OutputT extends POutput> OutputT apply(PTransform<? super PCollection<T>, OutputT> t) {
     return Pipeline.applyTransform(this, t);
+  }
+
+  /**
+   * Applies the given {@code PTransform} to this input {@code PCollection<T>},
+   * using {@code name} to identify this specific application of the transform.
+   * This name is used in various places, including the monitoring UI, logging,
+   * and to stably identify this application node in the job graph.
+   */
+  public <OutputT extends POutput> OutputT apply(
+      String name, PTransform<? super PCollection<T>, OutputT> t) {
+    return Pipeline.applyTransform(name, this, t);
   }
 
   /**
@@ -132,6 +175,10 @@ public class PCollection<T> extends TypedPValue<T> {
    */
   public WindowingStrategy<?, ?> getWindowingStrategy() {
     return windowingStrategy;
+  }
+
+  public IsBounded isBounded() {
+    return isBounded;
   }
 
   /////////////////////////////////////////////////////////////////////////////
@@ -144,6 +191,8 @@ public class PCollection<T> extends TypedPValue<T> {
    * <p> By default, no merging is performed.
    */
   private WindowingStrategy<?, ?> windowingStrategy;
+
+  private IsBounded isBounded;
 
   private PCollection(Pipeline p) {
     super(p);
@@ -172,13 +221,26 @@ public class PCollection<T> extends TypedPValue<T> {
   }
 
   /**
+   * Sets the {@link PCollection.IsBounded} of this {@code PCollection}.
+   *
+   * <p> For use by internal transformations only.
+   */
+  public PCollection<T> setIsBoundedInternal(IsBounded isBounded) {
+    this.isBounded = isBounded;
+    return this;
+  }
+
+  /**
    * Creates and returns a new PCollection for a primitive output.
    *
    * <p> For use by primitive transformations only.
    */
   public static <T> PCollection<T> createPrimitiveOutputInternal(
       Pipeline pipeline,
-      WindowingStrategy<?, ?> windowingStrategy) {
-    return new PCollection<T>(pipeline).setWindowingStrategyInternal(windowingStrategy);
+      WindowingStrategy<?, ?> windowingStrategy,
+      IsBounded isBounded) {
+    return new PCollection<T>(pipeline)
+        .setWindowingStrategyInternal(windowingStrategy)
+        .setIsBoundedInternal(isBounded);
   }
 }

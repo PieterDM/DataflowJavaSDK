@@ -25,6 +25,8 @@ import com.google.cloud.dataflow.sdk.coders.IterableCoder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
 import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
 import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner.ValueWithMetadata;
+import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
+import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.InvalidWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn;
 import com.google.cloud.dataflow.sdk.util.GroupAlsoByWindowsDoFn;
@@ -35,6 +37,7 @@ import com.google.cloud.dataflow.sdk.util.WindowedValue.WindowedValueCoder;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollection;
+import com.google.cloud.dataflow.sdk.values.PCollection.IsBounded;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -103,7 +106,8 @@ import java.util.Map;
  * corresponding to the new, merged window will be created. The items in this pane
  * will be emitted when a trigger fires. By default this will be when the input
  * sources estimate there will be no more data for the window. See
- * {@link windowing.AfterWatermark} for details on the estimation.
+ * {@link com.google.cloud.dataflow.sdk.transforms.windowing.AfterWatermark}
+ * for details on the estimation.
  *
  * <p>The timestamp for each emitted pane is the earliest event time among all elements in
  * the pane. The output {@code PCollection} will have the same {@link WindowFn}
@@ -171,6 +175,57 @@ public class GroupByKey<K, V>
 
   /////////////////////////////////////////////////////////////////////////////
 
+  public static void applicableTo(PCollection<?> input) {
+    WindowingStrategy<?, ?> windowingStrategy = input.getWindowingStrategy();
+    // Verify that the input PCollection is bounded, or that there is windowing/triggering being
+    // used. Without this, the watermark (at end of global window) will never be reached.
+    if (windowingStrategy.getWindowFn() instanceof GlobalWindows
+        && windowingStrategy.getTrigger().getSpec() instanceof DefaultTrigger
+        && input.isBounded() != IsBounded.BOUNDED) {
+      throw new IllegalStateException("GroupByKey cannot be applied to non-bounded PCollection in "
+          + "the GlobalWindow without a trigger. Use a Window.into or Window.triggering transform "
+          + "prior to GroupByKey.");
+    }
+
+    // Validate the window merge function.
+    if (windowingStrategy.getWindowFn() instanceof InvalidWindows) {
+      String cause = ((InvalidWindows<?>) windowingStrategy.getWindowFn()).getCause();
+      throw new IllegalStateException(
+          "GroupByKey must have a valid Window merge function.  "
+              + "Invalid because: " + cause);
+    }
+  }
+
+  @Override
+  public void validate(PCollection<KV<K, V>> input) {
+    applicableTo(input);
+
+    // Verify that the input Coder<KV<K, V>> is a KvCoder<K, V>, and that
+    // the key coder is deterministic.
+    Coder<K> keyCoder = getKeyCoder(input.getCoder());
+    try {
+      keyCoder.verifyDeterministic();
+    } catch (NonDeterministicException e) {
+      throw new IllegalStateException(
+          "the keyCoder of a GroupByKey must be deterministic", e);
+    }
+  }
+
+  public WindowingStrategy<?, ?> updateWindowingStrategy(WindowingStrategy<?, ?> inputStrategy) {
+    WindowFn<?, ?> inputWindowFn = inputStrategy.getWindowFn();
+    if (!inputWindowFn.isNonMerging()) {
+      // Prevent merging windows again, without explicit user
+      // involvement, e.g., by Window.into() or Window.remerge().
+      inputWindowFn = new InvalidWindows<>(
+          "WindowFn has already been consumed by previous GroupByKey", inputWindowFn);
+    }
+
+    // We also switch to the continuation trigger associated with the current trigger.
+    return inputStrategy
+        .withWindowFn(inputWindowFn)
+        .withTrigger(inputStrategy.getTrigger().getSpec().getContinuationTrigger());
+  }
+
   @Override
   public PCollection<KV<K, Iterable<V>>> apply(PCollection<KV<K, V>> input) {
     // This operation groups by the combination of key and window,
@@ -178,12 +233,7 @@ public class GroupByKey<K, V>
     // key/value input elements and the window merge operation of the
     // window function associated with the input PCollection.
     WindowingStrategy<?, ?> windowingStrategy = input.getWindowingStrategy();
-    if (windowingStrategy.getWindowFn() instanceof InvalidWindows) {
-      String cause = ((InvalidWindows<?>) windowingStrategy.getWindowFn()).getCause();
-      throw new IllegalStateException(
-          "GroupByKey must have a valid Window merge function.  "
-          + "Invalid because: " + cause);
-    }
+
     // By default, implement GroupByKey[AndWindow] via a series of lower-level
     // operations.
     return input
@@ -202,7 +252,10 @@ public class GroupByKey<K, V>
         .apply(new SortValuesByTimestamp<K, V>())
 
         // Group each key's values by window, merging windows as needed.
-        .apply(new GroupAlsoByWindow<K, V>(windowingStrategy));
+        .apply(new GroupAlsoByWindow<K, V>(windowingStrategy))
+
+        // And update the windowing strategy as appropriate.
+        .setWindowingStrategyInternal(updateWindowingStrategy(windowingStrategy));
   }
 
   @Override
@@ -379,35 +432,12 @@ public class GroupByKey<K, V>
   public static class GroupByKeyOnly<K, V>
       extends PTransform<PCollection<KV<K, V>>,
                          PCollection<KV<K, Iterable<V>>>> {
-    @Override
-    public void validate(PCollection<KV<K, V>> input) {
-      // Verify that the input Coder<KV<K, V>> is a KvCoder<K, V>, and that
-      // the key coder is deterministic.
-      Coder<K> keyCoder = getKeyCoder(input.getCoder());
-      try {
-        keyCoder.verifyDeterministic();
-      } catch (NonDeterministicException e) {
-        throw new IllegalStateException(
-            "the keyCoder of a GroupByKey must be deterministic", e);
-      }
-    }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     @Override
     public PCollection<KV<K, Iterable<V>>> apply(PCollection<KV<K, V>> input) {
-      WindowingStrategy<?, ?> oldWindowingStrategy = input.getWindowingStrategy();
-      WindowFn<?, ?> newWindowFn = oldWindowingStrategy.getWindowFn();
-      if (!newWindowFn.isNonMerging()) {
-        // Prevent merging windows again, without explicit user
-        // involvement, e.g., by Window.into() or Window.remerge().
-        newWindowFn = new InvalidWindows(
-            "WindowFn has already been consumed by previous GroupByKey", newWindowFn);
-      }
-
-      // We also return to the default trigger.
-      WindowingStrategy<?, ?> newWindowingStrategy = WindowingStrategy.of(newWindowFn);
       return PCollection.<KV<K, Iterable<V>>>createPrimitiveOutputInternal(
-          input.getPipeline(), newWindowingStrategy);
+          input.getPipeline(), input.getWindowingStrategy(), input.isBounded());
     }
 
     /**

@@ -46,6 +46,8 @@ public class TableRowJsonCoderTest {
     }
   }
 
+  private static final Coder<TableRow> TEST_CODER = TableRowJsonCoder.of();
+
   private static final List<TableRow> TEST_VALUES = Arrays.asList(
       new TableRowBuilder().build(),
       new TableRowBuilder().set("a", "1").build(),
@@ -54,9 +56,31 @@ public class TableRowJsonCoderTest {
 
   @Test
   public void testDecodeEncodeEqual() throws Exception {
-    Coder<TableRow> coder = TableRowJsonCoder.of();
     for (TableRow value : TEST_VALUES) {
-      CoderProperties.coderDecodeEncodeEqual(coder, value);
+      CoderProperties.coderDecodeEncodeEqual(TEST_CODER, value);
     }
+  }
+
+  // This identifier should only change if the JSON format of results from the BigQuery API changes.
+  private static final String EXPECTED_ENCODING_ID = "";
+
+  @Test
+  public void testEncodingId() throws Exception {
+    CoderProperties.coderHasEncodingId(TEST_CODER, EXPECTED_ENCODING_ID);
+  }
+
+  /**
+   * Generated data to check that the wire format has not changed. To regenerate, see
+   * {@link com.google.cloud.dataflow.sdk.coders.PrintBase64Encodings}.
+   */
+  private static final List<String> TEST_ENCODINGS = Arrays.asList(
+      "e30",
+      "eyJhIjoiMSJ9",
+      "eyJiIjozLjE0fQ",
+      "eyJhIjoiMSIsImIiOnRydWUsImMiOiJoaSJ9");
+
+  @Test
+  public void testWireFormatEncode() throws Exception {
+    CoderProperties.coderEncodesBase64(TEST_CODER, TEST_VALUES, TEST_ENCODINGS);
   }
 }

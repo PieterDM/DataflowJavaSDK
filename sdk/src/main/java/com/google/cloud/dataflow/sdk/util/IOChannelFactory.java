@@ -16,6 +16,7 @@
 
 package com.google.cloud.dataflow.sdk.util;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
@@ -64,6 +65,8 @@ public interface IOChannelFactory {
    * Returns the size in bytes for the given specification.
    *
    * <p>The specification is not expanded; it is used verbatim.
+   *
+   * <p>{@link FileNotFoundException} will be thrown if the resource does not exist.
    */
   long getSizeBytes(String spec) throws IOException;
 

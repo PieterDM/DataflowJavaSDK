@@ -18,22 +18,25 @@ package com.google.cloud.dataflow.sdk.util;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
+import static org.mockito.Mockito.when;
 
 import com.google.cloud.dataflow.sdk.coders.BigEndianLongCoder;
 import com.google.cloud.dataflow.sdk.coders.Coder;
+import com.google.cloud.dataflow.sdk.coders.CoderRegistry;
+import com.google.cloud.dataflow.sdk.coders.KvCoder;
 import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.transforms.Combine.CombineFn;
-import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.FixedWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.IntervalWindow;
+import com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Sessions;
 import com.google.cloud.dataflow.sdk.transforms.windowing.SlidingWindows;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TriggerId;
-import com.google.cloud.dataflow.sdk.util.TriggerExecutor.TriggerIdCoder;
+import com.google.cloud.dataflow.sdk.util.TimerInternals.TimerData;
 import com.google.cloud.dataflow.sdk.util.common.CounterSet;
+import com.google.cloud.dataflow.sdk.util.state.StateNamespace;
+import com.google.cloud.dataflow.sdk.util.state.StateNamespaces;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 
@@ -44,6 +47,9 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.MockitoAnnotations;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,82 +57,97 @@ import java.util.List;
 
 /** Unit tests for {@link StreamingGroupAlsoByWindowsDoFn}. */
 @RunWith(JUnit4.class)
-@SuppressWarnings("rawtypes")
 public class StreamingGroupAlsoByWindowsDoFnTest {
-  ExecutionContext execContext;
-  CounterSet counters;
-  TupleTag<KV<String, Iterable<String>>> outputTag;
+  private ExecutionContext execContext;
+  private CounterSet counters;
+
+  @Mock
+  private TimerInternals mockTimerInternals;
 
   @Before public void setUp() {
+    MockitoAnnotations.initMocks(this);
     execContext = new DirectModeExecutionContext() {
-        @Override
-        public void setTimer(String tag, Instant timestamp, Trigger.TimeDomain domain) {}
+      // Normally timerInternals doesn't come from the execution context, but
+      // StreamingGroupAlsoByWindows expects it to. So, hook that up.
 
-        @Override
-        public void deleteTimer(String tag, Trigger.TimeDomain domain) {}
-      };
+      @Override
+      public ExecutionContext.StepContext createStepContext(String stepName, String transformName) {
+        ExecutionContext.StepContext context =
+            Mockito.spy(super.createStepContext(stepName, transformName));
+        Mockito.doReturn(mockTimerInternals).when(context).timerInternals();
+        return context;
+      }
+    };
     counters = new CounterSet();
-    outputTag = new TupleTag<>();
   }
 
   @Test public void testEmpty() throws Exception {
-    DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>, List> runner =
-        makeRunner(WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
+    TupleTag<KV<String, Iterable<String>>> outputTag = new TupleTag<>();
+    DoFnRunner.ListOutputManager outputManager = new DoFnRunner.ListOutputManager();
+    DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>> runner =
+        makeRunner(
+            outputTag, outputManager, WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
 
     runner.startBundle();
 
     runner.finishBundle();
 
-    List<?> result = runner.getReceiver(outputTag);
+    List<?> result = outputManager.getOutput(outputTag);
 
     assertEquals(0, result.size());
   }
 
+  private <W extends BoundedWindow, V> TimerOrElement<KV<String, V>> timer(
+      Coder<W> windowCoder, W window, Instant timestamp, TimeDomain domain) {
+    StateNamespace namespace = StateNamespaces.window(windowCoder, window);
+    return TimerOrElement.<KV<String, V>>timer("k", TimerData.of(namespace, timestamp, domain));
+  }
+
   @Test public void testFixedWindows() throws Exception {
-    DoFnRunner<TimerOrElement<KV<String, String>>,
-        KV<String, Iterable<String>>, List> runner =
-        makeRunner(WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
+    TupleTag<KV<String, Iterable<String>>> outputTag = new TupleTag<>();
+    DoFnRunner.ListOutputManager outputManager = new DoFnRunner.ListOutputManager();
+    DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>> runner =
+        makeRunner(
+            outputTag, outputManager, WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
 
     Coder<IntervalWindow> windowCoder = FixedWindows.of(Duration.millis(10)).windowCoder();
-    Coder<TriggerId<IntervalWindow>> triggerIdCoder =
-        new TriggerIdCoder<IntervalWindow>(windowCoder);
 
     runner.startBundle();
+    when(mockTimerInternals.currentWatermarkTime()).thenReturn(new Instant(0));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v1")),
         new Instant(1),
-        Arrays.asList(window(0, 10))));
+        Arrays.asList(window(0, 10)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v2")),
         new Instant(2),
-        Arrays.asList(window(0, 10))));
+        Arrays.asList(window(0, 10)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v0")),
         new Instant(0),
-        Arrays.asList(window(0, 10))));
+        Arrays.asList(window(0, 10)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v3")),
         new Instant(13),
-        Arrays.asList(window(10, 20))));
+        Arrays.asList(window(10, 20)),
+        PaneInfo.NO_FIRING));
 
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(0, 10), 0)),
-            new Instant(9), "k")));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+            windowCoder, window(0, 10), new Instant(9), TimeDomain.EVENT_TIME)));
 
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(10, 20), 0)),
-            new Instant(19), "k")));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(10, 20), new Instant(19), TimeDomain.EVENT_TIME)));
 
     runner.finishBundle();
 
-    @SuppressWarnings("unchecked")
-    List<WindowedValue<KV<String, Iterable<String>>>> result = runner.getReceiver(outputTag);
+    List<WindowedValue<KV<String, Iterable<String>>>> result = outputManager.getOutput(outputTag);
 
     assertEquals(2, result.size());
 
@@ -144,52 +165,50 @@ public class StreamingGroupAlsoByWindowsDoFnTest {
   }
 
   @Test public void testSlidingWindows() throws Exception {
-    DoFnRunner<TimerOrElement<KV<String, String>>,
-        KV<String, Iterable<String>>, List> runner =
-        makeRunner(WindowingStrategy.of(
+    TupleTag<KV<String, Iterable<String>>> outputTag = new TupleTag<>();
+    DoFnRunner.ListOutputManager outputManager = new DoFnRunner.ListOutputManager();
+    DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>> runner =
+        makeRunner(
+            outputTag,
+            outputManager,
+            WindowingStrategy.of(
             SlidingWindows.of(Duration.millis(20)).every(Duration.millis(10))));
 
     Coder<IntervalWindow> windowCoder =
         SlidingWindows.of(Duration.millis(10)).every(Duration.millis(10)).windowCoder();
-    Coder<TriggerId<IntervalWindow>> triggerIdCoder =
-        new TriggerIdCoder<IntervalWindow>(windowCoder);
 
     runner.startBundle();
+    when(mockTimerInternals.currentWatermarkTime()).thenReturn(new Instant(0));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v1")),
         new Instant(5),
-        Arrays.asList(window(-10, 10), window(0, 20))));
+        Arrays.asList(window(-10, 10), window(0, 20)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v0")),
         new Instant(2),
-        Arrays.asList(window(-10, 10), window(0, 20))));
+        Arrays.asList(window(-10, 10), window(0, 20)),
+        PaneInfo.NO_FIRING));
 
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(-10, 10), 0)),
-            new Instant(9), "k")));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(-10, 10), new Instant(9), TimeDomain.EVENT_TIME)));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v2")),
         new Instant(5),
-        Arrays.asList(window(0, 20), window(10, 30))));
+        Arrays.asList(window(0, 20), window(10, 30)),
+        PaneInfo.NO_FIRING));
 
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(0, 20), 0)),
-            new Instant(19), "k")));
-
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(10, 30), 0)),
-            new Instant(29), "k")));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(0, 20), new Instant(19), TimeDomain.EVENT_TIME)));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(10, 30), new Instant(29), TimeDomain.EVENT_TIME)));
 
     runner.finishBundle();
 
-    @SuppressWarnings("unchecked")
-    List<WindowedValue<KV<String, Iterable<String>>>> result = runner.getReceiver(outputTag);
+    List<WindowedValue<KV<String, Iterable<String>>>> result = outputManager.getOutput(outputTag);
 
     assertEquals(3, result.size());
 
@@ -202,67 +221,66 @@ public class StreamingGroupAlsoByWindowsDoFnTest {
     WindowedValue<KV<String, Iterable<String>>> item1 = result.get(1);
     assertEquals("k", item1.getValue().getKey());
     assertThat(item1.getValue().getValue(), Matchers.containsInAnyOrder("v0", "v1", "v2"));
-    assertEquals(new Instant(2), item1.getTimestamp());
+    // For this sliding window, the minimum output timestmap was 10, since we didn't want to overlap
+    // with the previous window that was [-10, 10).
+    assertEquals(new Instant(10), item1.getTimestamp());
     assertThat(item1.getWindows(), Matchers.<BoundedWindow>contains(window(0, 20)));
 
     WindowedValue<KV<String, Iterable<String>>> item2 = result.get(2);
     assertEquals("k", item2.getValue().getKey());
     assertThat(item2.getValue().getValue(), Matchers.containsInAnyOrder("v2"));
-    assertEquals(new Instant(5), item2.getTimestamp());
+    assertEquals(new Instant(20), item2.getTimestamp());
     assertThat(item2.getWindows(), Matchers.<BoundedWindow>contains(window(10, 30)));
   }
 
   @Test public void testSessions() throws Exception {
-    DoFnRunner<TimerOrElement<KV<String, String>>,
-        KV<String, Iterable<String>>, List> runner =
-        makeRunner(WindowingStrategy.of(Sessions.withGapDuration(Duration.millis(10))));
+    TupleTag<KV<String, Iterable<String>>> outputTag = new TupleTag<>();
+    DoFnRunner.ListOutputManager outputManager = new DoFnRunner.ListOutputManager();
+    DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>> runner =
+        makeRunner(
+            outputTag,
+            outputManager,
+            WindowingStrategy.of(Sessions.withGapDuration(Duration.millis(10))));
 
     Coder<IntervalWindow> windowCoder =
         Sessions.withGapDuration(Duration.millis(10)).windowCoder();
-    Coder<TriggerId<IntervalWindow>> triggerIdCoder =
-        new TriggerIdCoder<IntervalWindow>(windowCoder);
-
     runner.startBundle();
+    when(mockTimerInternals.currentWatermarkTime()).thenReturn(new Instant(0));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v1")),
         new Instant(0),
-        Arrays.asList(window(0, 10))));
+        Arrays.asList(window(0, 10)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v2")),
         new Instant(5),
-        Arrays.asList(window(5, 15))));
+        Arrays.asList(window(5, 15)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v3")),
         new Instant(15),
-        Arrays.asList(window(15, 25))));
+        Arrays.asList(window(15, 25)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", "v0")),
         new Instant(3),
-        Arrays.asList(window(3, 13))));
+        Arrays.asList(window(3, 13)),
+        PaneInfo.NO_FIRING));
 
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(0, 10), 0)),
-            new Instant(9), "k")));
-
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(0, 15), 0)),
-            new Instant(14), "k")));
-
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, String>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(15, 25), 0)),
-            new Instant(24), "k")));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(0, 10), new Instant(9), TimeDomain.EVENT_TIME)));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(0, 15), new Instant(14), TimeDomain.EVENT_TIME)));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, String>timer(
+        windowCoder, window(15, 25), new Instant(24), TimeDomain.EVENT_TIME)));
 
     runner.finishBundle();
 
-    @SuppressWarnings("unchecked")
-    List<WindowedValue<KV<String, Iterable<String>>>> result = runner.getReceiver(outputTag);
+    List<WindowedValue<KV<String, Iterable<String>>>> result = outputManager.getOutput(outputTag);
 
     assertEquals(2, result.size());
 
@@ -312,60 +330,62 @@ public class StreamingGroupAlsoByWindowsDoFnTest {
   }
 
   @Test public void testSessionsCombine() throws Exception {
+    TupleTag<KV<String, Long>> outputTag = new TupleTag<>();
     CombineFn<Long, ?, Long> combineFn = new SumLongs();
-    DoFnRunner<TimerOrElement<KV<String, Long>>,
-        KV<String, Long>, List> runner =
-        makeRunner(WindowingStrategy.of(Sessions.withGapDuration(Duration.millis(10))),
-                   combineFn.<String>asKeyedFn());
+    CoderRegistry registry = new CoderRegistry();
+    registry.registerStandardCoders();
+
+    AppliedCombineFn<String, Long, ?, Long> appliedCombineFn = AppliedCombineFn.withInputCoder(
+        combineFn.asKeyedFn(), registry, KvCoder.of(StringUtf8Coder.of(), BigEndianLongCoder.of()));
+
+    DoFnRunner.ListOutputManager outputManager = new DoFnRunner.ListOutputManager();
+    DoFnRunner<TimerOrElement<KV<String, Long>>, KV<String, Long>> runner =
+        makeRunner(
+            outputTag,
+            outputManager,
+            WindowingStrategy.of(Sessions.withGapDuration(Duration.millis(10))),
+            appliedCombineFn);
 
     Coder<IntervalWindow> windowCoder =
         Sessions.withGapDuration(Duration.millis(10)).windowCoder();
-    Coder<TriggerId<IntervalWindow>> triggerIdCoder =
-        new TriggerIdCoder<IntervalWindow>(windowCoder);
 
     runner.startBundle();
+    when(mockTimerInternals.currentWatermarkTime()).thenReturn(new Instant(0));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", 1L)),
         new Instant(0),
-        Arrays.asList(window(0, 10))));
+        Arrays.asList(window(0, 10)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", 2L)),
         new Instant(5),
-        Arrays.asList(window(5, 15))));
+        Arrays.asList(window(5, 15)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", 3L)),
         new Instant(15),
-        Arrays.asList(window(15, 25))));
+        Arrays.asList(window(15, 25)),
+        PaneInfo.NO_FIRING));
 
     runner.processElement(WindowedValue.of(
         TimerOrElement.element(KV.of("k", 4L)),
         new Instant(3),
-        Arrays.asList(window(3, 13))));
+        Arrays.asList(window(3, 13)),
+        PaneInfo.NO_FIRING));
 
-    // TODO: To simplify tests, create a timer manager that can sweep a watermark past some timers
-    // and fire them as appropriate. This would essentially be the batch timer context.
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, Long>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(0, 10), 0)),
-            new Instant(9), "k")));
-
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, Long>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(0, 15), 0)),
-            new Instant(14), "k")));
-
-    runner.processElement(WindowedValue.valueInEmptyWindows(
-        TimerOrElement.<KV<String, Long>>timer(
-            CoderUtils.encodeToBase64(triggerIdCoder, new TriggerId<>(window(15, 25), 0)),
-            new Instant(24), "k")));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, Long>timer(
+        windowCoder, window(0, 10), new Instant(9), TimeDomain.EVENT_TIME)));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, Long>timer(
+        windowCoder, window(0, 15), new Instant(14), TimeDomain.EVENT_TIME)));
+    runner.processElement(WindowedValue.valueInEmptyWindows(this.<IntervalWindow, Long>timer(
+        windowCoder, window(15, 25), new Instant(24), TimeDomain.EVENT_TIME)));
 
     runner.finishBundle();
 
-    @SuppressWarnings("unchecked")
-    List<WindowedValue<KV<String, Long>>> result = runner.getReceiver(outputTag);
+    List<WindowedValue<KV<String, Long>>> result = outputManager.getOutput(outputTag);
 
     assertEquals(2, result.size());
 
@@ -382,36 +402,44 @@ public class StreamingGroupAlsoByWindowsDoFnTest {
     assertThat(item1.getWindows(), Matchers.<BoundedWindow>contains(window(15, 25)));
   }
 
-  private DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>, List>
-      makeRunner(WindowingStrategy<? super String, IntervalWindow> windowingStrategy) {
+  private DoFnRunner<TimerOrElement<KV<String, String>>, KV<String, Iterable<String>>> makeRunner(
+          TupleTag<KV<String, Iterable<String>>> outputTag,
+          DoFnRunner.OutputManager outputManager,
+          WindowingStrategy<? super String, IntervalWindow> windowingStrategy) {
+
     StreamingGroupAlsoByWindowsDoFn<String, String, Iterable<String>, IntervalWindow> fn =
         StreamingGroupAlsoByWindowsDoFn.createForIterable(windowingStrategy, StringUtf8Coder.of());
-    return makeRunner(windowingStrategy, fn);
+
+    return makeRunner(outputTag, outputManager, windowingStrategy, fn);
   }
 
-  private DoFnRunner<TimerOrElement<KV<String, Long>>, KV<String, Long>, List> makeRunner(
-        WindowingStrategy<? super String, IntervalWindow> windowingStrategy,
-        KeyedCombineFn<String, Long, ?, Long> combineFn) {
-    StreamingGroupAlsoByWindowsDoFn<String, Long, Long, IntervalWindow> fn =
-        StreamingGroupAlsoByWindowsDoFn.create(
-            windowingStrategy, combineFn, StringUtf8Coder.of(), BigEndianLongCoder.of());
+  private DoFnRunner<TimerOrElement<KV<String, Long>>, KV<String, Long>> makeRunner(
+          TupleTag<KV<String, Long>> outputTag,
+          DoFnRunner.OutputManager outputManager,
+          WindowingStrategy<? super String, IntervalWindow> windowingStrategy,
+          AppliedCombineFn<String, Long, ?, Long> combineFn) {
 
-    return makeRunner(windowingStrategy, fn);
+    StreamingGroupAlsoByWindowsDoFn<String, Long, Long, IntervalWindow> fn =
+        StreamingGroupAlsoByWindowsDoFn.create(windowingStrategy, combineFn, StringUtf8Coder.of());
+
+    return makeRunner(outputTag, outputManager, windowingStrategy, fn);
   }
 
   private <InputT, OutputT>
-      DoFnRunner<TimerOrElement<KV<String, InputT>>, KV<String, OutputT>, List>
-      makeRunner(
+      DoFnRunner<TimerOrElement<KV<String, InputT>>, KV<String, OutputT>> makeRunner(
+          TupleTag<KV<String, OutputT>> outputTag,
+          DoFnRunner.OutputManager outputManager,
           WindowingStrategy<? super String, IntervalWindow> windowingStrategy,
           StreamingGroupAlsoByWindowsDoFn<String, InputT, OutputT, IntervalWindow> fn) {
     return
-        DoFnRunner.createWithListOutputs(
+        DoFnRunner.create(
             PipelineOptionsFactory.create(),
             fn,
-            PTuple.empty(),
-            (TupleTag<KV<String, OutputT>>) (TupleTag) outputTag,
+            NullSideInputReader.empty(),
+            outputManager,
+            outputTag,
             new ArrayList<TupleTag<?>>(),
-            execContext.createStepContext("merge"),
+            execContext.getStepContext("merge", "merge"),
             counters.getAddCounterMutator(),
             windowingStrategy);
   }

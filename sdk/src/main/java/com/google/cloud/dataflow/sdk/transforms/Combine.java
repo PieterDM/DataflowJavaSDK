@@ -24,11 +24,16 @@ import com.google.cloud.dataflow.sdk.coders.CustomCoder;
 import com.google.cloud.dataflow.sdk.coders.DelegateCoder;
 import com.google.cloud.dataflow.sdk.coders.IterableCoder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
+import com.google.cloud.dataflow.sdk.coders.StandardCoder;
 import com.google.cloud.dataflow.sdk.coders.VarIntCoder;
 import com.google.cloud.dataflow.sdk.coders.VoidCoder;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
+import com.google.cloud.dataflow.sdk.util.AppliedCombineFn;
+import com.google.cloud.dataflow.sdk.util.PropertyNames;
+import com.google.cloud.dataflow.sdk.util.SerializableUtils;
+import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.util.common.CounterProvider;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollection;
@@ -42,6 +47,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -49,6 +57,7 @@ import java.io.Serializable;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -78,7 +87,7 @@ public class Combine {
    */
   public static <V> Globally<V, V> globally(
       SerializableFunction<Iterable<V>, V> combiner) {
-    return globally(SimpleCombineFn.of(combiner));
+    return globally(IterableCombineFn.of(combiner));
   }
 
   /**
@@ -119,7 +128,7 @@ public class Combine {
    */
   public static <K, V> PerKey<K, V, V> perKey(
       SerializableFunction<Iterable<V>, V> fn) {
-    return perKey(Combine.SimpleCombineFn.of(fn));
+    return perKey(Combine.IterableCombineFn.of(fn));
   }
 
   /**
@@ -196,7 +205,7 @@ public class Combine {
    */
   public static <K, V> GroupedValues<K, V, V> groupedValues(
       SerializableFunction<Iterable<V>, V> fn) {
-    return groupedValues(SimpleCombineFn.of(fn));
+    return groupedValues(IterableCombineFn.of(fn));
   }
 
   /**
@@ -337,6 +346,7 @@ public class Combine {
    * @param <OutputT> type of output values
    */
   public abstract static class CombineFn<InputT, AccumT, OutputT> implements Serializable {
+
     /**
      * Returns a new, mutable accumulator value, representing the
      * accumulation of zero input values.
@@ -380,6 +390,19 @@ public class Combine {
         accum = addInput(accum, input);
       }
       return extractOutput(accum);
+    }
+
+    /**
+     * Returns a {@link TypeDescriptor} capturing what is known statically
+     * about the output type of this {@code CombineFn} instance's
+     * most-derived class.
+     *
+     * <p> In the normal case of a concrete {@code CombineFn} subclass with
+     * no generic type parameters of its own, this will be a complete
+     * non-generic type.
+     */
+    public TypeDescriptor<OutputT> getOutputType() {
+      return new TypeDescriptor<OutputT>(getClass()) {};
     }
 
     @SuppressWarnings("unchecked")
@@ -485,6 +508,11 @@ public class Combine {
             throws CannotProvideCoderException {
           return CombineFn.this.getDefaultOutputCoder(registry, inputCoder);
         }
+
+        @Override
+        public CombineFn<InputT, AccumT, OutputT> forKey(K key, Coder<K> keyCoder) {
+          return CombineFn.this;
+        }
       };
     }
   }
@@ -497,7 +525,7 @@ public class Combine {
    * easily expressed as binary operations.
    */
   public abstract static class BinaryCombineFn<V> extends
-      CombineFn<V, BinaryCombineFn.Holder<V>, V> {
+      CombineFn<V, Holder<V>, V> {
 
     /**
      * Applies the binary operation to the two operands, returning the result.
@@ -551,34 +579,8 @@ public class Combine {
     }
 
     @Override
-    public Coder<Holder<V>> getAccumulatorCoder(CoderRegistry registry, final Coder<V> inputCoder) {
-      return new CustomCoder<Holder<V>>() {
-        @Override
-        public void encode(Holder<V> accumulator, OutputStream outStream, Context context)
-            throws CoderException, IOException {
-          if (accumulator.present) {
-            outStream.write(1);
-            inputCoder.encode(accumulator.value, outStream, context);
-          } else {
-            outStream.write(0);
-          }
-        }
-
-        @Override
-        public Holder<V> decode(InputStream inStream, Context context)
-            throws CoderException, IOException {
-          if (inStream.read() == 1) {
-            return new Holder<>(inputCoder.decode(inStream, context));
-          } else {
-            return new Holder<>();
-          }
-        }
-
-        @Override
-        public void verifyDeterministic() throws NonDeterministicException {
-          inputCoder.verifyDeterministic();
-        }
-      };
+    public Coder<Holder<V>> getAccumulatorCoder(CoderRegistry registry, Coder<V> inputCoder) {
+      return new HolderCoder<>(inputCoder);
     }
 
     @Override
@@ -586,19 +588,70 @@ public class Combine {
       return inputCoder;
     }
 
-    private static class Holder<V> {
-      public V value;
-      public boolean present;
-      public Holder() { }
-      public Holder(V value) {
-        set(value);
-      }
-      public void set(V value) {
-        this.present = true;
-        this.value = value;
-      }
+  }
+
+  /**
+   * Holds a single value value of type {@code V} which may or may not be present.
+   *
+   * <p>Used only as a private accumulator class. The type appears in public interfaces, but from
+   * a public perspective, it has no accessible members.
+   */
+  public static class Holder<V> {
+    private V value;
+    private boolean present;
+    private Holder() { }
+    private Holder(V value) {
+      set(value);
+    }
+
+    private void set(V value) {
+      this.present = true;
+      this.value = value;
     }
   }
+
+  /**
+   * A {@link Coder} for a {@link Holder}.
+   */
+  private static class HolderCoder<V> extends CustomCoder<Holder<V>> {
+
+    private Coder<V> valueCoder;
+
+    public HolderCoder(Coder<V> valueCoder) {
+      this.valueCoder = valueCoder;
+    }
+
+    @Override
+    public List<Coder<?>> getCoderArguments() {
+      return Arrays.<Coder<?>>asList(valueCoder);
+    }
+
+    @Override
+    public void encode(Holder<V> accumulator, OutputStream outStream, Context context)
+        throws CoderException, IOException {
+      if (accumulator.present) {
+        outStream.write(1);
+        valueCoder.encode(accumulator.value, outStream, context);
+      } else {
+        outStream.write(0);
+      }
+    }
+
+    @Override
+    public Holder<V> decode(InputStream inStream, Context context)
+        throws CoderException, IOException {
+      if (inStream.read() == 1) {
+        return new Holder<>(valueCoder.decode(inStream, context));
+      } else {
+        return new Holder<>();
+      }
+    }
+
+    @Override
+    public void verifyDeterministic() throws NonDeterministicException {
+      valueCoder.verifyDeterministic();
+    }
+  };
 
   /**
    * An abstract subclass of {@link CombineFn} for implementing combiners that are more
@@ -1017,6 +1070,7 @@ public class Combine {
    */
   public abstract static class KeyedCombineFn<K, InputT, AccumT, OutputT>
       implements Serializable {
+
     /**
      * Returns a new, mutable accumulator value representing the
      * accumulation of zero input values.
@@ -1058,6 +1112,46 @@ public class Combine {
      * accumulator are associated with
      */
     public abstract OutputT extractOutput(K key, AccumT accumulator);
+
+    /**
+     * Returns the a regular {@link CombineFn} that operates on a specific key.
+     */
+    public CombineFn<InputT, AccumT, OutputT> forKey(final K key, final Coder<K> keyCoder) {
+      return new CombineFn<InputT, AccumT, OutputT>() {
+
+        @Override
+        public AccumT createAccumulator() {
+          return KeyedCombineFn.this.createAccumulator(key);
+        }
+
+        @Override
+        public AccumT addInput(AccumT accumulator, InputT input) {
+          return KeyedCombineFn.this.addInput(key, accumulator, input);
+        }
+
+        @Override
+        public AccumT mergeAccumulators(Iterable<AccumT> accumulators) {
+          return KeyedCombineFn.this.mergeAccumulators(key, accumulators);
+        }
+
+        @Override
+        public OutputT extractOutput(AccumT accumulator) {
+          return KeyedCombineFn.this.extractOutput(key, accumulator);
+        }
+
+        @Override
+        public Coder<AccumT> getAccumulatorCoder(CoderRegistry registry, Coder<InputT> inputCoder)
+            throws CannotProvideCoderException {
+          return KeyedCombineFn.this.getAccumulatorCoder(registry, keyCoder, inputCoder);
+        }
+
+        @Override
+        public Coder<OutputT> getDefaultOutputCoder(
+            CoderRegistry registry, Coder<InputT> inputCoder) throws CannotProvideCoderException {
+          return KeyedCombineFn.this.getDefaultOutputCoder(registry, keyCoder, inputCoder);
+        }
+      };
+    }
 
     /**
      * Applies this {@code KeyedCombineFn} to a key and a collection
@@ -1153,8 +1247,8 @@ public class Combine {
    * {@code Combine.Globally<InputT, OutputT>} takes a {@code PCollection<InputT>}
    * and returns a {@code PCollection<OutputT>} whose elements are the result of
    * combining all the elements in each window of the input {@code PCollection},
-   * using a specified {@link CombineFn CombineFn<InputT, AccumT, OutputT>}.  It is common
-   * for {@code InputT == OutputT}, but not required.  Common combining
+   * using a specified {@link CombineFn CombineFn&lt;InputT, AccumT, OutputT&gt;}.
+   * It is common for {@code InputT == OutputT}, but not required.  Common combining
    * functions include sums, mins, maxes, and averages of numbers,
    * conjunctions and disjunctions of booleans, statistical
    * aggregations, etc.
@@ -1201,16 +1295,20 @@ public class Combine {
       this.fanout = fanout;
     }
 
-    @Override
-    public Globally<InputT, OutputT> setName(String name) {
-      super.setName(name);
-      return this;
+    private Globally(
+        String name, CombineFn<? super InputT, ?, OutputT> fn, boolean insertDefault, int fanout) {
+      super(name);
+      this.fn = fn;
+      this.insertDefault = insertDefault;
+      this.fanout = fanout;
     }
 
-    @Override
-    @Deprecated
-    public Globally<InputT, OutputT> withName(String name) {
-      return setName(name);
+    /**
+     * Return a new {@code Globally} transform that's like this transform but with the
+     * specified name. Does not modify this transform.
+     */
+    public Globally<InputT, OutputT> named(String name) {
+      return new Globally<>(name, fn, insertDefault, fanout);
     }
 
     /**
@@ -1229,7 +1327,7 @@ public class Combine {
      * provide a default value in the case of empty input.
      */
     public Globally<InputT, OutputT> withoutDefaults() {
-      return new Globally<>(fn, false, fanout);
+      return new Globally<>(name, fn, false, fanout);
     }
 
     /**
@@ -1240,7 +1338,7 @@ public class Combine {
      * that will be used.
      */
     public Globally<InputT, OutputT> withFanout(int fanout) {
-      return new Globally<>(fn, insertDefault, fanout);
+      return new Globally<>(name, fn, insertDefault, fanout);
     }
 
     @Override
@@ -1276,8 +1374,8 @@ public class Combine {
       final PCollectionView<Iterable<OutputT>> maybeEmptyView = maybeEmpty.apply(
           View.<OutputT>asIterable());
       return maybeEmpty.getPipeline()
-          .apply(Create.of((Void) null)).setCoder(VoidCoder.of())
-          .apply(ParDo.of(
+        .apply("CreateVoid", Create.of((Void) null).withCoder(VoidCoder.of()))
+          .apply(ParDo.named("ProduceDefault").of(
               new DoFn<Void, OutputT>() {
                 @Override
                 public void processElement(DoFn<Void, OutputT>.ProcessContext c) {
@@ -1291,19 +1389,14 @@ public class Combine {
               }).withSideInputs(maybeEmptyView))
           .setCoder(maybeEmpty.getCoder());
     }
-
-    @Override
-    protected String getKindString() {
-      return "Combine.Globally";
-    }
   }
 
   /**
    * {@code Combine.GloballyAsSingletonView<InputT, OutputT>} takes a {@code PCollection<InputT>}
    * and returns a {@code PCollectionView<OutputT>} whose elements are the result of
    * combining all the elements in each window of the input {@code PCollection},
-   * using a specified {@link CombineFn CombineFn<InputT, AccumT, OutputT>}. It is common for
-   * {@code InputT == OutputT}, but not required. Common combining
+   * using a specified {@link CombineFn CombineFn&lt;InputT, AccumT, OutputT&gt;}.
+   * It is common for {@code InputT == OutputT}, but not required. Common combining
    * functions include sums, mins, maxes, and averages of numbers,
    * conjunctions and disjunctions of booleans, statistical
    * aggregations, etc.
@@ -1352,21 +1445,9 @@ public class Combine {
     }
 
     @Override
-    public GloballyAsSingletonView<InputT, OutputT> setName(String name) {
-      super.setName(name);
-      return this;
-    }
-
-    @Override
-    @Deprecated
-    public GloballyAsSingletonView<InputT, OutputT> withName(String name) {
-      return setName(name);
-    }
-
-    @Override
     public PCollectionView<OutputT> apply(PCollection<InputT> input) {
-      PCollection<OutputT> combined = input
-          .apply(Combine.globally(fn).withoutDefaults().withFanout(fanout));
+      PCollection<OutputT> combined =
+          input.apply(Combine.<InputT, OutputT>globally(fn).withoutDefaults().withFanout(fanout));
       if (insertDefault) {
         return combined
             .apply(View.<OutputT>asSingleton().withDefaultValue(
@@ -1374,11 +1455,6 @@ public class Combine {
       } else {
         return combined.apply(View.<OutputT>asSingleton());
       }
-    }
-
-    @Override
-    protected String getKindString() {
-      return "Combine.GloballyAsSingletonView";
     }
   }
 
@@ -1391,27 +1467,42 @@ public class Combine {
    * {@link #perKey(SerializableFunction)}, and
    * {@link #groupedValues(SerializableFunction)}.
    */
-  public static class SimpleCombineFn<V> extends CombineFn<V, List<V>, V> {
+  public static class IterableCombineFn<V> extends CombineFn<V, List<V>, V> {
     /**
      * Returns a {@code CombineFn} that uses the given
      * {@code SerializableFunction} to combine values.
      */
-    public static <V> SimpleCombineFn<V> of(
+    public static <V> IterableCombineFn<V> of(
         SerializableFunction<Iterable<V>, V> combiner) {
-      return new SimpleCombineFn<>(combiner);
+      return of(combiner, DEFAULT_BUFFER_SIZE);
     }
+
+    /**
+     * Returns a {@code CombineFn} that uses the given
+     * {@code SerializableFunction} to combine values,
+     * attempting to buffer at least {@code bufferSize}
+     * values between invocations.
+     */
+    public static <V> IterableCombineFn<V> of(
+        SerializableFunction<Iterable<V>, V> combiner, int bufferSize) {
+      return new IterableCombineFn<>(combiner, bufferSize);
+    }
+
+    private static final int DEFAULT_BUFFER_SIZE = 20;
+
+    /** The combiner function. */
+    private final SerializableFunction<Iterable<V>, V> combiner;
 
     /**
      * The number of values to accumulate before invoking the combiner
      * function to combine them.
      */
-    private static final int BUFFER_SIZE = 20;
+    private final int bufferSize;
 
-    /** The combiner function. */
-    private final SerializableFunction<Iterable<V>, V> combiner;
-
-    private SimpleCombineFn(SerializableFunction<Iterable<V>, V> combiner) {
+    private IterableCombineFn(
+        SerializableFunction<Iterable<V>, V> combiner, int bufferSize) {
       this.combiner = combiner;
+      this.bufferSize = bufferSize;
     }
 
     @Override
@@ -1422,7 +1513,7 @@ public class Combine {
     @Override
     public List<V> addInput(List<V> accumulator, V input) {
       accumulator.add(input);
-      if (accumulator.size() > BUFFER_SIZE) {
+      if (accumulator.size() > bufferSize) {
         return mergeToSingleton(accumulator);
       } else {
         return accumulator;
@@ -1443,6 +1534,31 @@ public class Combine {
       List<V> singleton = new ArrayList<>();
       singleton.add(combiner.apply(values));
       return singleton;
+    }
+  }
+
+  /**
+   * Converts a {@link SerializableFunction} from {@code Iterable<V>}s
+   * to {@code V}s into a simple {@link CombineFn} over {@code V}s.
+   *
+   * <p> @deprecated Use {@link IterableCombineFn} or the more space efficient
+   * {@link BinaryCombineFn} instead (which avoids buffering values).
+   */
+  @Deprecated
+  public static class SimpleCombineFn<V> extends IterableCombineFn<V> {
+
+    /**
+     * Returns a {@code CombineFn} that uses the given
+     * {@code SerializableFunction} to combine values.
+     */
+    @Deprecated
+    public static <V> SimpleCombineFn<V> of(
+        SerializableFunction<Iterable<V>, V> combiner) {
+      return new SimpleCombineFn<>(combiner);
+    }
+
+    protected SimpleCombineFn(SerializableFunction<Iterable<V>, V> combiner) {
+      super(combiner, IterableCombineFn.DEFAULT_BUFFER_SIZE);
     }
   }
 
@@ -1489,11 +1605,25 @@ public class Combine {
     private final transient KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn;
     private final boolean fewKeys;
 
-    private PerKey(
-        KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn,
-        boolean fewKeys) {
+    private PerKey(KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn, boolean fewKeys) {
       this.fn = fn;
       this.fewKeys = fewKeys;
+    }
+
+    private PerKey(
+        String name, KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn,
+        boolean fewKeys) {
+      super(name);
+      this.fn = fn;
+      this.fewKeys = fewKeys;
+    }
+
+    /**
+     * Return a new {@code Globally} transform that's like this transform but with the
+     * specified name. Does not modify this transform.
+     */
+    public PerKey<K, InputT, OutputT> named(String name) {
+      return new PerKey<K, InputT, OutputT>(name, fn, fewKeys);
     }
 
     /**
@@ -1509,7 +1639,7 @@ public class Combine {
      */
     public PerKeyWithHotKeyFanout<K, InputT, OutputT> withHotKeyFanout(
         SerializableFunction<? super K, Integer> hotKeyFanout) {
-      return new PerKeyWithHotKeyFanout<K, InputT, OutputT>(fn, hotKeyFanout).withName(name);
+      return new PerKeyWithHotKeyFanout<K, InputT, OutputT>(name, fn, hotKeyFanout);
     }
 
     /**
@@ -1517,25 +1647,13 @@ public class Combine {
      * constant value for every key.
      */
     public PerKeyWithHotKeyFanout<K, InputT, OutputT> withHotKeyFanout(final int hotKeyFanout) {
-      return withHotKeyFanout(
+      return new PerKeyWithHotKeyFanout<K, InputT, OutputT>(name, fn,
           new SerializableFunction<K, Integer>(){
             @Override
             public Integer apply(K unused) {
               return hotKeyFanout;
             }
           });
-    }
-
-    @Override
-    public PerKey<K, InputT, OutputT> setName(String name) {
-      super.setName(name);
-      return this;
-    }
-
-    @Override
-    @Deprecated
-    public PerKey<K, InputT, OutputT> withName(String name) {
-      return setName(name);
     }
 
     /**
@@ -1551,11 +1669,6 @@ public class Combine {
         .apply(GroupByKey.<K, InputT>create(fewKeys))
         .apply(Combine.<K, InputT, OutputT>groupedValues(fn));
     }
-
-    @Override
-    protected String getKindString() {
-      return "Combine.PerKey";
-    }
   }
 
   /**
@@ -1567,17 +1680,12 @@ public class Combine {
     private final transient KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn;
     private final SerializableFunction<? super K, Integer> hotKeyFanout;
 
-    private PerKeyWithHotKeyFanout(
+    private PerKeyWithHotKeyFanout(String name,
         KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn,
         SerializableFunction<? super K, Integer> hotKeyFanout) {
+      super(name);
       this.fn = fn;
       this.hotKeyFanout = hotKeyFanout;
-    }
-
-    @Override
-    @SuppressWarnings("unchecked")
-    public PerKeyWithHotKeyFanout<K, InputT, OutputT> withName(String name) {
-      return (PerKeyWithHotKeyFanout<K, InputT, OutputT>) super.withName(name);
     }
 
     @Override
@@ -1586,10 +1694,31 @@ public class Combine {
     }
 
     private <AccumT> PCollection<KV<K, OutputT>> applyHelper(PCollection<KV<K, InputT>> input) {
+
       // Name the accumulator type.
       @SuppressWarnings("unchecked")
       final KeyedCombineFn<K, InputT, AccumT, OutputT> fn =
           (KeyedCombineFn<K, InputT, AccumT, OutputT>) this.fn;
+
+      if (!(input.getCoder() instanceof KvCoder)) {
+        throw new IllegalStateException(
+            "Expected input coder to be KvCoder, but was " + input.getCoder());
+      }
+
+      @SuppressWarnings("unchecked")
+      final KvCoder<K, InputT> inputCoder = (KvCoder<K, InputT>) input.getCoder();
+      final Coder<AccumT> accumCoder;
+
+      try {
+        accumCoder = fn.getAccumulatorCoder(
+            input.getPipeline().getCoderRegistry(),
+            inputCoder.getKeyCoder(), inputCoder.getValueCoder());
+      } catch (CannotProvideCoderException e) {
+        throw new IllegalStateException("Unable to determine accumulator coder.", e);
+      }
+      Coder<InputOrAccum<InputT, AccumT>> inputOrAccumCoder =
+          new InputOrAccum.InputOrAccumCoder<InputT, AccumT>(
+              inputCoder.getValueCoder(), accumCoder);
 
       // A CombineFn's mergeAccumulator can be applied in a tree-like fashon.
       // Here we shard the key using an integer nonce, combine on that partial
@@ -1620,23 +1749,23 @@ public class Combine {
             public Coder<AccumT> getAccumulatorCoder(
                 CoderRegistry registry, Coder<KV<K, Integer>> keyCoder, Coder<InputT> inputCoder)
                 throws CannotProvideCoderException {
-              return fn.getAccumulatorCoder(
-                  registry, ((KvCoder<K, Integer>) keyCoder).getKeyCoder(), inputCoder);
+              return accumCoder;
             }
       };
 
-      @SuppressWarnings("unchecked")
-      final KvCoder<K, InputT> inputCoder = ((KvCoder<K, InputT>) input.getCoder());
-      KeyedCombineFn<K, AccumT, AccumT, OutputT> hotPostCombine =
-          new KeyedCombineFn<K, AccumT, AccumT, OutputT>() {
+      KeyedCombineFn<K, InputOrAccum<InputT, AccumT>, AccumT, OutputT> postCombine =
+          new KeyedCombineFn<K, InputOrAccum<InputT, AccumT>, AccumT, OutputT>() {
             @Override
             public AccumT createAccumulator(K key) {
               return fn.createAccumulator(key);
             }
             @Override
-            public AccumT addInput(K key, AccumT accumulator, AccumT value) {
-              return fn.mergeAccumulators(
-                  key, ImmutableList.of(accumulator, value));
+            public AccumT addInput(K key, AccumT accumulator, InputOrAccum<InputT, AccumT> value) {
+              if (value.accum == null) {
+                return fn.addInput(key, accumulator, value.input);
+              } else {
+                return fn.mergeAccumulators(key, ImmutableList.of(accumulator, value.accum));
+              }
             }
             @Override
             public AccumT mergeAccumulators(K key, Iterable<AccumT> accumulators) {
@@ -1648,9 +1777,17 @@ public class Combine {
             }
             @Override
             public Coder<OutputT> getDefaultOutputCoder(
-                CoderRegistry registry, Coder<K> keyCoder, Coder<AccumT> accumulatorCoder)
+                CoderRegistry registry,
+                Coder<K> keyCoder,
+                Coder<InputOrAccum<InputT, AccumT>> accumulatorCoder)
                 throws CannotProvideCoderException {
               return fn.getDefaultOutputCoder(registry, keyCoder, inputCoder.getValueCoder());
+            }
+
+            @Override
+            public Coder<AccumT> getAccumulatorCoder(CoderRegistry registry, Coder<K> keyCoder,
+                Coder<InputOrAccum<InputT, AccumT>> inputCoder) throws CannotProvideCoderException {
+              return accumCoder;
             }
       };
 
@@ -1659,7 +1796,7 @@ public class Combine {
       final TupleTag<KV<KV<K, Integer>, InputT>> hot = new TupleTag<>();
       final TupleTag<KV<K, InputT>> cold = new TupleTag<>();
       PCollectionTuple split = input.apply(
-          ParDo.of(
+          ParDo.named("AddNonce").of(
               new DoFn<KV<K, InputT>, KV<K, InputT>>() {
                 transient int counter;
                 @Override
@@ -1671,7 +1808,7 @@ public class Combine {
                 @Override
                 public void processElement(ProcessContext c) {
                   KV<K, InputT> kv = c.element();
-                  int spread = hotKeyFanout.apply(kv.getKey());
+                  int spread = Math.max(1, hotKeyFanout.apply(kv.getKey()));
                   if (spread <= 1) {
                     c.output(kv);
                   } else {
@@ -1680,37 +1817,131 @@ public class Combine {
                   }
                 }
               })
-          .withOutputTags(cold, TupleTagList.of(hot))
-          .withName("AddNonce"));
+          .withOutputTags(cold, TupleTagList.of(hot)));
+
+      // The first level of combine should never use accumulating mode.
+      WindowingStrategy<?, ?> preCombineStrategy = input.getWindowingStrategy();
+      if (preCombineStrategy.getMode()
+          == WindowingStrategy.AccumulationMode.ACCUMULATING_FIRED_PANES) {
+        preCombineStrategy = preCombineStrategy.withMode(
+            WindowingStrategy.AccumulationMode.DISCARDING_FIRED_PANES);
+      }
 
       // Combine the hot and cold keys separately.
-      PCollection<KV<K, OutputT>> combinedHot = split
+      PCollection<KV<K, InputOrAccum<InputT, AccumT>>> precombinedHot = split
           .get(hot)
           .setCoder(KvCoder.of(KvCoder.of(inputCoder.getKeyCoder(), VarIntCoder.of()),
                                inputCoder.getValueCoder()))
-          .apply(Combine.perKey(hotPreCombine).withName("PreCombineHot"))
-          .apply(ParDo.of(
-              new DoFn<KV<KV<K, Integer>, AccumT>, KV<K, AccumT>>() {
+          .setWindowingStrategyInternal(preCombineStrategy)
+          .apply("PreCombineHot", Combine.perKey(hotPreCombine))
+          .apply(ParDo.named("StripNonce").of(
+              new DoFn<KV<KV<K, Integer>, AccumT>,
+                       KV<K, InputOrAccum<InputT, AccumT>>>() {
                 @Override
                 public void processElement(ProcessContext c) {
-                  c.output(KV.of(c.element().getKey().getKey(), c.element().getValue()));
+                  c.output(KV.of(
+                      c.element().getKey().getKey(),
+                      InputOrAccum.<InputT, AccumT>accum(c.element().getValue())));
                 }
-              }).withName("StripNonce"))
-          .apply(Window.<KV<K, AccumT>>remerge())
-          .apply(Combine.perKey(hotPostCombine).withName("PostCombineHot"));
-      PCollection<KV<K, OutputT>> combinedCold = split
+              }))
+          .setCoder(KvCoder.of(inputCoder.getKeyCoder(), inputOrAccumCoder))
+          .apply(Window.<KV<K, InputOrAccum<InputT, AccumT>>>remerge())
+          .setWindowingStrategyInternal(input.getWindowingStrategy());
+      PCollection<KV<K, InputOrAccum<InputT, AccumT>>> preprocessedCold = split
           .get(cold)
           .setCoder(inputCoder)
-          .apply(Combine.perKey(fn).withName("CombineCold"));
+          .apply(ParDo.named("PrepareCold").of(
+              new DoFn<KV<K, InputT>, KV<K, InputOrAccum<InputT, AccumT>>>() {
+                @Override
+                public void processElement(ProcessContext c) {
+                  c.output(KV.of(c.element().getKey(),
+                                 InputOrAccum.<InputT, AccumT>input(c.element().getValue())));
+                }
+              }))
+          .setCoder(KvCoder.of(inputCoder.getKeyCoder(), inputOrAccumCoder));
 
-      // Return the union of the hot and cold key results.
-      return PCollectionList.of(combinedHot).and(combinedCold)
-          .apply(Flatten.<KV<K, OutputT>>pCollections());
+      // Combine the union of the pre-processed hot and cold key results.
+      return PCollectionList.of(precombinedHot).and(preprocessedCold)
+          .apply(Flatten.<KV<K, InputOrAccum<InputT, AccumT>>>pCollections())
+          .apply("PostCombine", Combine.perKey(postCombine));
     }
 
-    @Override
-    protected String getKindString() {
-      return "Combine.PerKey";
+    /**
+     * Used to store either an input or accumulator value, for flattening
+     * the hot and cold key paths.
+     */
+    private static class InputOrAccum<InputT, AccumT> {
+      public final InputT input;
+      public final AccumT accum;
+
+      private InputOrAccum(InputT input, AccumT aggr) {
+        this.input = input;
+        this.accum = aggr;
+      }
+
+      public static <InputT, AccumT> InputOrAccum<InputT, AccumT> input(InputT input) {
+        return new InputOrAccum<InputT, AccumT>(input, null);
+      }
+
+      public static <InputT, AccumT> InputOrAccum<InputT, AccumT> accum(AccumT aggr) {
+        return new InputOrAccum<InputT, AccumT>(null, aggr);
+      }
+
+      private static class InputOrAccumCoder<InputT, AccumT>
+          extends StandardCoder<InputOrAccum<InputT, AccumT>> {
+
+        private static final long serialVersionUID = 0L;
+
+        private final Coder<InputT> inputCoder;
+        private final Coder<AccumT> accumCoder;
+
+        public InputOrAccumCoder(Coder<InputT> inputCoder, Coder<AccumT> accumCoder) {
+          this.inputCoder = inputCoder;
+          this.accumCoder = accumCoder;
+        }
+
+        @JsonCreator
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        public static <InputT, AccumT> InputOrAccumCoder<InputT, AccumT> of(
+            @JsonProperty(PropertyNames.COMPONENT_ENCODINGS)
+            List<Coder<?>> elementCoders) {
+          return new InputOrAccumCoder(elementCoders.get(0), elementCoders.get(1));
+        }
+
+        @Override
+        public void encode(
+            InputOrAccum<InputT, AccumT> value, OutputStream outStream, Coder.Context context)
+            throws CoderException, IOException {
+          if (value.input != null) {
+            outStream.write(0);
+            inputCoder.encode(value.input, outStream, context);
+          } else {
+            outStream.write(1);
+            accumCoder.encode(value.accum, outStream, context);
+          }
+        }
+
+        @Override
+        public InputOrAccum<InputT, AccumT> decode(InputStream inStream, Coder.Context context)
+            throws CoderException, IOException {
+          if (inStream.read() == 0) {
+            return InputOrAccum.<InputT, AccumT>input(inputCoder.decode(inStream, context));
+          } else {
+            return InputOrAccum.<InputT, AccumT>accum(accumCoder.decode(inStream, context));
+          }
+        }
+
+        @Override
+        public List<? extends Coder<?>> getCoderArguments() {
+          return ImmutableList.of(inputCoder, accumCoder);
+        }
+
+        @Override
+        public void verifyDeterministic() throws Coder.NonDeterministicException {
+          inputCoder.verifyDeterministic();
+          accumCoder.verifyDeterministic();
+        }
+      }
     }
   }
 
@@ -1780,7 +2011,7 @@ public class Combine {
     private final KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn;
 
     private GroupedValues(KeyedCombineFn<? super K, ? super InputT, ?, OutputT> fn) {
-      this.fn = fn;
+      this.fn = SerializableUtils.clone(fn);
     }
 
     /**
@@ -1813,12 +2044,14 @@ public class Combine {
       return output;
     }
 
+    public AppliedCombineFn<? super K, ? super InputT, ?, OutputT> getAppliedFn(
+        CoderRegistry registry, Coder<? extends KV<K, ? extends Iterable<InputT>>> inputCoder) {
+      KvCoder<K, InputT> kvCoder = getKvCoder(inputCoder);
+      return AppliedCombineFn.withInputCoder(fn, registry, kvCoder);
+    }
+
     private KvCoder<K, InputT> getKvCoder(
         Coder<? extends KV<K, ? extends Iterable<InputT>>> inputCoder) {
-      /*
-      Coder<? extends KV<K, ? extends Iterable<InputT>>> inputCoder =
-          getInput().getCoder();
-          */
       if (!(inputCoder instanceof KvCoder)) {
         throw new IllegalStateException(
             "Combine.GroupedValues requires its input to use KvCoder");
@@ -1836,16 +2069,6 @@ public class Combine {
       IterableCoder<InputT> inputValuesCoder = (IterableCoder<InputT>) kvValueCoder;
       Coder<InputT> inputValueCoder = inputValuesCoder.getElemCoder();
       return KvCoder.of(keyCoder, inputValueCoder);
-    }
-
-    @SuppressWarnings("unchecked")
-    public Coder<?> getAccumulatorCoder(
-        CoderRegistry coderRegistry,
-        PCollection<? extends KV<K, ? extends Iterable<InputT>>> input)
-        throws CannotProvideCoderException {
-      KvCoder<K, InputT> kvCoder = getKvCoder(input.getCoder());
-      return ((KeyedCombineFn<K, InputT, ?, OutputT>) fn).getAccumulatorCoder(
-          coderRegistry, kvCoder.getKeyCoder(), kvCoder.getValueCoder());
     }
 
     @Override

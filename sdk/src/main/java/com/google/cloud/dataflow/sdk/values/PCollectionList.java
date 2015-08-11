@@ -17,6 +17,7 @@
 package com.google.cloud.dataflow.sdk.values;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
+import com.google.cloud.dataflow.sdk.transforms.AppliedPTransform;
 import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.common.collect.ImmutableList;
 
@@ -163,14 +164,24 @@ public class PCollectionList<T> implements PInput, POutput {
   }
 
   /**
-   * Applies the given PTransform to this input {@code PCollectionList<T>},
-   * and returns the PTransform's Output.
+   * Like {@link #apply(String, PTransform)} but defaulting to the name
+   * of the {@code PTransform}.
    */
   public <OutputT extends POutput> OutputT apply(
       PTransform<PCollectionList<T>, OutputT> t) {
     return Pipeline.applyTransform(this, t);
   }
 
+  /**
+   * Applies the given {@code PTransform} to this input {@code PCollectionList<T>},
+   * using {@code name} to identify this specific application of the transform.
+   * This name is used in various places, including the monitoring UI, logging,
+   * and to stably identify this application node in the job graph.
+   */
+  public <OutputT extends POutput> OutputT apply(
+      String name, PTransform<PCollectionList<T>, OutputT> t) {
+    return Pipeline.applyTransform(name, this, t);
+  }
 
   /////////////////////////////////////////////////////////////////////////////
   // Internal details below here.
@@ -198,7 +209,7 @@ public class PCollectionList<T> implements PInput, POutput {
   }
 
   @Override
-  public void recordAsOutput(PTransform<?, ?> transform) {
+  public void recordAsOutput(AppliedPTransform<?, ?, ?> transform) {
     int i = 0;
     for (PCollection<T> pc : pcollections) {
       pc.recordAsOutput(transform, "out" + i);

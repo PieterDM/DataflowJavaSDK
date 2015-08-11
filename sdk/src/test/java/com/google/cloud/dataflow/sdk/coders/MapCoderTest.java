@@ -31,19 +31,24 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /** Unit tests for {@link MapCoder}. */
 @RunWith(JUnit4.class)
 public class MapCoderTest {
+
+  private static final Coder<Map<Integer, String>> TEST_CODER =
+      MapCoder.of(VarIntCoder.of(), StringUtf8Coder.of());
+
   private static final List<Map<Integer, String>> TEST_VALUES = Arrays.<Map<Integer, String>>asList(
       Collections.<Integer, String>emptyMap(),
-      new ImmutableMap.Builder<Integer, String>().put(1, "hello").put(-1, "foo").build());
+      new TreeMap<Integer, String>(new ImmutableMap.Builder<Integer, String>()
+          .put(1, "hello").put(-1, "foo").build()));
 
   @Test
   public void testDecodeEncodeContentsInSameOrder() throws Exception {
-    Coder<Map<Integer, String>> coder = MapCoder.of(VarIntCoder.of(), StringUtf8Coder.of());
     for (Map<Integer, String> value : TEST_VALUES) {
-      CoderProperties.coderDecodeEncodeEqual(coder, value);
+      CoderProperties.coderDecodeEncodeEqual(TEST_CODER, value);
     }
   }
 
@@ -62,5 +67,26 @@ public class MapCoderTest {
     Map<Integer, String> map = new HashMap<>();
     List<Object> components = MapCoder.getInstanceComponents(map);
     assertNull(components);
+  }
+
+  // If this changes, it implies the binary format has changed!
+  private static final String EXPECTED_ENCODING_ID = "";
+
+  @Test
+  public void testEncodingId() throws Exception {
+    CoderProperties.coderHasEncodingId(TEST_CODER, EXPECTED_ENCODING_ID);
+  }
+
+  /**
+   * Generated data to check that the wire format has not changed. To regenerate, see
+   * {@link com.google.cloud.dataflow.sdk.coders.PrintBase64Encodings}.
+   */
+  private static final List<String> TEST_ENCODINGS = Arrays.asList(
+      "AAAAAA",
+      "AAAAAv____8PA2ZvbwEFaGVsbG8");
+
+  @Test
+  public void testWireFormatEncode() throws Exception {
+    CoderProperties.coderEncodesBase64(TEST_CODER, TEST_VALUES, TEST_ENCODINGS);
   }
 }

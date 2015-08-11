@@ -23,18 +23,27 @@ import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtil
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.readerProgressToCloudProgress;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.splitRequestToApproximateProgress;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.toCloudPosition;
+import static com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind;
 import static com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind.MEAN;
 import static com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind.SUM;
+import static com.google.cloud.dataflow.sdk.util.common.worker.TestOutputReceiver.TestOutputCounter.getMeanByteCounterName;
+import static com.google.cloud.dataflow.sdk.util.common.worker.TestOutputReceiver.TestOutputCounter.getObjectCounterName;
+
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.equalTo;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
 
 import com.google.api.services.dataflow.model.ApproximateProgress;
 import com.google.api.services.dataflow.model.Position;
+import com.google.cloud.dataflow.sdk.io.range.OffsetRangeTracker;
 import com.google.cloud.dataflow.sdk.util.common.Counter;
 import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.worker.ExecutorTestUtils.TestReader;
-import com.google.cloud.dataflow.sdk.util.common.worker.ExecutorTestUtils.TestReceiver;
 
-import org.hamcrest.CoreMatchers;
-import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -48,16 +57,42 @@ import java.util.concurrent.Exchanger;
  */
 @RunWith(JUnit4.class)
 public class ReadOperationTest {
+
+  private <T> void assertCounterKindAndContents(
+      CounterSet counterSet, String name, AggregationKind kind, T contents) {
+    @SuppressWarnings("unchecked")
+    Counter<T> counter = (Counter<T>) counterSet.getExistingCounter(name);
+    assertThat(counter.getKind(), equalTo(kind));
+    assertThat(counter.getAggregate(), equalTo(contents));
+  }
+
+  private <T> void assertCounterMean(
+      CounterSet counterSet, String name, long count, T aggregate) {
+    @SuppressWarnings("unchecked")
+    Counter<T> counter = (Counter<T>) counterSet.getExistingCounter(name);
+    assertThat(counter.getKind(), equalTo(MEAN));
+    assertThat(counter.getMean().getCount(), equalTo(count));
+    assertThat(counter.getMean().getAggregate(), equalTo(aggregate));
+  }
+
+  private void assertCounterKind(
+      CounterSet counterSet, String name, AggregationKind kind) {
+    assertThat(counterSet.getExistingCounter(name).getKind(), equalTo(kind));
+  }
+
+  /**
+   * Tests that a {@link ReadOperation} has expected counters, and that their
+   * values are reasonable.
+   */
   @Test
   @SuppressWarnings("unchecked")
   public void testRunReadOperation() throws Exception {
-    TestReader reader = new TestReader();
-    reader.addInput("hi", "there", "", "bob");
+    TestReader reader = new TestReader("hi", "there", "", "bob");
 
     CounterSet counterSet = new CounterSet();
     String counterPrefix = "test-";
     StateSampler stateSampler = new StateSampler(counterPrefix, counterSet.getAddCounterMutator());
-    TestReceiver receiver = new TestReceiver(counterSet, counterPrefix);
+    TestOutputReceiver receiver = new TestOutputReceiver(counterSet);
 
     ReadOperation readOperation = new ReadOperation(
         reader, receiver, counterPrefix, counterSet.getAddCounterMutator(), stateSampler);
@@ -65,28 +100,14 @@ public class ReadOperationTest {
     readOperation.start();
     readOperation.finish();
 
-    Assert.assertThat(
-        receiver.outputElems, CoreMatchers.<Object>hasItems("hi", "there", "", "bob"));
+    assertThat(receiver.outputElems, containsInAnyOrder((Object) "hi", "there", "", "bob"));
 
-    Assert
-        .assertEquals(
-            new CounterSet(
-                Counter.longs("ReadOperation-ByteCount", SUM).resetToValue(2L + 5 + 0 + 3),
-                Counter.longs("test_receiver_out-ElementCount", SUM).resetToValue(4L),
-                Counter.longs("test_receiver_out-MeanByteCount", MEAN).resetMeanToValue(4, 10L),
-                Counter.longs("test-ReadOperation-start-msecs", SUM)
-                    .resetToValue(((Counter<Long>) counterSet.getExistingCounter(
-                                       "test-ReadOperation-start-msecs")).getAggregate()),
-                Counter.longs("test-ReadOperation-read-msecs", SUM)
-                    .resetToValue(((Counter<Long>) counterSet.getExistingCounter(
-                                       "test-ReadOperation-read-msecs")).getAggregate()),
-                Counter.longs("test-ReadOperation-process-msecs", SUM)
-                    .resetToValue(((Counter<Long>) counterSet.getExistingCounter(
-                                       "test-ReadOperation-process-msecs")).getAggregate()),
-                Counter.longs("test-ReadOperation-finish-msecs", SUM)
-                    .resetToValue(((Counter<Long>) counterSet.getExistingCounter(
-                                       "test-ReadOperation-finish-msecs")).getAggregate())),
-            counterSet);
+    assertCounterKindAndContents(counterSet, "ReadOperation-ByteCount", SUM, 2L + 5 + 0 + 3);
+    assertCounterKindAndContents(counterSet, getObjectCounterName("test_receiver_out"), SUM, 4L);
+    assertCounterMean(counterSet, getMeanByteCounterName("test_receiver_out"), 4, 10L);
+    assertCounterKind(counterSet, "test-ReadOperation-start-msecs", SUM);
+    assertCounterKind(counterSet, "test-ReadOperation-process-msecs", SUM);
+    assertCounterKind(counterSet, "test-ReadOperation-finish-msecs", SUM);
   }
 
   @Test
@@ -95,7 +116,7 @@ public class ReadOperationTest {
     CounterSet counterSet = new CounterSet();
     String counterPrefix = "test-";
     final ReadOperation readOperation = new ReadOperation(new MockReader(iterator),
-        new OutputReceiver("out", "test-", counterSet.getAddCounterMutator()), counterPrefix,
+        new TestOutputReceiver("out", null, counterSet), counterPrefix,
         counterSet.getAddCounterMutator(),
         new StateSampler(counterPrefix, counterSet.getAddCounterMutator()));
     // Update progress not continuously, but so that it's never more than 1 record stale.
@@ -107,7 +128,7 @@ public class ReadOperationTest {
       // Ensure that getProgress() doesn't block while the next() method is blocked.
       ApproximateProgress progress = readerProgressToCloudProgress(readOperation.getProgress());
       long observedIndex = progress.getPosition().getRecordIndex().longValue();
-      Assert.assertTrue("Actual: " + observedIndex, i == observedIndex || i == observedIndex + 1);
+      assertTrue("Actual: " + observedIndex, i == observedIndex || i == observedIndex + 1);
       iterator.offerNext(i);
     }
     thread.join();
@@ -117,7 +138,7 @@ public class ReadOperationTest {
   public void testDynamicSplit() throws Exception {
     MockReaderIterator iterator = new MockReaderIterator(0, 10);
     CounterSet counterSet = new CounterSet();
-    MockOutputReceiver receiver = new MockOutputReceiver(counterSet.getAddCounterMutator());
+    MockOutputReceiver receiver = new MockOutputReceiver();
     ReadOperation readOperation = new ReadOperation(new MockReader(iterator), receiver, "test-",
         counterSet.getAddCounterMutator(),
         new StateSampler("test-", counterSet.getAddCounterMutator()));
@@ -125,7 +146,7 @@ public class ReadOperationTest {
     readOperation.setProgressUpdatePeriodMs(0);
 
     // An unstarted ReadOperation refuses split requests.
-    Assert.assertNull(
+    assertNull(
         readOperation.requestDynamicSplit(splitRequestAtIndex(7L)));
 
     Thread thread = runReadLoopInThread(readOperation);
@@ -134,8 +155,8 @@ public class ReadOperationTest {
     Reader.DynamicSplitResultWithPosition split =
         (Reader.DynamicSplitResultWithPosition) readOperation.requestDynamicSplit(
           splitRequestAtIndex(7L));
-    Assert.assertNotNull(split);
-    Assert.assertEquals(positionAtIndex(7L), toCloudPosition(split.getAcceptedPosition()));
+    assertNotNull(split);
+    assertEquals(positionAtIndex(7L), toCloudPosition(split.getAcceptedPosition()));
     receiver.unblockProcess();
     iterator.offerNext(1);
     receiver.unblockProcess();
@@ -147,11 +168,11 @@ public class ReadOperationTest {
     // but we're also testing that ReadOperation correctly relays the request to the iterator.
     split = (Reader.DynamicSplitResultWithPosition) readOperation.requestDynamicSplit(
         splitRequestAtIndex(5L));
-    Assert.assertNotNull(split);
-    Assert.assertEquals(positionAtIndex(5L), toCloudPosition(split.getAcceptedPosition()));
+    assertNotNull(split);
+    assertEquals(positionAtIndex(5L), toCloudPosition(split.getAcceptedPosition()));
     split = (Reader.DynamicSplitResultWithPosition) readOperation.requestDynamicSplit(
         splitRequestAtIndex(5L));
-    Assert.assertNull(split);
+    assertNull(split);
     receiver.unblockProcess();
 
     iterator.offerNext(3);
@@ -164,7 +185,34 @@ public class ReadOperationTest {
     thread.join();
 
     // Operation is now finished. Check that it refuses a split request.
-    Assert.assertNull(readOperation.requestDynamicSplit(splitRequestAtIndex(5L)));
+    assertNull(readOperation.requestDynamicSplit(splitRequestAtIndex(5L)));
+  }
+
+  @Test
+  public void testDynamicSplitDoesNotBlock() throws Exception {
+    MockReaderIterator iterator = new MockReaderIterator(0, 10);
+    CounterSet counterSet = new CounterSet();
+    MockOutputReceiver receiver = new MockOutputReceiver();
+    ReadOperation readOperation = new ReadOperation(new MockReader(iterator), receiver, "test-",
+        counterSet.getAddCounterMutator(),
+        new StateSampler("test-", counterSet.getAddCounterMutator()));
+
+    Thread thread = runReadLoopInThread(readOperation);
+    iterator.offerNext(0);
+    receiver.unblockProcess();
+    // Read loop is blocked in next(). Do not offer another next item,
+    // but check that we can still split while the read loop is blocked.
+    Reader.DynamicSplitResultWithPosition split = (Reader.DynamicSplitResultWithPosition)
+        readOperation.requestDynamicSplit(splitRequestAtIndex(5L));
+    assertNotNull(split);
+    assertEquals(positionAtIndex(5L), toCloudPosition(split.getAcceptedPosition()));
+
+    for (int i = 1; i < 5; ++i) {
+      iterator.offerNext(i);
+      receiver.unblockProcess();
+    }
+
+    thread.join();
   }
 
   private Thread runReadLoopInThread(final ReadOperation readOperation) {
@@ -183,23 +231,23 @@ public class ReadOperationTest {
     return thread;
   }
 
-  private static class MockReaderIterator extends Reader.AbstractReaderIterator<Integer> {
-    private int to;
+  private static class MockReaderIterator extends AbstractBoundedReaderIterator<Integer> {
+    private final OffsetRangeTracker tracker;
     private Exchanger<Integer> exchanger = new Exchanger<>();
     private int current;
 
     public MockReaderIterator(int from, int to) {
+      this.tracker = new OffsetRangeTracker(from, to);
       this.current = from;
-      this.to = to;
     }
 
     @Override
-    public boolean hasNext() throws IOException {
-      return current < to;
+    protected boolean hasNextImpl() throws IOException {
+      return tracker.tryReturnRecordAt(true, current);
     }
 
     @Override
-    public Integer next() throws IOException {
+    protected Integer nextImpl() throws IOException {
       ++current;
       try {
         return exchanger.exchange(current);
@@ -219,13 +267,11 @@ public class ReadOperationTest {
         Reader.DynamicSplitRequest splitRequest) {
       ApproximateProgress progress = splitRequestToApproximateProgress(splitRequest);
       int index = progress.getPosition().getRecordIndex().intValue();
-      if (index >= to) {
+      if (!tracker.trySplitAtPosition(index)) {
         return null;
-      } else {
-        this.to = index;
-        return new Reader.DynamicSplitResultWithPosition(
-            cloudPositionToReaderPosition(progress.getPosition()));
       }
+      return new Reader.DynamicSplitResultWithPosition(
+          cloudPositionToReaderPosition(progress.getPosition()));
     }
 
     public int offerNext(int next) {
@@ -250,12 +296,11 @@ public class ReadOperationTest {
     }
   }
 
+  /**
+   * A mock {@link OutputReceiver} that blocks the read loop in {@link ReadOperation}.
+   */
   private static class MockOutputReceiver extends OutputReceiver {
     private Exchanger<Object> exchanger = new Exchanger<>();
-
-    MockOutputReceiver(CounterSet.AddCounterMutator mutator) {
-      super("out", "test-", mutator);
-    }
 
     @Override
     public void process(Object elem) throws Exception {

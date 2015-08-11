@@ -31,6 +31,8 @@ import java.util.List;
 @RunWith(JUnit4.class)
 public class BigEndianLongCoderTest {
 
+  private static final Coder<Long> TEST_CODER = BigEndianLongCoder.of();
+
   private static final List<Long> TEST_VALUES = Arrays.asList(
       -11L, -3L, -1L, 0L, 1L, 5L, 13L, 29L,
       Integer.MAX_VALUE + 131L,
@@ -40,9 +42,39 @@ public class BigEndianLongCoderTest {
 
   @Test
   public void testDecodeEncodeEqual() throws Exception {
-    Coder<Long> coder = BigEndianLongCoder.of();
     for (Long value : TEST_VALUES) {
-      CoderProperties.coderDecodeEncodeEqual(coder, value);
+      CoderProperties.coderDecodeEncodeEqual(TEST_CODER, value);
     }
+  }
+
+  // This should never change. The definition of big endian is fixed.
+  private static final String EXPECTED_ENCODING_ID = "";
+
+  @Test
+  public void testEncodingId() throws Exception {
+    CoderProperties.coderHasEncodingId(TEST_CODER, EXPECTED_ENCODING_ID);
+  }
+
+  /**
+   * Generated data to check that the wire format has not changed. To regenerate, see
+   * {@link com.google.cloud.dataflow.sdk.coders.PrintBase64Encodings}.
+   */
+  private static final List<String> TEST_ENCODINGS = Arrays.asList(
+      "__________U",
+      "__________0",
+      "__________8",
+      "AAAAAAAAAAA",
+      "AAAAAAAAAAE",
+      "AAAAAAAAAAU",
+      "AAAAAAAAAA0",
+      "AAAAAAAAAB0",
+      "AAAAAIAAAII",
+      "_____3___-M",
+      "f_________8",
+      "gAAAAAAAAAA");
+
+  @Test
+  public void testWireFormatEncode() throws Exception {
+    CoderProperties.coderEncodesBase64(TEST_CODER, TEST_VALUES, TEST_ENCODINGS);
   }
 }

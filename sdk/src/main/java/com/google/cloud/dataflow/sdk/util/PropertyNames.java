@@ -20,18 +20,22 @@ package com.google.cloud.dataflow.sdk.util;
  * Constant property names used by the SDK in CloudWorkflow specifications.
  */
 public class PropertyNames {
+  public static final String ALLOWED_ENCODINGS = "allowed_encodings";
   public static final String APPEND_TRAILING_NEWLINES = "append_trailing_newlines";
   public static final String BIGQUERY_CREATE_DISPOSITION = "create_disposition";
   public static final String BIGQUERY_DATASET = "dataset";
   public static final String BIGQUERY_PROJECT = "project";
   public static final String BIGQUERY_SCHEMA = "schema";
   public static final String BIGQUERY_TABLE = "table";
+  public static final String BIGQUERY_QUERY = "bigquery_query";
   public static final String BIGQUERY_WRITE_DISPOSITION = "write_disposition";
   public static final String CO_GBK_RESULT_SCHEMA = "co_gbk_result_schema";
   public static final String COMBINE_FN = "combine_fn";
   public static final String COMPONENT_ENCODINGS = "component_encodings";
   public static final String COMPRESSION_TYPE = "compression_type";
   public static final String CUSTOM_SOURCE_FORMAT = "custom_source";
+  public static final String CONCAT_SOURCE_SOURCES = "sources";
+  public static final String CONCAT_SOURCE_BASE_SPECS = "base_specs";
   public static final String SOURCE_STEP_INPUT = "custom_source_step_input";
   public static final String SOURCE_SPEC = "spec";
   public static final String SOURCE_METADATA = "metadata";
@@ -42,6 +46,7 @@ public class PropertyNames {
   public static final String ELEMENT = "element";
   public static final String ELEMENTS = "elements";
   public static final String ENCODING = "encoding";
+  public static final String ENCODING_ID = "encoding_id";
   public static final String END_INDEX = "end_index";
   public static final String END_OFFSET = "end_offset";
   public static final String END_SHUFFLE_POSITION = "end_shuffle_position";
@@ -69,7 +74,6 @@ public class PropertyNames {
   public static final String OUTPUT_NAME = "output_name";
   public static final String PARALLEL_INPUT = "parallel_input";
   public static final String PHASE = "phase";
-  public static final String PUBSUB_DROP_LATE_DATA = "pubsub_drop_late_data";
   public static final String PUBSUB_ID_LABEL = "pubsub_id_label";
   public static final String PUBSUB_SUBSCRIPTION = "pubsub_subscription";
   public static final String PUBSUB_TIMESTAMP_LABEL = "pubsub_timestamp_label";

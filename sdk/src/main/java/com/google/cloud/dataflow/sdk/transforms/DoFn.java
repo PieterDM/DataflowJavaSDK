@@ -24,20 +24,23 @@ import com.google.cloud.dataflow.sdk.annotations.Experimental.Kind;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.transforms.Combine.CombineFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
+import com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo;
 import com.google.cloud.dataflow.sdk.util.WindowingInternals;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTagMap;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
+import com.google.common.base.MoreObjects;
 
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 
-import java.io.IOException;
 import java.io.Serializable;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 
 /**
  * The argument to {@link ParDo} providing the code to use to process
@@ -56,12 +59,14 @@ import java.util.Map;
  * can be done via the {@link DoFnTester} harness.
  *
  * <p> {@link DoFnWithContext} (currently experimental) offers an alternative
- * mechanism for accessing {@link ProcessContext#keyedState} and
- * {@link ProcessContext#window()} without the need to implement
- * {@link RequiresKeyedState} or {@link RequiresWindowAccess}.
+ * mechanism for accessing {@link ProcessContext#window()} without the need
+ * to implement {@link RequiresWindowAccess}.
  *
  * @param <InputT> the type of the (main) input elements
  * @param <OutputT> the type of the (main) output elements
+ *
+ * @see #processElement for details on implementing the transformation
+ * from {@code InputT} to {@code OutputT}.
  */
 @SuppressWarnings("serial")
 public abstract class DoFn<InputT, OutputT> implements Serializable {
@@ -79,6 +84,11 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
 
     /**
      * Adds the given element to the main output {@code PCollection}.
+     *
+     * <p> Once passed to {@code output} the element should be considered
+     * immutable and not be modified in any way. It may be cached or retained
+     * by the Dataflow runtime or later steps in the pipeline, or used in
+     * other unspecified ways.
      *
      * <p> If invoked from {@link DoFn#processElement}, the output
      * element will have the same timestamp and be in the same windows
@@ -98,6 +108,9 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
      * Adds the given element to the main output {@code PCollection},
      * with the given timestamp.
      *
+     * <p> Once passed to {@code outputWithTimestamp} the element should not be
+     * modified in any way.
+     *
      * <p> If invoked from {@link DoFn#processElement}), the timestamp
      * must not be older than the input element's timestamp minus
      * {@link DoFn#getAllowedTimestampSkew}.  The output element will
@@ -116,6 +129,9 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
     /**
      * Adds the given element to the side output {@code PCollection} with the
      * given tag.
+     *
+     * <p> Once passed to {@code sideOutput} the element should not be modified
+     * in any way.
      *
      * <p> The caller of {@code ParDo} uses {@link ParDo#withOutputTags} to
      * specify the tags of side outputs that it consumes. Non-consumed side
@@ -142,6 +158,9 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
     /**
      * Adds the given element to the specified side output {@code PCollection},
      * with the given timestamp.
+     *
+     * <p> Once passed to {@code sideOutputWithTimestamp} the element should not be
+     * modified in any way.
      *
      * <p> If invoked from {@link DoFn#processElement}), the timestamp
      * must not be older than the input element's timestamp minus
@@ -209,6 +228,11 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
 
     /**
      * Returns the input element to be processed.
+     *
+     * <p> The element should be considered immutable. The Dataflow runtime will not mutate the
+     * element, so it is safe to cache, etc. The element should not be mutated by any of the
+     * {@link DoFn} methods, because it may be cached elsewhere, retained by the Dataflow runtime,
+     * or used in other unspecified ways.
      */
     public abstract InputT element();
 
@@ -217,34 +241,13 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
      * window of the main input element.
      *
      * <p> See
-     * {@link com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn#getSideInputTWindow}
+     * {@link com.google.cloud.dataflow.sdk.transforms.windowing.WindowFn#getSideInputWindow}
      * for how this corresponding window is determined.
      *
      * @throws IllegalArgumentException if this is not a side input
-     * @see ParDo#withSideInputTs
+     * @see ParDo#withSideInputs
      */
     public abstract <T> T sideInput(PCollectionView<T> view);
-
-    /**
-     * Returns this {@code DoFn}'s state associated with the input
-     * element's key.  This state can be used by the {@code DoFn} to
-     * store whatever information it likes with that key.  Unlike
-     * {@code DoFn} instance variables, this state is persistent and
-     * can be arbitrarily large; it is more expensive than instance
-     * variable state, however.  It is particularly intended for
-     * streaming computations.
-     *
-     * <p> Requires that this {@code DoFn} implements
-     * {@link RequiresKeyedState}.
-     *
-     * <p> Each {@link ParDo} invocation with this {@code DoFn} as an
-     * argument will maintain its own {@code KeyedState} maps, one per
-     * key.
-     *
-     * @throws UnsupportedOperationException if this {@link DoFn} does
-     * not implement {@link RequiresKeyedState}.
-     */
-    public abstract KeyedState keyedState();
 
     /**
      * Returns the timestamp of the input element.
@@ -264,6 +267,17 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
      * not implement {@link RequiresWindowAccess}.
      */
     public abstract BoundedWindow window();
+
+    /**
+     * Returns information about the pane within this window into which the
+     * input element has been assigned.
+     *
+     * <p> Generally all data is in a single, uninteresting pane unless custom
+     * triggering and/or late data has been explicitly requested.
+     * See {@link com.google.cloud.dataflow.sdk.transforms.windowing.Window}
+     * for more information.
+     */
+    public abstract PaneInfo pane();
 
     /**
      * Returns the process context to use for implementing windowing.
@@ -286,65 +300,11 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
   }
 
   /**
-   * Interface for signaling that a {@link DoFn} needs to maintain
-   * per-key state, accessed via
-   * {@link DoFn.ProcessContext#keyedState}.
-   */
-  @Experimental
-  public interface RequiresKeyedState {}
-
-  /**
    * Interface for signaling that a {@link DoFn} needs to access the window the
    * element is being processed in, via {@link DoFn.ProcessContext#window}.
    */
   @Experimental
   public interface RequiresWindowAccess {}
-
-  /**
-   * A {@code KeyedState} is a mutable mapping
-   * from {@link CodedTupleTag CodedTupleTag<T>}
-   * to {@code T}.
-   */
-  @Experimental
-  public interface KeyedState {
-    /**
-     * Updates this {@code KeyedState} in place so that the given tag maps to the given value.
-     *
-     * @throws IOException if encoding the given value fails
-     */
-    public <T> void store(CodedTupleTag<T> tag, T value) throws IOException;
-
-    /**
-     * Removes the data associated with the given tag from {@code KeyedState}.
-     */
-    public <T> void remove(CodedTupleTag<T> tag);
-
-    /**
-     * Returns the value associated with the given tag in this
-     * {@code KeyedState}, or {@code null} if the tag has no asssociated
-     * value.
-     *
-     * <p> See {@link #lookup(Iterable)} to look up multiple tags at
-     * once.  It is significantly more efficient to look up multiple
-     * tags all at once rather than one at a time.
-     *
-     * @throws IOException if decoding the requested value fails
-     */
-    public <T> T lookup(CodedTupleTag<T> tag) throws IOException;
-
-    /**
-     * Returns a map from the given tags to the values associated with
-     * those tags in this {@code KeyedState}.  A tag will map to null if
-     * the tag had no associated value.
-     *
-     * <p> See {@link #lookup(CodedTupleTag)} to look up a single
-     * tag.
-     *
-     * @throws IOException if decoding any of the requested values fails, often
-     * a {@link com.google.cloud.dataflow.sdk.coders.CoderException}.
-     */
-    public CodedTupleTagMap lookup(Iterable<? extends CodedTupleTag<?>> tags) throws IOException;
-  }
 
   public DoFn() {
     this(new HashMap<String, DelegatingAggregator<?, ?>>());
@@ -367,7 +327,20 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
   }
 
   /**
-   * Processes an input element.
+   * Processes one input element.
+   *
+   * <p> The current element of the input {@code PCollection} is returned by
+   * {@link ProcessContext#element() c.element()}. It should be considered immutable. The Dataflow
+   * runtime will not mutate the element, so it is safe to cache, etc. The element should not be
+   * mutated by any of the {@link DoFn} methods, because it may be cached elsewhere, retained by the
+   * Dataflow runtime, or used in other unspecified ways.
+   *
+   * <p> A value is added to the main output {@code PCollection} by {@link ProcessContext#output}.
+   * Once passed to {@code output} the element should be considered immutable and not be modified in
+   * any way. It may be cached elsewhere, retained by the Dataflow runtime, or used in other
+   * unspecified ways.
+   *
+   * @see ProcessContext
    */
   public abstract void processElement(ProcessContext c) throws Exception;
 
@@ -452,7 +425,14 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
   protected final <AggInputT> Aggregator<AggInputT, AggInputT> createAggregator(String name,
       SerializableFunction<Iterable<AggInputT>, AggInputT> combiner) {
     checkNotNull(combiner, "combiner cannot be null.");
-    return createAggregator(name, Combine.SimpleCombineFn.of(combiner));
+    return createAggregator(name, Combine.IterableCombineFn.of(combiner));
+  }
+
+  /**
+   * Returns the {@link Aggregator Aggregators} created by this {@code DoFn}.
+   */
+  Collection<Aggregator<?, ?>> getAggregators() {
+    return Collections.<Aggregator<?, ?>>unmodifiableCollection(aggregators.values());
   }
 
   /**
@@ -466,6 +446,8 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
       Aggregator<AggInputT, AggOutputT>, Serializable {
     private static final long serialVersionUID = 0L;
 
+    private final UUID id;
+
     private final String name;
 
     private final CombineFn<AggInputT, ?, AggOutputT> combineFn;
@@ -474,11 +456,12 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
 
     public DelegatingAggregator(String name,
         CombineFn<? super AggInputT, ?, AggOutputT> combiner) {
-      this.name = name;
+      this.id = UUID.randomUUID();
+      this.name = checkNotNull(name, "name cannot be null");
       // Safe contravariant cast
       @SuppressWarnings("unchecked")
       CombineFn<AggInputT, ?, AggOutputT> specificCombiner =
-          (CombineFn<AggInputT, ?, AggOutputT>) combiner;
+          (CombineFn<AggInputT, ?, AggOutputT>) checkNotNull(combiner, "combineFn cannot be null");
       this.combineFn = specificCombiner;
     }
 
@@ -509,6 +492,42 @@ public abstract class DoFn<InputT, OutputT> implements Serializable {
      */
     public void setDelegate(Aggregator<AggInputT, ?> delegate) {
       this.delegate = delegate;
+    }
+
+    @Override
+    public String toString() {
+      return MoreObjects.toStringHelper(getClass())
+          .add("name", name)
+          .add("combineFn", combineFn)
+          .toString();
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(id, name, combineFn.getClass());
+    }
+
+    /**
+     * Indicates whether some other object is "equal to" this one.
+     *
+     * <p>{@code DelegatingAggregator} instances are equal if they have the same name, their
+     * CombineFns are the same class, and they have identical IDs.
+     */
+    @Override
+    public boolean equals(Object o) {
+      if (o == this) {
+        return true;
+      }
+      if (o == null) {
+        return false;
+      }
+      if (o instanceof DelegatingAggregator) {
+        DelegatingAggregator<?, ?> that = (DelegatingAggregator<?, ?>) o;
+        return Objects.equals(this.id, that.id)
+            && Objects.equals(this.name, that.name)
+            && Objects.equals(this.combineFn.getClass(), that.combineFn.getClass());
+      }
+      return false;
     }
   }
 }

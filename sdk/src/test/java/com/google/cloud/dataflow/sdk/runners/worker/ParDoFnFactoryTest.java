@@ -17,13 +17,16 @@
 package com.google.cloud.dataflow.sdk.runners.worker;
 
 import static com.google.cloud.dataflow.sdk.util.Structs.addString;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.fail;
 
 import com.google.api.services.dataflow.model.MultiOutputInfo;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
 import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
-import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.DoFnInfo;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
@@ -33,9 +36,7 @@ import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.worker.ParDoFn;
 import com.google.cloud.dataflow.sdk.util.common.worker.StateSampler;
 
-import org.hamcrest.CoreMatchers;
-import org.hamcrest.core.IsInstanceOf;
-import org.junit.Assert;
+import org.hamcrest.Matchers;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -64,6 +65,8 @@ public class ParDoFnFactoryTest {
     }
   }
 
+  private static ParDoFnFactory factory = new ParDoFnFactory.DefaultFactory();
+
   @Test
   public void testCreateNormalParDoFn() throws Exception {
     String stringState = "some state";
@@ -85,32 +88,42 @@ public class ParDoFnFactoryTest {
     List<MultiOutputInfo> multiOutputInfos =
         Arrays.asList(multiOutputInfo);
 
-    BatchModeExecutionContext context = new BatchModeExecutionContext();
+    DataflowExecutionContext context = DataflowExecutionContext.withoutSideInputs();
     CounterSet counters = new CounterSet();
     StateSampler stateSampler = new StateSampler(
         "test", counters.getAddCounterMutator());
-    ParDoFn parDoFn = ParDoFnFactory.create(
+    ParDoFn parDoFn = factory.create(
         PipelineOptionsFactory.create(),
-        cloudUserFn, "name", null, multiOutputInfos, 1,
-        context, counters.getAddCounterMutator(), stateSampler);
+        cloudUserFn,
+        "name",
+        "transformName",
+        null,
+        multiOutputInfos,
+        1,
+        context,
+        counters.getAddCounterMutator(),
+        stateSampler);
 
-    Assert.assertThat(parDoFn, new IsInstanceOf(NormalParDoFn.class));
+    // Test that the factory created the correct class
+    assertThat(parDoFn, instanceOf(NormalParDoFn.class));
+
+    // Test that the DoFnInfo reflects the one passed in
     NormalParDoFn normalParDoFn = (NormalParDoFn) parDoFn;
+    DoFnInfo doFnInfo = normalParDoFn.getDoFnInfo();
+    DoFn actualDoFn = doFnInfo.getDoFn();
+    assertThat(actualDoFn, instanceOf(TestDoFn.class));
+    assertThat(
+        doFnInfo.getWindowingStrategy().getWindowFn(),
+        instanceOf(GlobalWindows.class));
+    assertThat(
+        doFnInfo.getWindowingStrategy().getTrigger().getSpec(),
+        instanceOf(DefaultTrigger.class));
 
-    DoFn actualDoFn = normalParDoFn.fnFactory.createDoFnInfo().getDoFn();
-    Assert.assertThat(actualDoFn, new IsInstanceOf(TestDoFn.class));
-    Assert.assertThat(
-        normalParDoFn.fnFactory.createDoFnInfo().getWindowingStrategy().getWindowFn(),
-        new IsInstanceOf(GlobalWindows.class));
-    Assert.assertThat(
-        normalParDoFn.fnFactory.createDoFnInfo().getWindowingStrategy().getTrigger().getSpec(),
-        new IsInstanceOf(DefaultTrigger.class));
+    // Test that the deserialized user DoFn is as expected
     TestDoFn actualTestDoFn = (TestDoFn) actualDoFn;
-
-    Assert.assertEquals(stringState, actualTestDoFn.stringState);
-    Assert.assertEquals(longState, actualTestDoFn.longState);
-
-    Assert.assertEquals(context, normalParDoFn.executionContext);
+    assertEquals(stringState, actualTestDoFn.stringState);
+    assertEquals(longState, actualTestDoFn.longState);
+    assertEquals(context, normalParDoFn.getExecutionContext());
   }
 
   @Test
@@ -120,16 +133,22 @@ public class ParDoFnFactoryTest {
       CounterSet counters = new CounterSet();
       StateSampler stateSampler = new StateSampler(
           "test", counters.getAddCounterMutator());
-      ParDoFnFactory.create(PipelineOptionsFactory.create(),
-                            cloudUserFn, "name", null, null, 1,
-                            new BatchModeExecutionContext(),
-                            counters.getAddCounterMutator(),
-                            stateSampler);
-      Assert.fail("should have thrown an exception");
+      factory.create(
+          PipelineOptionsFactory.create(),
+          cloudUserFn,
+          "name",
+          "transformName",
+          null,
+          null,
+          1,
+          DataflowExecutionContext.withoutSideInputs(),
+          counters.getAddCounterMutator(),
+          stateSampler);
+      fail("should have thrown an exception");
     } catch (Exception exn) {
-      Assert.assertThat(exn.toString(),
-                        CoreMatchers.containsString(
-                            "unable to create a ParDoFn"));
+      assertThat(
+          exn.toString(),
+          Matchers.containsString("No known ParDoFnFactory"));
     }
   }
 

@@ -26,8 +26,11 @@ import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.ListCoder;
 import com.google.cloud.dataflow.sdk.options.DirectPipelineOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
+import com.google.cloud.dataflow.sdk.options.PipelineOptions.CheckEnabled;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsValidator;
+import com.google.cloud.dataflow.sdk.runners.dataflow.MapAggregatorValues;
+import com.google.cloud.dataflow.sdk.transforms.Aggregator;
 import com.google.cloud.dataflow.sdk.transforms.AppliedPTransform;
 import com.google.cloud.dataflow.sdk.transforms.Combine;
 import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
@@ -35,6 +38,7 @@ import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.cloud.dataflow.sdk.transforms.ParDo;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
+import com.google.cloud.dataflow.sdk.util.AppliedCombineFn;
 import com.google.cloud.dataflow.sdk.util.IOChannelUtils;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
 import com.google.cloud.dataflow.sdk.util.TestCredential;
@@ -70,11 +74,25 @@ import java.util.Random;
  * any optimization.  Useful for small local execution and tests.
  *
  * <p> Throws an exception from {@link #run} if execution fails.
+ *
+ * <p><h3>Permissions</h3>
+ * When reading from a Dataflow source or writing to a Dataflow sink using
+ * {@code DirectPipelineRunner}, the Cloud Platform account that you configured with the
+ * <a href="https://cloud.google.com/sdk/gcloud">gcloud</a> executable will need access to the
+ * corresponding source/sink.
+ *
+ * <p> Please see <a href="https://cloud.google.com/dataflow/security-and-permissions">Google Cloud
+ * Dataflow Security and Permissions</a> for more details.
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
 public class DirectPipelineRunner
     extends PipelineRunner<DirectPipelineRunner.EvaluationResults> {
   private static final Logger LOG = LoggerFactory.getLogger(DirectPipelineRunner.class);
+
+  /**
+   * A source of random data, which can be seeded if determinism is desired.
+   */
+  private Random rand;
 
   /**
    * A map from PTransform class to the corresponding
@@ -103,7 +121,7 @@ public class DirectPipelineRunner
   public static <TransformT extends PTransform<?, ?>>
   void registerDefaultTransformEvaluator(
       Class<TransformT> transformClass,
-      TransformEvaluator<TransformT> transformEvaluator) {
+      TransformEvaluator<? super TransformT> transformEvaluator) {
     if (defaultTransformEvaluators.put(transformClass, transformEvaluator)
         != null) {
       throw new IllegalArgumentException(
@@ -132,7 +150,6 @@ public class DirectPipelineRunner
    * Returns the TransformEvaluator to use for instances of the
    * specified PTransform class, or null if none registered.
    */
-  @SuppressWarnings("unchecked")
   public <TransformT extends PTransform<?, ?>>
       TransformEvaluator<TransformT> getTransformEvaluator(Class<TransformT> transformClass) {
     TransformEvaluator<TransformT> transformEvaluator =
@@ -160,6 +177,7 @@ public class DirectPipelineRunner
    */
   public static DirectPipelineRunner createForTest() {
     DirectPipelineOptions options = PipelineOptionsFactory.as(DirectPipelineOptions.class);
+    options.setStableUniqueNames(CheckEnabled.ERROR);
     options.setGcpCredential(new TestCredential());
     return new DirectPipelineRunner(options);
   }
@@ -208,7 +226,6 @@ public class DirectPipelineRunner
   }
 
   @Override
-  @SuppressWarnings("unchecked")
   public <OutputT extends POutput, InputT extends PInput> OutputT apply(
       PTransform<InputT, OutputT> transform, InputT input) {
     if (transform instanceof Combine.GroupedValues) {
@@ -223,7 +240,7 @@ public class DirectPipelineRunner
       PCollection<KV<K, Iterable<InputT>>> input) {
 
     PCollection<KV<K, OutputT>> output = input
-        .apply(ParDo.of(TestCombineDoFn.create(transform, input, testSerializability)));
+        .apply(ParDo.of(TestCombineDoFn.create(transform, input, testSerializability, rand)));
 
     try {
       output.setCoder(transform.getDefaultOutputCoder(input));
@@ -234,54 +251,50 @@ public class DirectPipelineRunner
   }
 
   /**
-   * The implementation may split the {@link KeyedCombineFn} into ADD, MERGE
-   * and EXTRACT phases (see {@link com.google.cloud.dataflow.sdk.runners.worker.CombineValuesFn}).
-   * In order to emulate
-   * this for the {@link DirectPipelineRunner} and provide an experience
-   * closer to the service, go through heavy seralizability checks for
-   * the equivalent of the results of the ADD phase, but after the
-   * {@link com.google.cloud.dataflow.sdk.transforms.GroupByKey}
-   * shuffle, and the MERGE phase. Doing these checks
-   * ensure that not only is the accumulator coder serializable, but
-   * the accumulator coder can actually serialize the data in
-   * question.
+   * The implementation may split the {@link KeyedCombineFn} into ADD, MERGE and EXTRACT phases (
+   * see {@code com.google.cloud.dataflow.sdk.runners.worker.CombineValuesFn}). In order to emulate
+   * this for the {@link DirectPipelineRunner} and provide an experience closer to the service, go
+   * through heavy serializability checks for the equivalent of the results of the ADD phase, but
+   * after the {@link com.google.cloud.dataflow.sdk.transforms.GroupByKey} shuffle, and the MERGE
+   * phase. Doing these checks ensure that not only is the accumulator coder serializable, but
+   * the accumulator coder can actually serialize the data in question.
    */
-  // @VisibleForTesting
-  @SuppressWarnings("serial")
   public static class TestCombineDoFn<K, InputT, AccumT, OutputT>
       extends DoFn<KV<K, Iterable<InputT>>, KV<K, OutputT>> {
+    private static final long serialVersionUID = 0L;
     private final KeyedCombineFn<? super K, ? super InputT, AccumT, OutputT> fn;
     private final Coder<AccumT> accumCoder;
     private final boolean testSerializability;
+    private final Random rand;
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     public static <K, InputT, AccumT, OutputT> TestCombineDoFn<K, InputT, AccumT, OutputT> create(
         Combine.GroupedValues<K, InputT, OutputT> transform,
         PCollection<KV<K, Iterable<InputT>>> input,
-        boolean testSerializability) {
+        boolean testSerializability,
+        Random rand) {
 
-      Coder<AccumT> accumCoder;
-      try {
-        accumCoder = (Coder<AccumT>) transform.getAccumulatorCoder(
-            input.getPipeline().getCoderRegistry(), input);
-      } catch (CannotProvideCoderException exc) {
-        throw new IllegalArgumentException(
-          "Transform " + transform + " failed to provide a coder for its accumulator type");
-      }
+      AppliedCombineFn<? super K, ? super InputT, ?, OutputT> fn = transform.getAppliedFn(
+            input.getPipeline().getCoderRegistry(), input.getCoder());
 
       return new TestCombineDoFn(
-          transform.getFn(),
-          accumCoder,
-          testSerializability);
+          fn.getFn(),
+          fn.getAccumulatorCoder(),
+          testSerializability,
+          rand);
     }
 
     public TestCombineDoFn(
         KeyedCombineFn<? super K, ? super InputT, AccumT, OutputT> fn,
         Coder<AccumT> accumCoder,
-        boolean testSerializability) {
+        boolean testSerializability,
+        Random rand) {
       this.fn = fn;
       this.accumCoder = accumCoder;
       this.testSerializability = testSerializability;
+      this.rand = rand;
+
+      // Check that this does not crash, specifically to catch anonymous CustomCoder subclasses.
+      this.accumCoder.getEncodingId();
     }
 
     @Override
@@ -290,7 +303,7 @@ public class DirectPipelineRunner
       Iterable<InputT> values = c.element().getValue();
       List<AccumT> groupedPostShuffle =
           ensureSerializableByCoder(ListCoder.of(accumCoder),
-              addInputsRandomly(fn, key, values, new Random()),
+              addInputsRandomly(fn, key, values, rand),
               "After addInputs of KeyedCombineFn " + fn.toString());
       AccumT merged =
           ensureSerializableByCoder(accumCoder,
@@ -301,8 +314,11 @@ public class DirectPipelineRunner
       c.output(KV.of(key, fn.extractOutput(key, merged)));
     }
 
-    // Create a random list of accumulators from the given list of values
-    // @VisibleForTesting
+    /**
+     * Create a random list of accumulators from the given list of values.
+     *
+     * <p>Visible for testing purposes only.
+     */
     public static <K, AccumT, InputT> List<AccumT> addInputsRandomly(
         KeyedCombineFn<? super K, ? super InputT, AccumT, ?> fn,
         K key,
@@ -351,7 +367,7 @@ public class DirectPipelineRunner
   public EvaluationResults run(Pipeline pipeline) {
     LOG.info("Executing pipeline using the DirectPipelineRunner.");
 
-    Evaluator evaluator = new Evaluator();
+    Evaluator evaluator = new Evaluator(rand);
     evaluator.run(pipeline);
 
     // Log all counter values for debugging purposes.
@@ -424,8 +440,7 @@ public class DirectPipelineRunner
      * with this value set.  The key is the last key grouped by in the chain of
      * productions that produced this element.
      * These keys are used internally by {@link DirectPipelineRunner} for keeping
-     * {@link com.google.cloud.dataflow.sdk.transforms.DoFn.KeyedState} separate
-     * across keys.
+     * persisted state separate across keys.
      */
     public ValueWithMetadata<V> withKey(Object key) {
       return new ValueWithMetadata<>(windowedValue, key);
@@ -613,20 +628,36 @@ public class DirectPipelineRunner
   /////////////////////////////////////////////////////////////////////////////
 
   class Evaluator implements PipelineVisitor, EvaluationContext {
-    private final Map<PTransform, String> stepNames = new HashMap<>();
+    /**
+     * A map from PTransform to the step name of that transform. This is the internal name for the
+     * transform (e.g. "s2").
+     */
+    private final Map<PTransform<?, ?>, String> stepNames = new HashMap<>();
     private final Map<PValue, Object> store = new HashMap<>();
     private final CounterSet counters = new CounterSet();
     private AppliedPTransform<?, ?, ?> currentTransform;
 
-    // Use a random number generator with a fixed seed, so execution
-    // using this evaluator is deterministic.  (If the user-defined
-    // functions, transforms, and coders are deterministic.)
-    Random rand = new Random(0);
+    private Map<Aggregator<?, ?>, Collection<PTransform<?, ?>>> aggregatorSteps = null;
 
-    public Evaluator() {}
+    /**
+     * A map from PTransform to the full name of that transform. This is the user name of the
+     * transform (e.g. "RemoveDuplicates/Combine/GroupByKey").
+     */
+    private final Map<PTransform<?, ?>, String> fullNames = new HashMap<>();
+
+    private Random rand;
+
+    public Evaluator() {
+      this(new Random());
+    }
+
+    public Evaluator(Random rand) {
+      this.rand = rand;
+    }
 
     public void run(Pipeline pipeline) {
       pipeline.traverseTopologically(this);
+      aggregatorSteps = new AggregatorPipelineExtractor(pipeline).getAggregatorSteps();
     }
 
     @Override
@@ -636,16 +667,16 @@ public class DirectPipelineRunner
 
     @Override
     public <InputT extends PInput> InputT getInput(PTransform<InputT, ?> transform) {
-      checkArgument(currentTransform != null && currentTransform.transform == transform,
+      checkArgument(currentTransform != null && currentTransform.getTransform() == transform,
           "can only be called with current transform");
-      return (InputT) currentTransform.input;
+      return (InputT) currentTransform.getInput();
     }
 
     @Override
     public <OutputT extends POutput> OutputT getOutput(PTransform<?, OutputT> transform) {
-      checkArgument(currentTransform != null && currentTransform.transform == transform,
+      checkArgument(currentTransform != null && currentTransform.getTransform() == transform,
           "can only be called with current transform");
-      return (OutputT) currentTransform.output;
+      return (OutputT) currentTransform.getOutput();
     }
 
     @Override
@@ -656,10 +687,10 @@ public class DirectPipelineRunner
     public void leaveCompositeTransform(TransformTreeNode node) {
     }
 
-    @SuppressWarnings("unchecked")
     @Override
     public void visitTransform(TransformTreeNode node) {
       PTransform<?, ?> transform = node.getTransform();
+      fullNames.put(transform, node.getFullName());
       TransformEvaluator evaluator =
           getTransformEvaluator(transform.getClass());
       if (evaluator == null) {
@@ -668,7 +699,7 @@ public class DirectPipelineRunner
       }
       LOG.debug("Evaluating {}", transform);
       currentTransform = AppliedPTransform.of(
-          node.getInput(), node.getOutput(), (PTransform) transform);
+          node.getFullName(), node.getInput(), node.getOutput(), (PTransform) transform);
       evaluator.evaluate(transform, this);
       currentTransform = null;
     }
@@ -789,7 +820,6 @@ public class DirectPipelineRunner
 
     @Override
     public <T> List<ValueWithMetadata<T>> getPCollectionValuesWithMetadata(PCollection<T> pc) {
-      @SuppressWarnings("unchecked")
       List<ValueWithMetadata<T>> elements = (List<ValueWithMetadata<T>>) getPValue(pc);
       elements = randomizeIfUnordered(elements, false /* not inPlaceAllowed */);
       LOG.debug("Getting {} = {}", pc, elements);
@@ -812,7 +842,6 @@ public class DirectPipelineRunner
      */
     @Override
     public <T, WindowedT> Iterable<WindowedValue<?>> getPCollectionView(PCollectionView<T> view) {
-      @SuppressWarnings("unchecked")
       Iterable<WindowedValue<?>> value = (Iterable<WindowedValue<?>>) getPValue(view);
       LOG.debug("Getting {} = {}", view, value);
       return value;
@@ -912,8 +941,23 @@ public class DirectPipelineRunner
     public State getState() {
       return State.DONE;
     }
-  }
 
+    @Override
+    public <T> AggregatorValues<T> getAggregatorValues(Aggregator<?, T> aggregator) {
+      Map<String, T> stepValues = new HashMap<>();
+      for (PTransform<?, ?> step : aggregatorSteps.get(aggregator)) {
+        String stepName = String.format("user-%s-%s", stepNames.get(step), aggregator.getName());
+        String fullName = fullNames.get(step);
+        Counter<?> counter = counters.getExistingCounter(stepName);
+        if (counter == null) {
+          throw new IllegalArgumentException(
+              "Aggregator " + aggregator + " is not used in this pipeline");
+        }
+        stepValues.put(fullName, (T) counter.getAggregate());
+      }
+      return new MapAggregatorValues<>(stepValues);
+    }
+  }
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -927,6 +971,15 @@ public class DirectPipelineRunner
     this.options = options;
     // (Re-)register standard IO factories. Clobbers any prior credentials.
     IOChannelUtils.registerStandardIOFactories(options);
+    long randomSeed;
+    if (options.getDirectPipelineRunnerRandomSeed() != null) {
+      randomSeed = options.getDirectPipelineRunnerRandomSeed();
+    } else {
+      randomSeed = new Random().nextLong();
+    }
+
+    LOG.debug("DirectPipelineRunner using random seed {}.", randomSeed);
+    rand = new Random(randomSeed);
   }
 
   public DirectPipelineOptions getPipelineOptions() {

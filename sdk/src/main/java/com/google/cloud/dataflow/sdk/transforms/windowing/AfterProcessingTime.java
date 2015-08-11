@@ -17,13 +17,16 @@
 package com.google.cloud.dataflow.sdk.transforms.windowing;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
-import com.google.cloud.dataflow.sdk.coders.InstantCoder;
 import com.google.cloud.dataflow.sdk.transforms.SerializableFunction;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
+import com.google.cloud.dataflow.sdk.util.ReduceFn.MergingStateContext;
+import com.google.cloud.dataflow.sdk.util.ReduceFn.StateContext;
+import com.google.cloud.dataflow.sdk.util.TimeDomain;
+import com.google.cloud.dataflow.sdk.util.state.CombiningValueState;
 
 import org.joda.time.Instant;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * {@code AfterProcessingTime} triggers fire based on the current processing time. They operate in
@@ -32,13 +35,9 @@ import java.util.List;
  * @param <W> {@link BoundedWindow} subclass used to represent the windows used
  */
 @Experimental(Experimental.Kind.TRIGGER)
-public class AfterProcessingTime<W extends BoundedWindow>
-    extends TimeTrigger<W, AfterProcessingTime<W>> {
+public class AfterProcessingTime<W extends BoundedWindow> extends TimeTrigger<W> {
 
   private static final long serialVersionUID = 0L;
-
-  private static final CodedTupleTag<Instant> DELAYED_UNTIL_TAG =
-      CodedTupleTag.of("delayed-until", InstantCoder.of());
 
   private AfterProcessingTime(List<SerializableFunction<Instant, Instant>> transforms) {
     super(transforms);
@@ -59,56 +58,109 @@ public class AfterProcessingTime<W extends BoundedWindow>
   }
 
   @Override
-  public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e)
+  public TriggerResult onElement(OnElementContext c)
       throws Exception {
-    Instant delayUntil = c.lookup(DELAYED_UNTIL_TAG, e.window());
+    CombiningValueState<Instant, Instant> delayUntilState = c.state().access(DELAYED_UNTIL_TAG);
+    Instant delayUntil = delayUntilState.get().read();
     if (delayUntil == null) {
-      delayUntil = computeTargetTimestamp(c.currentProcessingTime());
-      c.setTimer(e.window(), delayUntil, TimeDomain.PROCESSING_TIME);
-      c.store(DELAYED_UNTIL_TAG, e.window(), delayUntil);
+      delayUntil = computeTargetTimestamp(c.timers().currentProcessingTime());
+      c.timers().setTimer(delayUntil, TimeDomain.PROCESSING_TIME);
+      delayUntilState.add(delayUntil);
     }
 
     return TriggerResult.CONTINUE;
   }
 
   @Override
-  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+  public MergeResult onMerge(OnMergeContext c) throws Exception {
     // If the processing time timer has fired in any of the windows being merged, it would have
     // fired at the same point if it had been added to the merged window. So, we just report it as
     // finished.
-    if (e.finishedInAnyMergingWindow(c.current())) {
+    if (c.trigger().finishedInAnyMergingWindow()) {
       return MergeResult.ALREADY_FINISHED;
     }
 
-    // Otherwise, determine the earliest delay for all of the windows, and delay to that point.
-    Instant earliestTimer = BoundedWindow.TIMESTAMP_MAX_VALUE;
-    for (Instant delayedUntil : c.lookup(DELAYED_UNTIL_TAG, e.oldWindows()).values()) {
-      if (delayedUntil != null && delayedUntil.isBefore(earliestTimer)) {
-        earliestTimer = delayedUntil;
-      }
-    }
-
+    // Determine the earliest point across all the windows, and delay to that.
+    CombiningValueState<Instant, Instant> mergingDelays =
+        c.state().accessAcrossMergingWindows(DELAYED_UNTIL_TAG);
+    Instant earliestTimer = mergingDelays.get().read();
     if (earliestTimer != null) {
-      c.store(DELAYED_UNTIL_TAG, e.newWindow(), earliestTimer);
-      c.setTimer(e.newWindow(), earliestTimer, TimeDomain.PROCESSING_TIME);
+      mergingDelays.clear();
+      mergingDelays.add(earliestTimer);
+      c.timers().setTimer(earliestTimer, TimeDomain.PROCESSING_TIME);
     }
 
     return MergeResult.CONTINUE;
   }
 
   @Override
-  public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) throws Exception {
+  public TriggerResult onTimer(OnTimerContext c) throws Exception {
+    if (c.timeDomain() != TimeDomain.PROCESSING_TIME) {
+      return TriggerResult.CONTINUE;
+    }
+
+    Instant delayedUntil = c.state().access(DELAYED_UNTIL_TAG).get().read();
+    if (delayedUntil == null || delayedUntil.isAfter(c.timestamp())) {
+      return TriggerResult.CONTINUE;
+    }
+
     return TriggerResult.FIRE_AND_FINISH;
   }
 
   @Override
-  public void clear(TriggerContext<W> c, W window) throws Exception {
-    c.remove(DELAYED_UNTIL_TAG, window);
-    c.deleteTimer(window, TimeDomain.PROCESSING_TIME);
+  public void prefetchOnElement(StateContext state) {
+    state.access(DELAYED_UNTIL_TAG).get();
   }
 
   @Override
-  public Instant getWatermarkCutoff(W window) {
+  public void prefetchOnMerge(MergingStateContext state) {
+    state.accessAcrossMergingWindows(DELAYED_UNTIL_TAG).get();
+  }
+
+  @Override
+  public void prefetchOnTimer(StateContext state) {
+    state.access(DELAYED_UNTIL_TAG).get();
+  }
+
+  @Override
+  public void clear(TriggerContext c) throws Exception {
+    CombiningValueState<Instant, Instant> delayed = c.state().access(DELAYED_UNTIL_TAG);
+    Instant timestamp = delayed.get().read();
+    delayed.clear();
+    if (timestamp != null) {
+      c.timers().deleteTimer(timestamp, TimeDomain.PROCESSING_TIME);
+    }
+  }
+
+  @Override
+  public Instant getWatermarkThatGuaranteesFiring(W window) {
     return BoundedWindow.TIMESTAMP_MAX_VALUE;
+  }
+
+  @Override
+  protected Trigger<W> getContinuationTrigger(List<Trigger<W>> continuationTriggers) {
+    return new AfterSynchronizedProcessingTime<W>();
+  }
+
+  @Override
+  public String toString() {
+    return "AfterProcessingTime.pastFirstElementInPane(" + timestampMappers + ")";
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof AfterProcessingTime)) {
+      return false;
+    }
+    AfterProcessingTime<?> that = (AfterProcessingTime<?>) obj;
+    return Objects.equals(this.timestampMappers, that.timestampMappers);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(getClass(), this.timestampMappers);
   }
 }

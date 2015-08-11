@@ -38,7 +38,7 @@ public class AfterFirst<W extends BoundedWindow> extends OnceTrigger<W> {
 
   private static final long serialVersionUID = 0L;
 
-  private AfterFirst(List<Trigger<W>> subTriggers) {
+  AfterFirst(List<Trigger<W>> subTriggers) {
     super(subTriggers);
     Preconditions.checkArgument(subTriggers.size() > 1);
   }
@@ -50,9 +50,9 @@ public class AfterFirst<W extends BoundedWindow> extends OnceTrigger<W> {
   }
 
   @Override
-  public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e) throws Exception {
-    for (ExecutableTrigger<W> subTrigger : c.subTriggers()) {
-      if (subTrigger.invokeElement(c, e).isFire()) {
+  public TriggerResult onElement(OnElementContext c) throws Exception {
+    for (ExecutableTrigger<W> subTrigger : c.trigger().subTriggers()) {
+      if (subTrigger.invokeElement(c).isFire()) {
         return TriggerResult.FIRE_AND_FINISH;
       }
     }
@@ -61,13 +61,13 @@ public class AfterFirst<W extends BoundedWindow> extends OnceTrigger<W> {
   }
 
   @Override
-  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+  public MergeResult onMerge(OnMergeContext c) throws Exception {
     // FINISH if merging returns FINISH for any sub-trigger.
     // FIRE_AND_FINISH if merging returns FIRE or FIRE_AND_FINISH for at least one sub-trigger.
     // CONTINUE otherwise
     boolean fired = false;
-    for (ExecutableTrigger<W> subTrigger : c.subTriggers()) {
-      MergeResult mergeResult = subTrigger.invokeMerge(c, e);
+    for (ExecutableTrigger<W> subTrigger : c.trigger().subTriggers()) {
+      MergeResult mergeResult = subTrigger.invokeMerge(c);
       if (MergeResult.ALREADY_FINISHED.equals(mergeResult)) {
         return MergeResult.ALREADY_FINISHED;
       } else if (mergeResult.isFire()) {
@@ -78,27 +78,30 @@ public class AfterFirst<W extends BoundedWindow> extends OnceTrigger<W> {
   }
 
   @Override
-  public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) throws Exception {
-    if (c.isCurrentTrigger(e.getDestinationIndex())) {
-      throw new IllegalStateException("AfterFirst shouldn't receive any timers.");
+  public TriggerResult onTimer(OnTimerContext c) throws Exception {
+    for (ExecutableTrigger<W> subTrigger : c.trigger().subTriggers()) {
+      if (subTrigger.invokeTimer(c).isFire()) {
+        return TriggerResult.FIRE_AND_FINISH;
+      }
     }
-
-    ExecutableTrigger<W> subTrigger = c.nextStepTowards(e.getDestinationIndex());
-    return subTrigger.invokeTimer(c, e).isFire()
-        ? TriggerResult.FIRE_AND_FINISH
-        : TriggerResult.CONTINUE;
+    return TriggerResult.CONTINUE;
   }
 
   @Override
-  public Instant getWatermarkCutoff(W window) {
+  public Instant getWatermarkThatGuaranteesFiring(W window) {
     // This trigger will fire after the earliest of its sub-triggers.
     Instant deadline = BoundedWindow.TIMESTAMP_MAX_VALUE;
     for (Trigger<W> subTrigger : subTriggers) {
-      Instant subDeadline = subTrigger.getWatermarkCutoff(window);
+      Instant subDeadline = subTrigger.getWatermarkThatGuaranteesFiring(window);
       if (deadline.isAfter(subDeadline)) {
         deadline = subDeadline;
       }
     }
     return deadline;
+  }
+
+  @Override
+  public OnceTrigger<W> getContinuationTrigger(List<Trigger<W>> continuationTriggers) {
+    return new AfterFirst<W>(continuationTriggers);
   }
 }

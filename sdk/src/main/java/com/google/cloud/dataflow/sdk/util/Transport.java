@@ -17,9 +17,6 @@
 package com.google.cloud.dataflow.sdk.util;
 
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
-import com.google.api.client.googleapis.services.AbstractGoogleClient.Builder;
-import com.google.api.client.googleapis.services.AbstractGoogleClientRequest;
-import com.google.api.client.googleapis.services.GoogleClientRequestInitializer;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.jackson2.JacksonFactory;
@@ -31,14 +28,12 @@ import com.google.cloud.dataflow.sdk.options.BigQueryOptions;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineDebugOptions;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
 import com.google.cloud.dataflow.sdk.options.GcsOptions;
-import com.google.cloud.dataflow.sdk.options.StreamingOptions;
-import com.google.common.base.MoreObjects;
+import com.google.common.collect.ImmutableList;
 
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.GeneralSecurityException;
-import java.util.Arrays;
 
 /**
  * Helpers for cloud communication.
@@ -70,61 +65,78 @@ public class Transport {
     return SingletonHelper.JSON_FACTORY;
   }
 
+  private static class ApiComponents {
+    public String rootUrl;
+    public String servicePath;
+
+    public ApiComponents(String root, String path) {
+      this.rootUrl = root;
+      this.servicePath = path;
+    }
+  }
+
+  private static ApiComponents apiComponentsFromUrl(String urlString) {
+    try {
+      URL url = new URL(urlString);
+      String rootUrl = url.getProtocol() + "://" + url.getHost() +
+          (url.getPort() > 0 ? ":" + url.getPort() : "");
+      return new ApiComponents(rootUrl, url.getPath());
+    } catch (MalformedURLException e) {
+      throw new RuntimeException("Invalid URL: " + urlString);
+    }
+  }
+
   /**
    * Returns a BigQuery client builder.
-   * <p>
-   * Note: this client's endpoint is <b>not</b> modified by the
+   *
+   * <p>Note: this client's endpoint is <b>not</b> modified by the
    * {@link DataflowPipelineDebugOptions#getApiRootUrl()} option.
    */
   public static Bigquery.Builder
       newBigQueryClient(BigQueryOptions options) {
     return new Bigquery.Builder(getTransport(), getJsonFactory(),
-        new RetryHttpRequestInitializer(options.getGcpCredential()))
+        // Do not log 404. It clutters the output and is possibly even required by the caller.
+        new RetryHttpRequestInitializer(options.getGcpCredential(), ImmutableList.of(404)))
         .setApplicationName(options.getAppName())
-        .setGoogleClientRequestInitializer(
-            new ChainedGoogleClientRequestInitializer(options.getGoogleApiTrace()));
+        .setGoogleClientRequestInitializer(options.getGoogleApiTrace());
   }
 
   /**
    * Returns a Pubsub client builder.
-   * <p>
-   * Note: this client's endpoint is <b>not</b> modified by the
+   *
+   * <p>Note: this client's endpoint is <b>not</b> modified by the
    * {@link DataflowPipelineDebugOptions#getApiRootUrl()} option.
    */
   public static Pubsub.Builder
-      newPubsubClient(StreamingOptions options) {
+      newPubsubClient(DataflowPipelineOptions options) {
     return new Pubsub.Builder(getTransport(), getJsonFactory(),
-        new RetryHttpRequestInitializer(options.getGcpCredential()))
+        // Do not log 404. It clutters the output and is possibly even required by the caller.
+        new RetryHttpRequestInitializer(options.getGcpCredential(), ImmutableList.of(404)))
+        .setRootUrl(options.getPubsubRootUrl())
         .setApplicationName(options.getAppName())
-        .setGoogleClientRequestInitializer(
-            new ChainedGoogleClientRequestInitializer(options.getGoogleApiTrace()));
+        .setGoogleClientRequestInitializer(options.getGoogleApiTrace());
   }
 
   /**
    * Returns a Google Cloud Dataflow client builder.
    */
   public static Dataflow.Builder newDataflowClient(DataflowPipelineOptions options) {
-    String rootUrl = options.getApiRootUrl();
     String servicePath = options.getDataflowEndpoint();
+    ApiComponents components;
     if (servicePath.contains("://")) {
-      try {
-        URL url = new URL(servicePath);
-        rootUrl = url.getProtocol() + "://" + url.getHost() +
-            (url.getPort() > 0 ? ":" + url.getPort() : "");
-        servicePath = url.getPath();
-      } catch (MalformedURLException e) {
-        throw new RuntimeException("Invalid URL: " + servicePath);
-      }
+      components = apiComponentsFromUrl(servicePath);
+    } else {
+      components = new ApiComponents(options.getApiRootUrl(), servicePath);
     }
 
     return new Dataflow.Builder(getTransport(),
         getJsonFactory(),
-        new RetryHttpRequestInitializer(options.getGcpCredential()))
+        // Do not log 404. It clutters the output and is possibly even required by the caller.
+        new RetryHttpRequestInitializer(options.getGcpCredential(), ImmutableList.of(404)))
         .setApplicationName(options.getAppName())
-        .setRootUrl(rootUrl)
-        .setServicePath(servicePath)
-        .setGoogleClientRequestInitializer(
-            new ChainedGoogleClientRequestInitializer(options.getGoogleApiTrace()));
+        .setRootUrl(components.rootUrl)
+        .setServicePath(components.servicePath)
+        .setGoogleClientRequestInitializer(options.getGoogleApiTrace());
   }
 
   /**
@@ -135,47 +147,30 @@ public class Transport {
       newRawDataflowClient(DataflowPipelineOptions options) {
     return newDataflowClient(options)
         .setHttpRequestInitializer(options.getGcpCredential())
-        .setGoogleClientRequestInitializer(
-            new ChainedGoogleClientRequestInitializer(options.getGoogleApiTrace()));
+        .setGoogleClientRequestInitializer(options.getGoogleApiTrace());
   }
 
   /**
    * Returns a Cloud Storage client builder.
-   * <p>
-   * Note: this client's endpoint is <b>not</b> modified by the
+   *
+   * <p>Note: this client's endpoint is <b>not</b> modified by the
    * {@link DataflowPipelineDebugOptions#getApiRootUrl()} option.
    */
   public static Storage.Builder
       newStorageClient(GcsOptions options) {
-    return new Storage.Builder(getTransport(), getJsonFactory(),
+    String servicePath = options.getGcsEndpoint();
+    Storage.Builder storageBuilder = new Storage.Builder(getTransport(), getJsonFactory(),
         new RetryHttpRequestInitializer(
             // Do not log the code 404. Code up the stack will deal with 404's if needed, and
             // logging it by default clutters the output during file staging.
-            options.getGcpCredential(), Arrays.asList(404)))
+            options.getGcpCredential(), ImmutableList.of(404)))
         .setApplicationName(options.getAppName())
-        .setGoogleClientRequestInitializer(
-            new ChainedGoogleClientRequestInitializer(options.getGoogleApiTrace()));
-  }
-
-  /**
-   * Allows multiple {@link GoogleClientRequestInitializer}s to be chained together for use with
-   * {@link Builder}.
-   */
-  private static final class ChainedGoogleClientRequestInitializer
-      implements GoogleClientRequestInitializer {
-    private static final GoogleClientRequestInitializer[] EMPTY_ARRAY =
-        new GoogleClientRequestInitializer[]{};
-    private final GoogleClientRequestInitializer[] chain;
-
-    private ChainedGoogleClientRequestInitializer(GoogleClientRequestInitializer... initializer) {
-      this.chain = MoreObjects.firstNonNull(initializer, EMPTY_ARRAY);
+        .setGoogleClientRequestInitializer(options.getGoogleApiTrace());
+    if (servicePath != null) {
+      ApiComponents components = apiComponentsFromUrl(servicePath);
+      storageBuilder.setRootUrl(components.rootUrl);
+      storageBuilder.setServicePath(components.servicePath);
     }
-
-    @Override
-    public void initialize(AbstractGoogleClientRequest<?> request) throws IOException {
-      for (GoogleClientRequestInitializer initializer : chain) {
-        initializer.initialize(request);
-      }
-    }
+    return storageBuilder;
   }
 }

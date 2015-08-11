@@ -191,6 +191,12 @@ public class ApproximateUniqueTest implements Serializable {
     }
   }
 
+  @Test
+  public void testApproximateUniqueGetName() {
+    assertEquals("ApproximateUnique.PerKey", ApproximateUnique.<Long, Long>perKey(16).getName());
+    assertEquals("ApproximateUnique.Globally", ApproximateUnique.<Integer>globally(16).getName());
+  }
+
   /**
    * Applies {@code ApproximateUnique(sampleSize)} verifying that the estimation
    * error falls within the maximum allowed error of {@code 2/sqrt(sampleSize)}.
@@ -234,7 +240,7 @@ public class ApproximateUniqueTest implements Serializable {
       file.addAll(page);
     }
     assert file.size() == pages * page.size();
-    PCollection<String> words = TestUtils.createStrings(p, file);
+    PCollection<String> words = p.apply(Create.of(file));
     return words;
   }
 

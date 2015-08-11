@@ -17,8 +17,11 @@
 package com.google.cloud.dataflow.sdk.transforms.windowing;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
+import com.google.cloud.dataflow.sdk.util.TimeDomain;
 
 import org.joda.time.Instant;
+
+import java.util.List;
 
 /**
  * A trigger that is equivalent to {@code Repeatedly.forever(AfterWatermark.pastEndOfWindow())}.
@@ -43,29 +46,29 @@ public class DefaultTrigger<W extends BoundedWindow> extends Trigger<W>{
   }
 
   @Override
-  public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e) throws Exception {
-    c.setTimer(e.window(), e.window().maxTimestamp(), TimeDomain.EVENT_TIME);
+  public TriggerResult onElement(OnElementContext c) throws Exception {
+    c.timers().setTimer(c.window().maxTimestamp(), TimeDomain.EVENT_TIME);
     return TriggerResult.CONTINUE;
   }
 
   @Override
-  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
-    c.setTimer(e.newWindow(), e.newWindow().maxTimestamp(), TimeDomain.EVENT_TIME);
+  public MergeResult onMerge(OnMergeContext c) throws Exception {
+    c.timers().setTimer(c.window().maxTimestamp(), TimeDomain.EVENT_TIME);
     return MergeResult.CONTINUE;
   }
 
   @Override
-  public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) throws Exception {
+  public TriggerResult onTimer(OnTimerContext c) throws Exception {
     return TriggerResult.FIRE;
   }
 
   @Override
-  public void clear(TriggerContext<W> c, W window) throws Exception {
-    c.deleteTimer(window, TimeDomain.EVENT_TIME);
+  public void clear(TriggerContext c) throws Exception {
+    c.timers().deleteTimer(c.window().maxTimestamp(), TimeDomain.EVENT_TIME);
   }
 
   @Override
-  public Instant getWatermarkCutoff(W window) {
+  public Instant getWatermarkThatGuaranteesFiring(W window) {
     return window.maxTimestamp();
   }
 
@@ -73,5 +76,10 @@ public class DefaultTrigger<W extends BoundedWindow> extends Trigger<W>{
   public boolean isCompatible(Trigger<?> other) {
     // Semantically, all default triggers are identical
     return other instanceof DefaultTrigger;
+  }
+
+  @Override
+  public Trigger<W> getContinuationTrigger(List<Trigger<W>> continuationTriggers) {
+    return this;
   }
 }

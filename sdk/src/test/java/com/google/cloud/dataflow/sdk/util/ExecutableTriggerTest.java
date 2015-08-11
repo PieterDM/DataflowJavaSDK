@@ -29,6 +29,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Tests for {@link ExecutableTrigger}.
@@ -96,38 +97,41 @@ public class ExecutableTriggerTest {
 
     @Override
     public TriggerResult onElement(
-        TriggerContext<IntervalWindow> c, OnElementEvent<IntervalWindow> e) throws Exception {
+        OnElementContext c) throws Exception {
       return TriggerResult.CONTINUE;
     }
 
     @Override
-    public MergeResult onMerge(TriggerContext<IntervalWindow> c, OnMergeEvent<IntervalWindow> e)
+    public MergeResult onMerge(OnMergeContext c)
         throws Exception {
       return MergeResult.CONTINUE;
     }
 
     @Override
     public TriggerResult onTimer(
-        TriggerContext<IntervalWindow> c,
-        OnTimerEvent<IntervalWindow> e)
+        OnTimerContext c)
         throws Exception {
       return TriggerResult.CONTINUE;
     }
 
     @Override
-    public void clear(
-        TriggerContext<IntervalWindow> c,
-        IntervalWindow window) throws Exception {
+    public void clear(TriggerContext c) throws Exception {
     }
 
     @Override
-    public Instant getWatermarkCutoff(IntervalWindow window) {
+    public Instant getWatermarkThatGuaranteesFiring(IntervalWindow window) {
       return BoundedWindow.TIMESTAMP_MAX_VALUE;
     }
 
     @Override
     public boolean isCompatible(Trigger<?> other) {
       return false;
+    }
+
+    @Override
+    public Trigger<IntervalWindow> getContinuationTrigger(
+        List<Trigger<IntervalWindow>> continuationTriggers) {
+      return this;
     }
   }
 }

@@ -18,9 +18,6 @@ package com.google.cloud.dataflow.sdk.options;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 /**
  * Options for controlling Cloud Debugger.
  */
@@ -29,38 +26,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public interface CloudDebuggerOptions {
 
   /**
-   * User defined application version. Cloud Debugger uses it to group all
-   * running debugged processes. Version should be different if users have
-   * multiple parallel runs of the same application with different inputs.
+   * Whether to enable the Cloud Debugger snapshot agent for the current job.
    */
-  @Description("User defined application version. Cloud Debugger uses it to group all "
-      + "running debugged processes. cdbgVersion should be different if users have "
-      + "multiple parallel runs of the same application with different inputs.")
-  String getCdbgVersion();
-  void setCdbgVersion(String value);
-
-  /**
-   * Return a JSON string for the Debugger metadata item.
-   */
-  public static class DebuggerConfig {
-    private String version;
-    public String getVersion() {
-      return version;
-    }
-    public void setVersion(String version) {
-      this.version = version;
-    }
-
-    /**
-     * Compute the string of Debugger config.
-     * @return JSON string of Debugger config metadata.
-     * @throws JsonProcessingException when converting to Json fails.
-     */
-    public String computeMetadataString() throws JsonProcessingException {
-      ObjectMapper mapper = new ObjectMapper();
-      String debuggerConfigString = mapper.writeValueAsString(this);
-      return debuggerConfigString;
-    }
-  }
+  @Description("Whether to enable the Cloud Debugger snapshot agent for the current job.")
+  boolean getEnableCloudDebugger();
+  void setEnableCloudDebugger(boolean enabled);
 }
 

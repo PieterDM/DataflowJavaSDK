@@ -18,11 +18,12 @@ package com.google.cloud.dataflow.sdk.testing;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.PipelineResult;
+import com.google.cloud.dataflow.sdk.options.ApplicationNameOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
-import com.google.cloud.dataflow.sdk.runners.DataflowPipelineRunner;
+import com.google.cloud.dataflow.sdk.options.PipelineOptions.CheckEnabled;
+import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
 import com.google.cloud.dataflow.sdk.runners.PipelineRunner;
-import com.google.cloud.dataflow.sdk.util.MonitoringUtil;
 import com.google.common.base.Optional;
 import com.google.common.collect.Iterators;
 
@@ -79,9 +80,12 @@ public class TestPipeline extends Pipeline {
     if (Boolean.parseBoolean(System.getProperty("runIntegrationTestOnService"))) {
       TestDataflowPipelineOptions options = getPipelineOptions();
       LOG.info("Using passed in options: " + options);
-      return new TestPipeline(createRunner(options), options);
+      options.setStableUniqueNames(CheckEnabled.ERROR);
+      return new TestPipeline(TestDataflowPipelineRunner.fromOptions(options), options);
     } else {
       DirectPipelineRunner directRunner = DirectPipelineRunner.createForTest();
+      directRunner.getPipelineOptions().setAppName(getAppName());
+      directRunner.getPipelineOptions().setStableUniqueNames(CheckEnabled.ERROR);
       return new TestPipeline(directRunner, directRunner.getPipelineOptions());
     }
   }
@@ -108,17 +112,9 @@ public class TestPipeline extends Pipeline {
     }
   }
 
-  /**
-   * Creates and returns a TestDataflowPipelineRunner based on
-   * configuration via system properties.
-   */
-  private static TestDataflowPipelineRunner createRunner(
-      TestDataflowPipelineOptions options) {
-
-    DataflowPipelineRunner dataflowRunner = DataflowPipelineRunner
-        .fromOptions(options);
-    return new TestDataflowPipelineRunner(dataflowRunner,
-        new MonitoringUtil.PrintHandler(options.getJobMessageOutput()));
+  @Override
+  public String toString() {
+    return "TestPipeline#" + getOptions().as(ApplicationNameOptions.class).getAppName();
   }
 
   /**
@@ -126,8 +122,8 @@ public class TestPipeline extends Pipeline {
    */
   static TestDataflowPipelineOptions getPipelineOptions() {
     try {
-      TestDataflowPipelineOptions options = MAPPER.readValue(
-          System.getProperty(PROPERTY_DATAFLOW_OPTIONS), PipelineOptions.class)
+      TestDataflowPipelineOptions options = PipelineOptionsFactory.fromArgs(
+              MAPPER.readValue(System.getProperty(PROPERTY_DATAFLOW_OPTIONS), String[].class))
           .as(TestDataflowPipelineOptions.class);
       options.setAppName(getAppName());
       return options;

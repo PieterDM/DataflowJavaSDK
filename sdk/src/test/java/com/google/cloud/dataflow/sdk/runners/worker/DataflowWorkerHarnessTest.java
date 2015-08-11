@@ -29,16 +29,20 @@ import com.google.api.client.json.Json;
 import com.google.api.client.testing.http.MockHttpTransport;
 import com.google.api.client.testing.http.MockLowLevelHttpRequest;
 import com.google.api.client.testing.http.MockLowLevelHttpResponse;
+import com.google.api.client.util.Sleeper;
 import com.google.api.services.dataflow.Dataflow;
 import com.google.api.services.dataflow.model.LeaseWorkItemRequest;
 import com.google.api.services.dataflow.model.LeaseWorkItemResponse;
+import com.google.api.services.dataflow.model.MapTask;
+import com.google.api.services.dataflow.model.SeqMapTask;
 import com.google.api.services.dataflow.model.WorkItem;
 import com.google.cloud.dataflow.sdk.options.DataflowWorkerHarnessOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
-import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingFormatter;
+import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingMDC;
 import com.google.cloud.dataflow.sdk.testing.FastNanoClockAndSleeper;
-import com.google.cloud.dataflow.sdk.testing.RestoreDataflowLoggingFormatter;
+import com.google.cloud.dataflow.sdk.testing.RestoreDataflowLoggingMDC;
 import com.google.cloud.dataflow.sdk.testing.RestoreSystemProperties;
+import com.google.cloud.dataflow.sdk.util.IntervalBoundedExponentialBackOff;
 import com.google.cloud.dataflow.sdk.util.TestCredential;
 import com.google.cloud.dataflow.sdk.util.Transport;
 import com.google.common.collect.ImmutableList;
@@ -55,12 +59,14 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Unit tests for {@link DataflowWorkerHarness}. */
 @RunWith(JUnit4.class)
 public class DataflowWorkerHarnessTest {
+
   @Rule public TestRule restoreSystemProperties = new RestoreSystemProperties();
-  @Rule public TestRule restoreLogging = new RestoreDataflowLoggingFormatter();
+  @Rule public TestRule restoreLogging = new RestoreDataflowLoggingMDC();
   @Rule public ExpectedException expectedException = ExpectedException.none();
   @Rule public FastNanoClockAndSleeper fastNanoClockAndSleeper = new FastNanoClockAndSleeper();
   @Mock private MockHttpTransport transport;
@@ -82,39 +88,51 @@ public class DataflowWorkerHarnessTest {
 
     service = new Dataflow(transport, Transport.getJsonFactory(), null);
     pipelineOptions = PipelineOptionsFactory.as(DataflowWorkerHarnessOptions.class);
+    pipelineOptions.setProject(PROJECT_ID);
+    pipelineOptions.setJobId(JOB_ID);
+    pipelineOptions.setWorkerId(WORKER_ID);
+    pipelineOptions.setGcpCredential(new TestCredential());
   }
 
   @Test
   public void testThatWeRetryIfTaskExecutionFailAgainAndAgain() throws Exception {
-    int numWorkers = Math.max(Runtime.getRuntime().availableProcessors(), 1);
+    final int numWorkers = Math.max(Runtime.getRuntime().availableProcessors(), 1);
     when(mockDataflowWorker.getAndPerformWork()).thenReturn(false);
+    final AtomicInteger sleepCount = new AtomicInteger(0);
+    final AtomicInteger illegalIntervalCount = new AtomicInteger(0);
     DataflowWorkerHarness.processWork(
-            pipelineOptions, mockDataflowWorker, fastNanoClockAndSleeper);
-    // Test that the backoff mechanism will retry the BACKOFF_MAX_ATTEMPTS number of times.
-    verify(mockDataflowWorker, times(numWorkers * DataflowWorkerHarness.BACKOFF_MAX_ATTEMPTS))
-        .getAndPerformWork();
+        pipelineOptions,
+        mockDataflowWorker,
+        new Sleeper() {
+          @Override
+          public void sleep(long millis) throws InterruptedException {
+            if ((millis
+                    > DataflowWorkerHarness.BACKOFF_MAX_INTERVAL_MILLIS
+                        * (1 + IntervalBoundedExponentialBackOff.DEFAULT_RANDOMIZATION_FACTOR))) {
+              // We count the times the sleep interval is greater than the backoff max interval with
+              // randomization to make sure it does not happen.
+              illegalIntervalCount.incrementAndGet();
+            }
+            if (sleepCount.incrementAndGet() > 1000) {
+              throw new InterruptedException("Stopping the retry loop.");
+            }
+          }
+        });
+    // Test that the backoff mechanism will allow at least 1000 failures.
+    verify(mockDataflowWorker, times(numWorkers + 1000)).getAndPerformWork();
     verifyNoMoreInteractions(mockDataflowWorker);
+    assertEquals(0, illegalIntervalCount.get());
   }
 
   @Test
   public void testCreationOfWorkerHarness() throws Exception {
-    pipelineOptions.setProject(PROJECT_ID);
-    pipelineOptions.setJobId(JOB_ID);
-    pipelineOptions.setWorkerId(WORKER_ID);
-    pipelineOptions.setGcpCredential(new TestCredential());
-
     assertNotNull(DataflowWorkerHarness.create(pipelineOptions));
-    assertEquals(JOB_ID, DataflowWorkerLoggingFormatter.getJobId());
-    assertEquals(WORKER_ID, DataflowWorkerLoggingFormatter.getWorkerId());
+    assertEquals(JOB_ID, DataflowWorkerLoggingMDC.getJobId());
+    assertEquals(WORKER_ID, DataflowWorkerLoggingMDC.getWorkerId());
   }
 
   @Test
   public void testCloudServiceCall() throws Exception {
-    pipelineOptions.setProject(PROJECT_ID);
-    pipelineOptions.setJobId(JOB_ID);
-    pipelineOptions.setWorkerId(WORKER_ID);
-    pipelineOptions.setGcpCredential(new TestCredential());
-
     WorkItem workItem = createWorkItem(PROJECT_ID, JOB_ID);
 
     when(request.execute()).thenReturn(generateMockResponse(workItem));
@@ -131,16 +149,43 @@ public class DataflowWorkerHarnessTest {
         actualRequest.getWorkerCapabilities());
     assertEquals(ImmutableList.<String>of("map_task", "seq_map_task", "remote_source_task"),
         actualRequest.getWorkItemTypes());
-    assertEquals("1234", DataflowWorkerLoggingFormatter.getWorkId());
+    assertEquals("1234", DataflowWorkerLoggingMDC.getWorkId());
+  }
+
+  @Test
+  public void testCloudServiceCallMapTaskStagePropagation() throws Exception {
+    DataflowWorker.WorkUnitClient client =
+        new DataflowWorkerHarness.DataflowWorkUnitClient(service, pipelineOptions);
+
+    // Publish and acquire a map task work item, and verify we're now processing that stage.
+    final String stageName = "test_stage_name";
+    MapTask mapTask = new MapTask();
+    mapTask.setStageName(stageName);
+    WorkItem workItem = createWorkItem(PROJECT_ID, JOB_ID);
+    workItem.setMapTask(mapTask);
+    when(request.execute()).thenReturn(generateMockResponse(workItem));
+    assertEquals(workItem, client.getWorkItem());
+    assertEquals(stageName, DataflowWorkerLoggingMDC.getStageName());
+  }
+
+  @Test
+  public void testCloudServiceCallSeqMapTaskStagePropagation() throws Exception {
+    DataflowWorker.WorkUnitClient client =
+        new DataflowWorkerHarness.DataflowWorkUnitClient(service, pipelineOptions);
+
+    // Publish and acquire a seq map task work item, and verify we're now processing that stage.
+    final String stageName = "test_stage_name";
+    SeqMapTask seqMapTask = new SeqMapTask();
+    seqMapTask.setStageName(stageName);
+    WorkItem workItem = createWorkItem(PROJECT_ID, JOB_ID);
+    workItem.setSeqMapTask(seqMapTask);
+    when(request.execute()).thenReturn(generateMockResponse(workItem));
+    assertEquals(workItem, client.getWorkItem());
+    assertEquals(stageName, DataflowWorkerLoggingMDC.getStageName());
   }
 
   @Test
   public void testCloudServiceCallNoWorkId() throws Exception {
-    pipelineOptions.setProject(PROJECT_ID);
-    pipelineOptions.setJobId(JOB_ID);
-    pipelineOptions.setWorkerId(WORKER_ID);
-    pipelineOptions.setGcpCredential(new TestCredential());
-
     // If there's no work the service should return an empty work item.
     WorkItem workItem = new WorkItem();
 
@@ -162,11 +207,6 @@ public class DataflowWorkerHarnessTest {
 
   @Test
   public void testCloudServiceCallNoWorkItem() throws Exception {
-    pipelineOptions.setProject(PROJECT_ID);
-    pipelineOptions.setJobId(JOB_ID);
-    pipelineOptions.setWorkerId(WORKER_ID);
-    pipelineOptions.setGcpCredential(new TestCredential());
-
     when(request.execute()).thenReturn(generateMockResponse());
 
     DataflowWorker.WorkUnitClient client =
@@ -188,11 +228,6 @@ public class DataflowWorkerHarnessTest {
     expectedException.expect(IOException.class);
     expectedException.expectMessage(
         "This version of the SDK expects no more than one work item from the service");
-    pipelineOptions.setProject(PROJECT_ID);
-    pipelineOptions.setJobId(JOB_ID);
-    pipelineOptions.setWorkerId(WORKER_ID);
-    pipelineOptions.setGcpCredential(new TestCredential());
-
 
     WorkItem workItem1 = createWorkItem(PROJECT_ID, JOB_ID);
     WorkItem workItem2 = createWorkItem(PROJECT_ID, JOB_ID);

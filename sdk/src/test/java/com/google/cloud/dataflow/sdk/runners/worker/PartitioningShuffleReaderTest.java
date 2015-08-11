@@ -16,6 +16,8 @@
 
 package com.google.cloud.dataflow.sdk.runners.worker;
 
+import static com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo.NO_FIRING;
+
 import com.google.cloud.dataflow.sdk.coders.BigEndianIntegerCoder;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
@@ -23,6 +25,7 @@ import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.transforms.windowing.IntervalWindow;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
+import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.worker.ExecutorTestUtils;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
 import com.google.cloud.dataflow.sdk.util.common.worker.ShuffleEntry;
@@ -53,16 +56,16 @@ public class PartitioningShuffleReaderTest {
   private static final IntervalWindow window = new IntervalWindow(timestamp, timestamp.plus(1000));
 
   private static final List<WindowedValue<KV<Integer, String>>> KVS = Arrays.asList(
-      WindowedValue.of(KV.of(1, "in 1a"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(1, "in 1b"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(2, "in 2a"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(2, "in 2b"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(3, "in 3"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(4, "in 4a"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(4, "in 4b"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(4, "in 4c"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(4, "in 4d"), timestamp, Lists.newArrayList(window)),
-      WindowedValue.of(KV.of(5, "in 5"), timestamp, Lists.newArrayList(window)));
+      WindowedValue.of(KV.of(1, "in 1a"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(1, "in 1b"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(2, "in 2a"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(2, "in 2b"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(3, "in 3"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(4, "in 4a"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(4, "in 4b"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(4, "in 4c"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(4, "in 4d"), timestamp, Lists.newArrayList(window), NO_FIRING),
+      WindowedValue.of(KV.of(5, "in 5"), timestamp, Lists.newArrayList(window), NO_FIRING));
 
   private void runTestReadFromShuffle(List<WindowedValue<KV<Integer, String>>> expected)
       throws Exception {
@@ -70,14 +73,17 @@ public class PartitioningShuffleReaderTest {
         KvCoder.of(BigEndianIntegerCoder.of(), StringUtf8Coder.of()), IntervalWindow.getCoder());
 
     // Write to shuffle with PARTITION_KEYS ShuffleSink.
+     CounterSet.AddCounterMutator addCounterMutator =
+         new CounterSet().getAddCounterMutator();
     ShuffleSink<KV<Integer, String>> shuffleSink = new ShuffleSink<>(
-        PipelineOptionsFactory.create(), null, ShuffleSink.ShuffleKind.PARTITION_KEYS, elemCoder);
+        PipelineOptionsFactory.create(), null, ShuffleSink.ShuffleKind.PARTITION_KEYS,
+        elemCoder, addCounterMutator);
 
     TestShuffleWriter shuffleWriter = new TestShuffleWriter();
 
     List<Long> actualSizes = new ArrayList<>();
     try (Sink.SinkWriter<WindowedValue<KV<Integer, String>>> shuffleSinkWriter =
-        shuffleSink.writer(shuffleWriter)) {
+        shuffleSink.writer(shuffleWriter, "dataset")) {
       for (WindowedValue<KV<Integer, String>> value : expected) {
         actualSizes.add(shuffleSinkWriter.add(value));
       }

@@ -23,9 +23,8 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
-import com.google.cloud.dataflow.sdk.TestUtils;
-import com.google.cloud.dataflow.sdk.runners.DirectPipeline;
-import com.google.cloud.dataflow.sdk.values.PCollection;
+import com.google.cloud.dataflow.sdk.Pipeline;
+import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 
 import org.junit.Assert;
 import org.junit.Before;
@@ -175,8 +174,15 @@ public class IntraBundleParallelizationTest {
     Assert.assertEquals(1, numFailures.get());
   }
 
+  @Test
+  public void testIntraBundleParallelizationGetName() {
+    Assert.assertEquals(
+        "IntraBundleParallelization",
+        IntraBundleParallelization.of(new DelayFn<Integer>()).withMaxParallelism(1).getName());
+  }
+
   private long run(int numElements, int maxParallelism, DoFn<Integer, Integer> doFn) {
-    DirectPipeline p = DirectPipeline.createForTest();
+    Pipeline pipeline = TestPipeline.create();
 
     ArrayList<Integer> data = new ArrayList<>(numElements);
     for (int i = 0; i < numElements; ++i) {
@@ -184,13 +190,14 @@ public class IntraBundleParallelizationTest {
     }
 
     ConcurrencyMeasuringFn<Integer> downstream = new ConcurrencyMeasuringFn<>();
-    PCollection<Integer> input = TestUtils.createInts(p, data);
-    input.apply(IntraBundleParallelization.of(doFn).withMaxParallelism(maxParallelism))
-         .apply(ParDo.of(downstream));
+    pipeline
+        .apply(Create.of(data))
+        .apply(IntraBundleParallelization.of(doFn).withMaxParallelism(maxParallelism))
+        .apply(ParDo.of(downstream));
 
     long startTime = System.currentTimeMillis();
 
-    p.run();
+    pipeline.run();
 
     // Downstream methods should not see parallel threads.
     Assert.assertEquals(1, maxConcurrency);

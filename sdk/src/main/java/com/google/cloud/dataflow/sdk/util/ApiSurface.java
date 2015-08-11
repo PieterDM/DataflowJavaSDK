@@ -549,12 +549,11 @@ public class ApiSurface {
         .pruningPrefix("java")
         .pruningPrefix("com.google.api")
         .pruningPrefix("com.google.protobuf")
-        .pruningPrefix("org.codehaus.jackson")
         .pruningPrefix("org.joda.time")
         .pruningPrefix("org.apache.avro")
         .pruningPrefix("org.junit")
         .pruningPrefix("org.hamcrest")
-        .pruningPrefix("com.fasterxml.jackson");
+        .pruningPrefix("com.fasterxml.jackson.annotation");
   }
 
   public static void main(String[] args) throws Exception {

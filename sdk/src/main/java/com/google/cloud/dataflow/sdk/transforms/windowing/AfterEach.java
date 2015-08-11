@@ -37,7 +37,7 @@ import java.util.List;
  * <p> The following properties hold:
  * <ul>
  *   <li> {@code AfterEach.inOrder(AfterEach.inOrder(a, b), c)} behaves the same as
- *   {@code AfterEach.inOrder(a, b, c)}
+ *   {@code AfterEach.inOrder(a, b, c)} and {@code AfterEach.inOrder(a, AfterEach.inOrder(b, c)}.
  *   <li> {@code AfterEach.inOrder(Repeatedly.forever(a), b)} behaves the same as
  *   {@code Repeatedly.forever(a)}, since the repeated trigger never finishes.
  * </ul>
@@ -60,41 +60,60 @@ public class AfterEach<W extends BoundedWindow> extends Trigger<W> {
     return new AfterEach<W>(Arrays.<Trigger<W>>asList(triggers));
   }
 
-  private TriggerResult wrapResult(TriggerContext<W> c, TriggerResult subResult)
+  private TriggerResult result(TriggerContext c, TriggerResult subResult)
       throws Exception {
     if (subResult.isFire()) {
-      return c.areAllSubtriggersFinished() ? TriggerResult.FIRE_AND_FINISH : TriggerResult.FIRE;
+      return c.trigger().areAllSubtriggersFinished()
+          ? TriggerResult.FIRE_AND_FINISH : TriggerResult.FIRE;
     } else {
       return TriggerResult.CONTINUE;
     }
   }
 
   @Override
-  public TriggerResult onElement(TriggerContext<W> c, OnElementEvent<W> e) throws Exception {
+  public TriggerResult onElement(OnElementContext c) throws Exception {
+    Iterator<ExecutableTrigger<W>> iterator = c.trigger().unfinishedSubTriggers().iterator();
+
     // If all the sub-triggers have finished, we should have already finished, so we know there is
     // at least one unfinished trigger.
-    ExecutableTrigger<W> subTrigger = c.firstUnfinishedSubTrigger();
-    return wrapResult(c, subTrigger.invokeElement(c, e));
+    TriggerResult firstResult = iterator.next().invokeElement(c);
+
+    // If onMerge might be called, we need to make sure we have proper state for future triggers.
+    if (c.trigger().isMerging()) {
+      if (firstResult.isFire()) {
+        // If we're firing, clear out all of the later subtriggers, since we don't want to pollute
+        // their state.
+        resetRemaining(c, iterator);
+      } else {
+        // Otherwise, iterate over all of them to build up some state.
+        while (iterator.hasNext()) {
+          iterator.next().invokeElement(c);
+        }
+      }
+    }
+
+    return result(c, firstResult);
   }
 
   @Override
-  public MergeResult onMerge(TriggerContext<W> c, OnMergeEvent<W> e) throws Exception {
+  public MergeResult onMerge(OnMergeContext c) throws Exception {
     // Iterate over the sub-triggers to identify the "current" sub-trigger.
-    Iterator<ExecutableTrigger<W>> iterator = c.subTriggers().iterator();
+    Iterator<ExecutableTrigger<W>> iterator = c.trigger().subTriggers().iterator();
     while (iterator.hasNext()) {
       ExecutableTrigger<W> subTrigger = iterator.next();
 
-      MergeResult mergeResult = subTrigger.invokeMerge(c, e);
+      MergeResult mergeResult = subTrigger.invokeMerge(c);
 
       if (MergeResult.CONTINUE.equals(mergeResult)) {
-        resetRemaining(c, e, iterator);
+        resetRemaining(c, iterator);
         return MergeResult.CONTINUE;
       } else if (MergeResult.FIRE.equals(mergeResult)) {
-        resetRemaining(c, e, iterator);
+        resetRemaining(c, iterator);
         return MergeResult.FIRE;
       } else if (MergeResult.FIRE_AND_FINISH.equals(mergeResult)) {
-        resetRemaining(c, e, iterator);
-        return c.areAllSubtriggersFinished() ? MergeResult.FIRE_AND_FINISH : MergeResult.FIRE;
+        resetRemaining(c, iterator);
+        return c.trigger().areAllSubtriggersFinished()
+            ? MergeResult.FIRE_AND_FINISH : MergeResult.FIRE;
       }
     }
 
@@ -107,27 +126,28 @@ public class AfterEach<W extends BoundedWindow> extends Trigger<W> {
     return MergeResult.ALREADY_FINISHED;
   }
 
-  private void resetRemaining(TriggerContext<W> c, OnMergeEvent<W> e,
-      Iterator<ExecutableTrigger<W>> triggers) throws Exception {
+  private void resetRemaining(
+      TriggerContext c, Iterator<ExecutableTrigger<W>> triggers) throws Exception {
     while (triggers.hasNext()) {
-      c.forTrigger(triggers.next()).resetTree(e.newWindow());
+      c.forTrigger(triggers.next()).trigger().resetTree();
     }
   }
 
   @Override
-  public TriggerResult onTimer(TriggerContext<W> c, OnTimerEvent<W> e) throws Exception {
-    if (c.isCurrentTrigger(e.getDestinationIndex())) {
-      throw new IllegalStateException("AfterEach shouldn't receive timers.");
-    }
-
-    ExecutableTrigger<W> timerChild = c.nextStepTowards(e.getDestinationIndex());
-    return wrapResult(c, timerChild.invokeTimer(c,  e));
+  public TriggerResult onTimer(OnTimerContext c) throws Exception {
+    // Only deliver to the currently active subtrigger
+    return result(c, c.trigger().firstUnfinishedSubTrigger().invokeTimer(c));
   }
 
   @Override
-  public Instant getWatermarkCutoff(W window) {
+  public Instant getWatermarkThatGuaranteesFiring(W window) {
     // This trigger will fire at least once when the first trigger in the sequence
     // fires at least once.
-    return subTriggers.get(0).getWatermarkCutoff(window);
+    return subTriggers.get(0).getWatermarkThatGuaranteesFiring(window);
+  }
+
+  @Override
+  public Trigger<W> getContinuationTrigger(List<Trigger<W>> continuationTriggers) {
+    return Repeatedly.forever(new AfterFirst<W>(continuationTriggers));
   }
 }

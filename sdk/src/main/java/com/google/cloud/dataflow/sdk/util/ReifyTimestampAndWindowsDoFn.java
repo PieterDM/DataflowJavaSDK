@@ -26,6 +26,7 @@ import com.google.cloud.dataflow.sdk.values.KV;
  * @param <K> the type of the keys of the input and output {@code PCollection}s
  * @param <V> the type of the values of the input {@code PCollection}
  */
+@SystemDoFnInternal
 public class ReifyTimestampAndWindowsDoFn<K, V>
     extends DoFn<KV<K, V>, KV<K, WindowedValue<V>>> {
   private static final long serialVersionUID = 0;
@@ -38,6 +39,10 @@ public class ReifyTimestampAndWindowsDoFn<K, V>
     V value = kv.getValue();
     c.output(KV.of(
         key,
-        WindowedValue.of(value, c.timestamp(), c.windowingInternals().windows())));
+        WindowedValue.of(
+            value,
+            c.timestamp(),
+            c.windowingInternals().windows(),
+            c.pane())));
   }
 }

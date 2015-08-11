@@ -16,20 +16,25 @@
 
 package com.google.cloud.dataflow.sdk.runners.dataflow;
 
+import static com.google.api.client.util.Base64.decodeBase64;
 import static com.google.cloud.dataflow.sdk.io.SourceTestUtils.readFromSource;
 import static com.google.cloud.dataflow.sdk.runners.worker.ReaderTestUtils.splitRequestAtFraction;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.cloudSourceOperationRequestToSourceOperationRequest;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.dictionaryToCloudSource;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.readerProgressToCloudProgress;
 import static com.google.cloud.dataflow.sdk.runners.worker.SourceTranslationUtils.sourceOperationResponseToCloudSourceOperationResponse;
+import static com.google.cloud.dataflow.sdk.util.CoderUtils.encodeToByteArray;
+import static com.google.cloud.dataflow.sdk.util.SerializableUtils.deserializeFromByteArray;
 import static com.google.cloud.dataflow.sdk.util.Structs.getDictionary;
 import static com.google.cloud.dataflow.sdk.util.Structs.getObject;
+import static com.google.cloud.dataflow.sdk.util.Structs.getStrings;
 import static com.google.cloud.dataflow.sdk.util.WindowedValue.valueInGlobalWindow;
 import static com.google.common.base.Throwables.getStackTraceAsString;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -48,30 +53,37 @@ import com.google.api.services.dataflow.model.Step;
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.coders.BigEndianIntegerCoder;
 import com.google.cloud.dataflow.sdk.coders.Coder;
+import com.google.cloud.dataflow.sdk.coders.KvCoder;
+import com.google.cloud.dataflow.sdk.coders.VarIntCoder;
 import com.google.cloud.dataflow.sdk.io.BoundedSource;
 import com.google.cloud.dataflow.sdk.io.Read;
-import com.google.cloud.dataflow.sdk.io.Source;
+import com.google.cloud.dataflow.sdk.io.UnboundedSource;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.runners.DataflowPipelineTranslator;
 import com.google.cloud.dataflow.sdk.runners.worker.ReaderFactory;
+import com.google.cloud.dataflow.sdk.runners.worker.windmill.Windmill;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.transforms.Sample;
 import com.google.cloud.dataflow.sdk.transforms.Sum;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.FixedWindows;
+import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindow;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.CloudSourceUtils;
-import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
+import com.google.cloud.dataflow.sdk.util.StreamingModeExecutionContext;
+import com.google.cloud.dataflow.sdk.util.ValueWithRecordId;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
 import com.google.cloud.dataflow.sdk.util.common.worker.SourceFormat;
+import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.common.base.Preconditions;
+import com.google.protobuf.ByteString;
 
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -87,8 +99,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-
-import javax.annotation.Nullable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Tests for {@code BasicSerializableSourceFormat}.
@@ -145,8 +157,7 @@ public class BasicSerializableSourceFormatTest {
       }
 
       @Override
-      public BoundedReader<Integer> createReader(
-          PipelineOptions options, @Nullable ExecutionContext executionContext) throws IOException {
+      public BoundedReader<Integer> createReader(PipelineOptions options) throws IOException {
         return new RangeReader(this);
       }
 
@@ -163,7 +174,7 @@ public class BasicSerializableSourceFormatTest {
         return BigEndianIntegerCoder.of();
       }
 
-      private static class RangeReader extends AbstractBoundedReader<Integer> {
+      private static class RangeReader extends BoundedReader<Integer> {
         // To verify that BasicSerializableSourceFormat calls our methods according to protocol.
         enum State {
           UNSTARTED,
@@ -272,7 +283,8 @@ public class BasicSerializableSourceFormatTest {
   @Test
   public void testDirectPipelineWithoutTimestamps() throws Exception {
     Pipeline p = TestPipeline.create();
-    PCollection<Integer> sum = p.apply(Read.from(TestIO.fromRange(10, 20)))
+    PCollection<Integer> sum = p
+        .apply(Read.from(TestIO.fromRange(10, 20)))
         .apply(Sum.integersGlobally())
         .apply(Sample.<Integer>any(1));
 
@@ -298,38 +310,39 @@ public class BasicSerializableSourceFormatTest {
     DataflowPipelineOptions options =
         PipelineOptionsFactory.create().as(DataflowPipelineOptions.class);
     TestIO.Read source = TestIO.fromRange(10, 20);
-    BoundedSource.BoundedReader<Integer> reader = source.createReader(options, null);
-    assertEquals(0, reader.getFractionConsumed().intValue());
-    assertTrue(reader.start());
-    assertEquals(0.1, reader.getFractionConsumed(), 1e-6);
-    assertTrue(reader.advance());
-    assertEquals(0.2, reader.getFractionConsumed(), 1e-6);
-    // Already past 0.0 and 0.1.
-    assertNull(reader.splitAtFraction(0.0));
-    assertNull(reader.splitAtFraction(0.1));
+    try (BoundedSource.BoundedReader<Integer> reader = source.createReader(options)) {
+      assertEquals(0, reader.getFractionConsumed().intValue());
+      assertTrue(reader.start());
+      assertEquals(0.1, reader.getFractionConsumed(), 1e-6);
+      assertTrue(reader.advance());
+      assertEquals(0.2, reader.getFractionConsumed(), 1e-6);
+      // Already past 0.0 and 0.1.
+      assertNull(reader.splitAtFraction(0.0));
+      assertNull(reader.splitAtFraction(0.1));
 
-    {
-      TestIO.Read residual = (TestIO.Read) reader.splitAtFraction(0.5);
-      assertNotNull(residual);
-      TestIO.Read primary = (TestIO.Read) reader.getCurrentSource();
-      assertThat(readFromSource(primary), contains(10, 11, 12, 13, 14));
-      assertThat(readFromSource(residual), contains(15, 16, 17, 18, 19));
+      {
+        TestIO.Read residual = (TestIO.Read) reader.splitAtFraction(0.5);
+        assertNotNull(residual);
+        TestIO.Read primary = (TestIO.Read) reader.getCurrentSource();
+        assertThat(readFromSource(primary, options), contains(10, 11, 12, 13, 14));
+        assertThat(readFromSource(residual, options), contains(15, 16, 17, 18, 19));
+      }
+
+      // Range is now [10, 15) and we are at 12.
+      {
+        TestIO.Read residual = (TestIO.Read) reader.splitAtFraction(0.8); // give up 14.
+        assertNotNull(residual);
+        TestIO.Read primary = (TestIO.Read) reader.getCurrentSource();
+        assertThat(readFromSource(primary, options), contains(10, 11, 12, 13));
+        assertThat(readFromSource(residual, options), contains(14));
+      }
+
+      assertTrue(reader.advance());
+      assertEquals(12, reader.getCurrent().intValue());
+      assertTrue(reader.advance());
+      assertEquals(13, reader.getCurrent().intValue());
+      assertFalse(reader.advance());
     }
-
-    // Range is now [10, 15) and we are at 12.
-    {
-      TestIO.Read residual = (TestIO.Read) reader.splitAtFraction(0.8);  // give up 14.
-      assertNotNull(residual);
-      TestIO.Read primary = (TestIO.Read) reader.getCurrentSource();
-      assertThat(readFromSource(primary), contains(10, 11, 12, 13));
-      assertThat(readFromSource(residual), contains(14));
-    }
-
-    assertTrue(reader.advance());
-    assertEquals(12, reader.getCurrent().intValue());
-    assertTrue(reader.advance());
-    assertEquals(13, reader.getCurrent().intValue());
-    assertFalse(reader.advance());
   }
 
   @Test
@@ -342,52 +355,73 @@ public class BasicSerializableSourceFormatTest {
         .as(DataflowPipelineOptions.class);
     Reader<WindowedValue<Integer>> reader = ReaderFactory.create(
         options, translateIOToCloudSource(TestIO.fromRange(10, 20), options), null);
-    Reader.ReaderIterator<WindowedValue<Integer>> iterator = reader.iterator();
-    assertTrue(iterator.hasNext());
-    assertEquals(0, readerProgressToCloudProgress(
-        iterator.getProgress()).getPercentComplete().intValue());
-    assertEquals(valueInGlobalWindow(10), iterator.next());
-    assertEquals(0.1, readerProgressToCloudProgress(
-        iterator.getProgress()).getPercentComplete().doubleValue(), 1e-6);
-    assertEquals(valueInGlobalWindow(11), iterator.next());
-    assertEquals(0.2, readerProgressToCloudProgress(
-        iterator.getProgress()).getPercentComplete().doubleValue(), 1e-6);
-    assertEquals(valueInGlobalWindow(12), iterator.next());
+    try (Reader.ReaderIterator<WindowedValue<Integer>> iterator = reader.iterator()) {
+      assertTrue(iterator.hasNext());
+      assertEquals(
+          0, readerProgressToCloudProgress(iterator.getProgress()).getPercentComplete().intValue());
+      assertEquals(valueInGlobalWindow(10), iterator.next());
+      assertEquals(
+          0.1,
+          readerProgressToCloudProgress(iterator.getProgress()).getPercentComplete().doubleValue(),
+          1e-6);
+      assertEquals(valueInGlobalWindow(11), iterator.next());
+      assertEquals(
+          0.2,
+          readerProgressToCloudProgress(iterator.getProgress()).getPercentComplete().doubleValue(),
+          1e-6);
+      assertEquals(valueInGlobalWindow(12), iterator.next());
 
-    assertNull(iterator.requestDynamicSplit(splitRequestAtFraction(0)));
-    assertNull(iterator.requestDynamicSplit(splitRequestAtFraction(0.1f)));
-    BasicSerializableSourceFormat.SourceSplit<Integer> sourceSplit =
-        (BasicSerializableSourceFormat.SourceSplit<Integer>) iterator.requestDynamicSplit(
-            splitRequestAtFraction(0.5f));
-    assertNotNull(sourceSplit);
-    assertThat(readFromSource(sourceSplit.primary), contains(10, 11, 12, 13, 14));
-    assertThat(readFromSource(sourceSplit.residual), contains(15, 16, 17, 18, 19));
+      assertNull(iterator.requestDynamicSplit(splitRequestAtFraction(0)));
+      assertNull(iterator.requestDynamicSplit(splitRequestAtFraction(0.1f)));
+      BasicSerializableSourceFormat.BoundedSourceSplit<Integer> sourceSplit =
+          (BasicSerializableSourceFormat.BoundedSourceSplit<Integer>)
+              iterator.requestDynamicSplit(splitRequestAtFraction(0.5f));
+      assertNotNull(sourceSplit);
+      assertThat(readFromSource(sourceSplit.primary, options), contains(10, 11, 12, 13, 14));
+      assertThat(readFromSource(sourceSplit.residual, options), contains(15, 16, 17, 18, 19));
 
-    sourceSplit = (BasicSerializableSourceFormat.SourceSplit<Integer>) iterator.requestDynamicSplit(
-        splitRequestAtFraction(0.8f));
-    assertNotNull(sourceSplit);
-    assertThat(readFromSource(sourceSplit.primary), contains(10, 11, 12, 13));
-    assertThat(readFromSource(sourceSplit.residual), contains(14));
+      sourceSplit =
+          (BasicSerializableSourceFormat.BoundedSourceSplit<Integer>)
+              iterator.requestDynamicSplit(splitRequestAtFraction(0.8f));
+      assertNotNull(sourceSplit);
+      assertThat(readFromSource(sourceSplit.primary, options), contains(10, 11, 12, 13));
+      assertThat(readFromSource(sourceSplit.residual, options), contains(14));
 
-    assertTrue(iterator.hasNext());
-    assertEquals(valueInGlobalWindow(13), iterator.next());
-    assertFalse(iterator.hasNext());
+      assertTrue(iterator.hasNext());
+      assertEquals(valueInGlobalWindow(13), iterator.next());
+      assertFalse(iterator.hasNext());
+    }
   }
 
   /**
    * A source that cannot do anything. Intended to be overridden for testing of individual methods.
    */
-  private static class MockSource extends Source<Integer> {
+  private static class MockSource extends BoundedSource<Integer> {
     private static final long serialVersionUID = -5041539913488064889L;
 
     @Override
-    public List<? extends Source<Integer>> splitIntoBundles(
+    public List<? extends BoundedSource<Integer>> splitIntoBundles(
         long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
       return Arrays.asList(this);
     }
 
     @Override
     public void validate() { }
+
+    @Override
+    public boolean producesSortedKeys(PipelineOptions options) {
+      return false;
+    }
+
+    @Override
+    public long getEstimatedSizeBytes(PipelineOptions options) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public BoundedReader<Integer> createReader(PipelineOptions options) throws IOException {
+      throw new UnsupportedOperationException();
+    }
 
     @Override
     public String toString() {
@@ -412,7 +446,7 @@ public class BasicSerializableSourceFormatTest {
     }
 
     @Override
-    public List<? extends Source<Integer>> splitIntoBundles(
+    public List<? extends BoundedSource<Integer>> splitIntoBundles(
         long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
       Preconditions.checkState(errorMessage == null, "Unexpected invalid source");
       return Arrays.asList(
@@ -447,15 +481,15 @@ public class BasicSerializableSourceFormatTest {
     performSplit(cloudSource, options);
   }
 
-  private static class FailingReader implements Source.Reader<Integer> {
-    private Source<Integer> source;
+  private static class FailingReader extends BoundedSource.BoundedReader<Integer> {
+    private BoundedSource<Integer> source;
 
-    private FailingReader(Source<Integer> source) {
+    private FailingReader(BoundedSource<Integer> source) {
       this.source = source;
     }
 
     @Override
-    public Source<Integer> getCurrentSource() {
+    public BoundedSource<Integer> getCurrentSource() {
       return source;
     }
 
@@ -480,16 +514,24 @@ public class BasicSerializableSourceFormatTest {
     }
 
     @Override
-    public void close() throws IOException { }
+    public void close() throws IOException {}
+
+    @Override
+    public Double getFractionConsumed() {
+      return null;
+    }
+
+    @Override
+    public BoundedSource<Integer> splitAtFraction(double fraction) {
+      return null;
+    }
   }
 
   private static class SourceProducingFailingReader extends MockSource {
     private static final long serialVersionUID = -1288303253742972653L;
 
     @Override
-    public Reader<Integer> createReader(
-        PipelineOptions options, @Nullable ExecutionContext executionContext)
-        throws IOException {
+    public BoundedReader<Integer> createReader(PipelineOptions options) throws IOException {
       return new FailingReader(this);
     }
 
@@ -520,12 +562,12 @@ public class BasicSerializableSourceFormatTest {
   }
 
   private static com.google.api.services.dataflow.model.Source translateIOToCloudSource(
-      Source<?> io, DataflowPipelineOptions options) throws Exception {
+      BoundedSource<?> io, DataflowPipelineOptions options) throws Exception {
     DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
     Pipeline p = Pipeline.create(options);
     p.begin().apply(Read.from(io));
 
-    Job workflow = translator.translate(p, new ArrayList<DataflowPackage>());
+    Job workflow = translator.translate(p, new ArrayList<DataflowPackage>()).getJob();
     Step step = workflow.getSteps().get(0);
 
     return stepToCloudSource(step);
@@ -560,5 +602,87 @@ public class BasicSerializableSourceFormatTest {
     SourceFormat.OperationResponse response =
         new BasicSerializableSourceFormat(options).performSourceOperation(request1);
     return sourceOperationResponseToCloudSourceOperationResponse(response).getSplit();
+  }
+
+  @Test
+  public void testUnboundedSplits() throws Exception {
+    DataflowPipelineOptions options =
+        PipelineOptionsFactory.create().as(DataflowPipelineOptions.class);
+    com.google.api.services.dataflow.model.Source source =
+        BasicSerializableSourceFormat.serializeToCloudSource(
+            new CountingSource(Integer.MAX_VALUE), options);
+    List<String> serializedSplits =
+        getStrings(source.getSpec(), BasicSerializableSourceFormat.SERIALIZED_SOURCE_SPLITS, null);
+    assertEquals(20, serializedSplits.size());
+    for (String serializedSplit : serializedSplits) {
+      assertTrue(
+          deserializeFromByteArray(decodeBase64(serializedSplit), "source")
+              instanceof CountingSource);
+    }
+  }
+
+  @Test
+  public void testReadUnboundedReader() throws Exception {
+    StreamingModeExecutionContext context = new StreamingModeExecutionContext(
+        null, new ConcurrentHashMap<ByteString, UnboundedSource.UnboundedReader<?>>(), null);
+
+    DataflowPipelineOptions options =
+        PipelineOptionsFactory.create().as(DataflowPipelineOptions.class);
+    options.setNumWorkers(5);
+
+    ByteString state = ByteString.EMPTY;
+    for (int i = 0; i < 100; /* Incremented in inner loop */) {
+      WindowedValue<ValueWithRecordId<KV<Integer, Integer>>> value;
+
+      // Initialize streaming context with state from previous iteration.
+      context.start(
+          Windmill.WorkItem.newBuilder()
+              .setKey(ByteString.copyFromUtf8("0000000000000001")) // key is zero-padded index.
+              .setWorkToken(0) // Required proto field, unused.
+              .setSourceState(
+                  Windmill.SourceState.newBuilder().setState(state).build()) // Source state.
+              .build(),
+          new Instant(0),
+          null,
+          Windmill.WorkItemCommitRequest.newBuilder());
+
+      Reader.ReaderIterator<WindowedValue<ValueWithRecordId<KV<Integer, Integer>>>> reader =
+          BasicSerializableSourceFormat.<ValueWithRecordId<KV<Integer, Integer>>>create(
+                  options,
+                  (CloudObject)
+                      BasicSerializableSourceFormat.serializeToCloudSource(
+                              new CountingSource(Integer.MAX_VALUE), options)
+                          .getSpec(),
+                  null,
+                  context)
+              .iterator();
+
+      // Verify data.
+      while (reader.hasNext()) {
+        value = reader.next();
+        assertEquals(KV.of(0, i), value.getValue().getValue());
+        assertArrayEquals(
+            encodeToByteArray(KvCoder.of(VarIntCoder.of(), VarIntCoder.of()), KV.of(0, i)),
+            value.getValue().getId());
+        assertThat(value.getWindows(), contains((BoundedWindow) GlobalWindow.INSTANCE));
+        assertEquals(i, value.getTimestamp().getMillis());
+        i++;
+      }
+
+      // Extract and verify state modifications.
+      context.flushState();
+      state = context.getOutputBuilder().getSourceStateUpdates().getState();
+      // CountingSource's watermark is the last record - 1.  i is now one past the last record,
+      // so the expected watermark is i-2 millis.
+      assertEquals(
+          TimeUnit.MILLISECONDS.toMicros(i - 2), context.getOutputBuilder().getSourceWatermark());
+      assertEquals(
+          1,
+          context
+              .getOutputBuilder()
+              .getSourceStateUpdates()
+              .getFinalizeIdsList()
+              .size());
+    }
   }
 }

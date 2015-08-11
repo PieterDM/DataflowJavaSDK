@@ -14,22 +14,26 @@
 
 package com.google.cloud.dataflow.sdk.io;
 
-import static com.google.cloud.dataflow.sdk.io.SourceTestUtils.ExpectedSplitOutcome.MUST_BE_CONSISTENT_IF_SUCCEEDS;
-import static com.google.cloud.dataflow.sdk.io.SourceTestUtils.assertSplitAtFractionBehavior;
+import static com.google.cloud.dataflow.sdk.io.SourceTestUtils.assertSplitAtFractionExhaustive;
 import static com.google.cloud.dataflow.sdk.io.SourceTestUtils.assertSplitAtFractionFails;
 import static com.google.cloud.dataflow.sdk.io.SourceTestUtils.assertSplitAtFractionSucceedsAndConsistent;
+import static org.hamcrest.Matchers.both;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.io.Source.Reader;
+import com.google.cloud.dataflow.sdk.options.PipelineOptions;
+import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.common.collect.ImmutableList;
 
+import org.hamcrest.Matchers;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -230,17 +234,17 @@ public class XmlSourceTest {
 
   private File createRandomTrainXML(String fileName, List<Train> trains) throws IOException {
     File file = tempFolder.newFile(fileName);
-    BufferedWriter writer = new BufferedWriter(new FileWriter(file));
-    writer.write("<trains>");
-    writer.newLine();
-    for (Train train : trains) {
-      String str = trainToXMLElement(train);
-      writer.write(str);
+    try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+      writer.write("<trains>");
+      writer.newLine();
+      for (Train train : trains) {
+        String str = trainToXMLElement(train);
+        writer.write(str);
+        writer.newLine();
+      }
+      writer.write("</trains>");
       writer.newLine();
     }
-    writer.write("</trains>");
-    writer.newLine();
-    writer.close();
     return file;
   }
 
@@ -273,7 +277,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -296,7 +300,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -319,7 +323,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -339,7 +343,7 @@ public class XmlSourceTest {
 
     List<Train> results = new ArrayList<>();
     for (FileBasedSource<Train> split : splits) {
-      results.addAll(readEverythingFromReader(split.createReader(null, null)));
+      results.addAll(readEverythingFromReader(split.createReader(null)));
     }
 
     List<Train> expectedResults = ImmutableList.of(
@@ -379,7 +383,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -395,7 +399,7 @@ public class XmlSourceTest {
     exception.expect(NullPointerException.class);
     exception.expectMessage(
         "rootElement is null. Use builder method withRootElement() to set this.");
-    readEverythingFromReader(source.createReader(null, null));
+    readEverythingFromReader(source.createReader(null));
   }
 
   @Test
@@ -411,7 +415,7 @@ public class XmlSourceTest {
     exception.expect(NullPointerException.class);
     exception.expectMessage(
         "recordElement is null. Use builder method withRecordElement() to set this.");
-    readEverythingFromReader(source.createReader(null, null));
+    readEverythingFromReader(source.createReader(null));
   }
 
   @Test
@@ -427,7 +431,7 @@ public class XmlSourceTest {
     exception.expect(NullPointerException.class);
     exception.expectMessage(
         "recordClass is null. Use builder method withRecordClass() to set this.");
-    readEverythingFromReader(source.createReader(null, null));
+    readEverythingFromReader(source.createReader(null));
   }
 
   @Test
@@ -442,7 +446,7 @@ public class XmlSourceTest {
             .withRecordClass(Train.class);
 
     exception.expectMessage("Unexpected close tag </trains>; expected </something>.");
-    readEverythingFromReader(source.createReader(null, null));
+    readEverythingFromReader(source.createReader(null));
   }
 
   @Test
@@ -456,11 +460,12 @@ public class XmlSourceTest {
             .withRecordElement("something")
             .withRecordClass(Train.class);
 
-    assertEquals(readEverythingFromReader(source.createReader(null, null)), new ArrayList<Train>());
+    assertEquals(readEverythingFromReader(source.createReader(null)), new ArrayList<Train>());
   }
 
   @XmlRootElement
   private static class WrongTrainType {
+    @SuppressWarnings("unused")
     public String something;
   }
 
@@ -476,14 +481,16 @@ public class XmlSourceTest {
             .withRecordClass(WrongTrainType.class);
 
     exception.expect(RuntimeException.class);
-    exception.expectMessage(
-        "unexpected element (uri:\"\", local:\"name\"). Expected elements are <{}something>");
-    Reader<WrongTrainType> reader = source.createReader(null, null);
 
-    List<WrongTrainType> results = new ArrayList<>();
-    for (boolean available = reader.start(); available; available = reader.advance()) {
-      WrongTrainType train = reader.getCurrent();
-      results.add(train);
+    // JAXB internationalizes the error message. So this is all we can match for.
+    exception.expectMessage(both(containsString("name")).and(Matchers.containsString("something")));
+    try (Reader<WrongTrainType> reader = source.createReader(null)) {
+
+      List<WrongTrainType> results = new ArrayList<>();
+      for (boolean available = reader.start(); available; available = reader.advance()) {
+        WrongTrainType train = reader.getCurrent();
+        results.add(train);
+      }
     }
   }
 
@@ -506,7 +513,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
 
@@ -530,7 +537,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -578,7 +585,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -601,7 +608,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(expectedResults),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -620,7 +627,7 @@ public class XmlSourceTest {
     assertThat(
         trainsToStrings(trains),
         containsInAnyOrder(
-            trainsToStrings(readEverythingFromReader(source.createReader(null, null))).toArray()));
+            trainsToStrings(readEverythingFromReader(source.createReader(null))).toArray()));
   }
 
   @Test
@@ -660,7 +667,7 @@ public class XmlSourceTest {
 
     List<Train> results = new ArrayList<>();
     for (FileBasedSource<Train> split : splits) {
-      results.addAll(readEverythingFromReader(split.createReader(null, null)));
+      results.addAll(readEverythingFromReader(split.createReader(null)));
     }
 
     assertThat(trainsToStrings(trains), containsInAnyOrder(trainsToStrings(results).toArray()));
@@ -685,13 +692,14 @@ public class XmlSourceTest {
 
     List<Train> results = new ArrayList<>();
     for (FileBasedSource<Train> split : splits) {
-      results.addAll(readEverythingFromReader(split.createReader(null, null)));
+      results.addAll(readEverythingFromReader(split.createReader(null)));
     }
     assertThat(trainsToStrings(trains), containsInAnyOrder(trainsToStrings(results).toArray()));
   }
 
   @Test
   public void testSplitAtFraction() throws Exception {
+    PipelineOptions options = PipelineOptionsFactory.create();
     String fileName = "temp.xml";
     List<Train> trains = generateRandomTrainList(100);
     File file = createRandomTrainXML(fileName, trains);
@@ -706,20 +714,35 @@ public class XmlSourceTest {
     List<? extends FileBasedSource<Train>> splits =
         fileSource.splitIntoBundles(file.length() / 3, null);
     for (BoundedSource<Train> splitSource : splits) {
-      int items = readEverythingFromReader(splitSource.createReader(null, null)).size();
-      assertSplitAtFractionSucceedsAndConsistent(splitSource, 0, 0.7);
-      assertSplitAtFractionSucceedsAndConsistent(splitSource, 1, 0.7);
-      assertSplitAtFractionSucceedsAndConsistent(splitSource, 15, 0.7);
-      assertSplitAtFractionFails(splitSource, 0, 0.0);
-      assertSplitAtFractionFails(splitSource, 20, 0.3);
-      assertSplitAtFractionFails(splitSource, items, 1.0);
-      assertSplitAtFractionFails(splitSource, items, 0.9);
-      assertSplitAtFractionSucceedsAndConsistent(splitSource, items, 0.999);
+      int numItems = readEverythingFromReader(splitSource.createReader(null)).size();
+      // Should not split while unstarted.
+      assertSplitAtFractionFails(splitSource, 0, 0.7, options);
+      assertSplitAtFractionSucceedsAndConsistent(splitSource, 1, 0.7, options);
+      assertSplitAtFractionSucceedsAndConsistent(splitSource, 15, 0.7, options);
+      assertSplitAtFractionFails(splitSource, 0, 0.0, options);
+      assertSplitAtFractionFails(splitSource, 20, 0.3, options);
+      assertSplitAtFractionFails(splitSource, numItems, 1.0, options);
+
+      // After reading 100 elements we will be approximately at position
+      // 0.99 * (endOffset - startOffset) hence trying to split at fraction 0.9 will be
+      // unsuccessful.
+      assertSplitAtFractionFails(splitSource, numItems, 0.9, options);
+
+      // Following passes since we can always find a fraction that is extremely close to 1 such that
+      // the position suggested by the fraction will be larger than the position the reader is at
+      // after reading "items - 1" elements.
+      // This also passes for "numItemsToReadBeforeSplit = items" if the position at suggested
+      // fraction is larger than the position the reader is at after reading all "items" elements
+      // (i.e., the start position of the last element). This is true for most cases but will not
+      // be true if reader position is only one less than the end position. (i.e., the last element
+      // of the bundle start at the last byte that belongs to the bundle).
+      assertSplitAtFractionSucceedsAndConsistent(splitSource, numItems - 1, 0.999, options);
     }
   }
 
   @Test
   public void testSplitAtFractionExhaustive() throws Exception {
+    PipelineOptions options = PipelineOptionsFactory.create();
     File file = tempFolder.newFile("trainXMLSmall");
     Files.write(file.toPath(), trainXMLWithAllFeatures.getBytes(StandardCharsets.UTF_8));
 
@@ -729,18 +752,7 @@ public class XmlSourceTest {
             .withRecordElement("train")
             .withRecordClass(Train.class)
             .withMinBundleSize(1024);
-    List<? extends FileBasedSource<Train>> splits =
-        source.splitIntoBundles(file.length() / 3, null);
-
-    for (BoundedSource<Train> splitSource : splits) {
-      int maxItems = readEverythingFromReader(splitSource.createReader(null, null)).size();
-      for (int numItems = 0; numItems <= maxItems; ++numItems) {
-        for (double splitFraction = 0.0; splitFraction < 1.1; splitFraction += 0.01) {
-          assertSplitAtFractionBehavior(
-              splitSource, numItems, splitFraction, MUST_BE_CONSISTENT_IF_SUCCEEDS);
-        }
-      }
-    }
+    assertSplitAtFractionExhaustive(source, options);
   }
 
   @Test

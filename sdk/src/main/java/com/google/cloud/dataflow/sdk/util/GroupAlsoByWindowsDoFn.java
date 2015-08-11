@@ -17,12 +17,10 @@
 package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.coders.Coder;
-import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
+import com.google.cloud.dataflow.sdk.transforms.Aggregator;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
-import com.google.cloud.dataflow.sdk.transforms.DoFn.RequiresKeyedState;
+import com.google.cloud.dataflow.sdk.transforms.Sum;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
-import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
-import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.common.base.Preconditions;
 
@@ -37,10 +35,10 @@ import org.joda.time.Instant;
  * @param <OutputT> output value element type
  * @param <W> window type
  */
+@SystemDoFnInternal
 @SuppressWarnings("serial")
 public abstract class GroupAlsoByWindowsDoFn<K, InputT, OutputT, W extends BoundedWindow>
-    extends DoFn<KV<K, Iterable<WindowedValue<InputT>>>, KV<K, OutputT>>
-    implements RequiresKeyedState {
+    extends DoFn<KV<K, Iterable<WindowedValue<InputT>>>, KV<K, OutputT>> {
 
   /**
    * Create a {@link GroupAlsoByWindowsDoFn} without a combine function. Depending on the
@@ -51,44 +49,50 @@ public abstract class GroupAlsoByWindowsDoFn<K, InputT, OutputT, W extends Bound
    */
   public static <K, V, W extends BoundedWindow> GroupAlsoByWindowsDoFn<K, V, Iterable<V>, W>
   createForIterable(WindowingStrategy<?, W> windowingStrategy, Coder<V> inputCoder) {
-    if (windowingStrategy.getWindowFn().isNonMerging()
-        && windowingStrategy.getTrigger().getSpec() instanceof DefaultTrigger
-        && windowingStrategy.getMode() == AccumulationMode.DISCARDING_FIRED_PANES) {
-      return new GroupAlsoByWindowsViaIteratorsDoFn<K, V, W>();
-    }
+    @SuppressWarnings("unchecked")
+    WindowingStrategy<Object, W> noWildcard = (WindowingStrategy<Object, W>) windowingStrategy;
 
-    return new GABWViaWindowSetDoFn<>(
-        windowingStrategy, AbstractWindowSet.<K, V, W>factoryFor(windowingStrategy, inputCoder));
+    return GroupAlsoByWindowsViaIteratorsDoFn.isSupported(windowingStrategy)
+        ? new GroupAlsoByWindowsViaIteratorsDoFn<K, V, W>(windowingStrategy)
+        : new GABWViaOutputBufferDoFn<>(noWildcard, SystemReduceFn.<K, V, W>buffering(inputCoder));
   }
 
   /**
    * Construct a {@link GroupAlsoByWindowsDoFn} using the {@code combineFn} if available.
    */
   public static <K, InputT, AccumT, OutputT, W extends BoundedWindow>
-      GroupAlsoByWindowsDoFn<K, InputT, OutputT, W>
+  GroupAlsoByWindowsDoFn<K, InputT, OutputT, W>
   create(
       final WindowingStrategy<?, W> windowingStrategy,
-      final KeyedCombineFn<K, InputT, AccumT, OutputT> combineFn,
-      final Coder<K> keyCoder,
-      final Coder<InputT> inputCoder) {
+      final AppliedCombineFn<K, InputT, AccumT, OutputT> combineFn,
+      final Coder<K> keyCoder) {
     Preconditions.checkNotNull(combineFn);
-    return new GABWViaWindowSetDoFn<>(
-        windowingStrategy, CombiningWindowSet.<K, InputT, AccumT, OutputT, W>factory(
-            combineFn, keyCoder, inputCoder));
+
+    @SuppressWarnings("unchecked")
+    WindowingStrategy<Object, W> noWildcard = (WindowingStrategy<Object, W>) windowingStrategy;
+    return GroupAlsoByWindowsAndCombineDoFn.isSupported(windowingStrategy)
+        ? new GroupAlsoByWindowsAndCombineDoFn<>(noWildcard.getWindowFn(), combineFn.getFn())
+        : new GABWViaOutputBufferDoFn<>(noWildcard,
+            SystemReduceFn.<K, InputT, AccumT, OutputT, W>combining(keyCoder, combineFn));
   }
 
-  private static class GABWViaWindowSetDoFn<K, InputT, OutputT, W extends BoundedWindow>
+  @SystemDoFnInternal
+  private static class GABWViaOutputBufferDoFn<K, InputT, OutputT, W extends BoundedWindow>
      extends GroupAlsoByWindowsDoFn<K, InputT, OutputT, W> {
 
-    private AbstractWindowSet.Factory<K, InputT, OutputT, W> windowSetFactory;
-    private WindowingStrategy<Object, W> strategy;
+    private final Aggregator<Long, Long> droppedDueToClosedWindow =
+        createAggregator(ReduceFnRunner.DROPPED_DUE_TO_CLOSED_WINDOW_COUNTER, new Sum.SumLongFn());
+    private final Aggregator<Long, Long> droppedDueToLateness =
+        createAggregator(ReduceFnRunner.DROPPED_DUE_TO_LATENESS_COUNTER, new Sum.SumLongFn());
 
-    public GABWViaWindowSetDoFn(WindowingStrategy<?, W> windowingStrategy,
-        AbstractWindowSet.Factory<K, InputT, OutputT, W> factory) {
-      @SuppressWarnings("unchecked")
-      WindowingStrategy<Object, W> noWildcard = (WindowingStrategy<Object, W>) windowingStrategy;
-      this.strategy = noWildcard;
-      this.windowSetFactory = factory;
+    private final WindowingStrategy<Object, W> strategy;
+    private SystemReduceFn.Factory<K, InputT, OutputT, W> reduceFnFactory;
+
+    public GABWViaOutputBufferDoFn(
+        WindowingStrategy<Object, W> windowingStrategy,
+        SystemReduceFn.Factory<K, InputT, OutputT, W> reduceFnFactory) {
+      this.strategy = windowingStrategy;
+      this.reduceFnFactory = reduceFnFactory;
     }
 
     @Override
@@ -97,32 +101,37 @@ public abstract class GroupAlsoByWindowsDoFn<K, InputT, OutputT, W extends Bound
         KV<K, OutputT>>.ProcessContext c)
         throws Exception {
       K key = c.element().getKey();
-      BatchTimerManager timerManager = new BatchTimerManager(Instant.now());
-      TriggerExecutor<K, InputT, OutputT, W> triggerExecutor = TriggerExecutor.create(
-          key, strategy, timerManager, windowSetFactory, c.keyedState(), c.windowingInternals());
+      // Used with Batch, we know that all the data is available for this key. We can't use the
+      // timer manager from the context because it doesn't exist. So we create one and emulate the
+      // watermark, knowing that we have all data and it is in timestamp order.
+      BatchTimerInternals timerInternals = new BatchTimerInternals(Instant.now());
+
+      ReduceFnRunner<K, InputT, OutputT, W> runner = new ReduceFnRunner<>(
+          key, strategy, timerInternals, c.windowingInternals(),
+          droppedDueToClosedWindow, droppedDueToLateness, reduceFnFactory.create(key));
 
       for (WindowedValue<InputT> e : c.element().getValue()) {
         // First, handle anything that needs to happen for this element
-        triggerExecutor.onElement(e);
+        runner.processElement(e);
 
         // Then, since elements are sorted by their timestamp, advance the watermark and fire any
         // timers that need to be fired.
-        timerManager.advanceWatermark(triggerExecutor, e.getTimestamp());
+        timerInternals.advanceWatermark(runner, e.getTimestamp());
 
         // Also, fire any processing timers that need to fire
-        timerManager.advanceProcessingTime(triggerExecutor, Instant.now());
+        timerInternals.advanceProcessingTime(runner, Instant.now());
       }
 
       // Merge the active windows for the current key, to fire any data-based triggers.
-      triggerExecutor.merge();
+      runner.merge();
 
       // Finish any pending windows by advancing the watermark to infinity.
-      timerManager.advanceWatermark(triggerExecutor, new Instant(Long.MAX_VALUE));
+      timerInternals.advanceWatermark(runner, new Instant(Long.MAX_VALUE));
 
       // Finally, advance the processing time to infinity to fire any timers.
-      timerManager.advanceProcessingTime(triggerExecutor, new Instant(Long.MAX_VALUE));
+      timerInternals.advanceProcessingTime(runner, new Instant(Long.MAX_VALUE));
 
-      triggerExecutor.persistWindowSet();
+      runner.persist();
     }
   }
 }

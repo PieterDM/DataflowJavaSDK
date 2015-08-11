@@ -39,7 +39,6 @@ import org.apache.avro.io.DatumReader;
 import org.apache.avro.io.DatumWriter;
 import org.apache.avro.specific.SpecificDatumReader;
 import org.apache.avro.specific.SpecificDatumWriter;
-
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -114,20 +113,21 @@ public class AvroIOTest {
 
   private void generateAvroFile(User[] elements) throws IOException {
     DatumWriter<User> userDatumWriter = new SpecificDatumWriter<>(User.class);
-    DataFileWriter<User> dataFileWriter = new DataFileWriter<>(userDatumWriter);
-    dataFileWriter.create(elements[0].getSchema(), avroFile);
-    for (User user : elements) {
-      dataFileWriter.append(user);
+    try (DataFileWriter<User> dataFileWriter = new DataFileWriter<>(userDatumWriter)) {
+      dataFileWriter.create(elements[0].getSchema(), avroFile);
+      for (User user : elements) {
+        dataFileWriter.append(user);
+      }
     }
-    dataFileWriter.close();
   }
 
   private List<User> readAvroFile() throws IOException {
     DatumReader<User> userDatumReader = new SpecificDatumReader<>(User.class);
-    DataFileReader<User> dataFileReader = new DataFileReader<>(avroFile, userDatumReader);
     List<User> users = new ArrayList<>();
-    while (dataFileReader.hasNext()) {
-      users.add(dataFileReader.next());
+    try (DataFileReader<User> dataFileReader = new DataFileReader<>(avroFile, userDatumReader)) {
+      while (dataFileReader.hasNext()) {
+        users.add(dataFileReader.next());
+      }
     }
     return users;
   }
@@ -252,8 +252,8 @@ public class AvroIOTest {
 
     DirectPipeline p = DirectPipeline.createForTest();
     @SuppressWarnings("unchecked")
-    PCollection<T> input = p.apply(Create.of(Arrays.asList((T[]) users)))
-                            .setCoder((Coder<T>) AvroCoder.of(User.class));
+    PCollection<T> input = p.apply(Create.of(Arrays.asList((T[]) users))
+                            .withCoder((Coder<T>) AvroCoder.of(User.class)));
     PDone output = input.apply(write.withoutSharding());
     EvaluationResults results = p.run();
     assertEquals(expectedName, write.getName());
@@ -375,6 +375,16 @@ public class AvroIOTest {
     AvroIO.Write.Bound<GenericRecord> write = AvroIO.Write.to("gs://bucket/foo/baz");
     assertTrue(write.needsValidation());
     assertFalse(write.withoutValidation().needsValidation());
+  }
+
+  @Test
+  public void testAvroIOGetName() {
+    assertEquals("AvroIO.Read", AvroIO.Read.from("gs://bucket/foo*/baz").getName());
+    assertEquals("AvroIO.Write", AvroIO.Write.to("gs://bucket/foo/baz").getName());
+    assertEquals("ReadMyFile",
+        AvroIO.Read.named("ReadMyFile").from("gs://bucket/foo*/baz").getName());
+    assertEquals("WriteMyFile",
+        AvroIO.Write.named("WriteMyFile").to("gs://bucket/foo/baz").getName());
   }
 
   // TODO: for Write only, test withSuffix, withNumShards,

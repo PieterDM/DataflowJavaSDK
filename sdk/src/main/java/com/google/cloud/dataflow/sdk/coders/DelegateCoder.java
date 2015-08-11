@@ -16,18 +16,22 @@
 
 package com.google.cloud.dataflow.sdk.coders;
 
+import com.google.common.collect.Lists;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.util.Collection;
+import java.util.List;
 
 /**
- * A {@code DelegateCoder<T, IntermediateT>} wraps a {@link Coder Coder&lt;IntermediateT&gt;} and
+ * A {@code DelegateCoder<T, IntermediateT>} wraps a {@link Coder} for {@code IntermediateT} and
  * encodes/decodes values of type {@code T}s by converting
- * to/from {@code DT} and then encoding/decoding using the underlying
- * {@link Coder Coder&lt;DT&gt;}.
+ * to/from {@code IntermediateT} and then encoding/decoding using the underlying
+ * {@code Coder<IntermediateT>}.
  *
- * <p> The conversions from {@code T} to {@code DT} and vice versa
+ * <p> The conversions from {@code T} to {@code IntermediateT} and vice versa
  * must be supplied as {@link CodingFunction}, a serializable
  * function that may throw any {@code Exception}. If a thrown
  * exception is an instance of {@link CoderException} or
@@ -67,6 +71,14 @@ public class DelegateCoder<T, IntermediateT> extends CustomCoder<T> {
   }
 
   /**
+   * Returns the coder used to encode/decode the intermediate values produced/consumed by the
+   * coding functions of this {@code DelegateCoder}.
+   */
+  public Coder<IntermediateT> getCoder() {
+    return coder;
+  }
+
+  /**
    * A delegate coder is deterministic if the underlying coder is deterministic.
    * For this to be safe, the intermediate {@code CodingFunction<T, IntermediateT>} must
    * also be deterministic.
@@ -84,6 +96,31 @@ public class DelegateCoder<T, IntermediateT> extends CustomCoder<T> {
   @Override
   public String toString() {
     return "DelegateCoder(" + coder + ")";
+  }
+
+  /**
+   * The encoding id for the binary format of the delegate coder is a combination of the underlying
+   * coder class and its encoding id.
+   *
+   * <p>Note that this omits any description of the coding functions. These should be modified with
+   * care.
+   */
+  @Override
+  public String getEncodingId() {
+    return delegateEncodingId(coder.getClass(), coder.getEncodingId());
+  }
+
+  @Override
+  public Collection<String> getAllowedEncodings() {
+    List<String> allowedEncodings = Lists.newArrayList();
+    for (String allowedEncoding : coder.getAllowedEncodings()) {
+      allowedEncodings.add(delegateEncodingId(coder.getClass(), allowedEncoding));
+    }
+    return allowedEncodings;
+  }
+
+  private String delegateEncodingId(Class<?> delegateClass, String encodingId) {
+    return String.format("%s:%s", delegateClass.getName(), encodingId);
   }
 
   /////////////////////////////////////////////////////////////////////////////

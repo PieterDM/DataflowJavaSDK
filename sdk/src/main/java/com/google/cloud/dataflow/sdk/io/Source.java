@@ -18,26 +18,19 @@ package com.google.cloud.dataflow.sdk.io;
 
 import com.google.cloud.dataflow.sdk.annotations.Experimental;
 import com.google.cloud.dataflow.sdk.coders.Coder;
-import com.google.cloud.dataflow.sdk.options.PipelineOptions;
-import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
-import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 
 import org.joda.time.Instant;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.List;
 import java.util.NoSuchElementException;
 
-import javax.annotation.Nullable;
-
 /**
- * Base class for defining input formats, with custom logic for splitting the input
- * into bundles (parts of the input, each of which may be processed on a different worker)
- * and creating a {@code Source} for reading the input.
+ * Base class for defining input formats and creating a {@code Source} for reading the input.
  *
- * <p> To use this class for supporting your custom input type, derive your class
- * class from it, and override the abstract methods. For an example, see {@link DatastoreIO}.
+ * <p> This class is not intended to be subclassed directly. Instead, to define
+ * a bounded source (a source which produces a finite amount of input), subclass
+ * {@link BoundedSource}; to define an unbounded source, subclass {@link UnboundedSource}.
  *
  * <p> A {@code Source} passed to a {@code Read} transform must be
  * {@code Serializable}.  This allows the {@code Source} instance
@@ -52,7 +45,7 @@ import javax.annotation.Nullable;
  * mutable fields is to cache the results of expensive operations, and such fields MUST be
  * marked {@code transient}.
  *
- * <p> {@code Source} objects should implement {@link Object#toString}, as it will be
+ * <p> {@code Source} objects should override {@link Object#toString}, as it will be
  * used in important error and debugging messages.
  *
  * @param <T> Type of elements read by the source.
@@ -60,23 +53,6 @@ import javax.annotation.Nullable;
 @Experimental(Experimental.Kind.SOURCE_SINK)
 public abstract class Source<T> implements Serializable {
   private static final long serialVersionUID = 0;
-
-  /**
-   * Splits the source into bundles.
-   *
-   * <p> {@code PipelineOptions} can be used to get information such as
-   * credentials for accessing an external storage.
-   */
-  public abstract List<? extends Source<T>> splitIntoBundles(
-      long desiredBundleSizeBytes, PipelineOptions options) throws Exception;
-
-  /**
-   * Creates a reader for this source.
-   */
-  public Reader<T> createReader(
-      PipelineOptions options, @Nullable ExecutionContext executionContext) throws IOException {
-    throw new UnsupportedOperationException();
-  }
 
   /**
    * Checks that this source is valid, before it can be used in a pipeline.
@@ -97,18 +73,52 @@ public abstract class Source<T> implements Serializable {
    * This interface is deliberately distinct from {@link java.util.Iterator} because
    * the current model tends to be easier to program and more efficient in practice
    * for iterating over sources such as files, databases etc. (rather than pure collections).
+   *
    * <p>
-   * To read a {@code Reader}:
+   * {@code Reader} implementations do not need to be thread-safe; they may only be accessed
+   * by a single thread at once.
+   *
+   * <p> Callers of {@code Readers} must obey the following access pattern:
+   * <ul>
+   * <li> One call to {@link Reader#start}
+   * <ul><li>If {@link Reader#start} returned true, any number of calls to {@code getCurrent}*
+   *   methods</ul>
+   * <li> Repeatedly, a call to {@link Reader#advance}. This may be called regardless
+   *   of what the previous {@link Reader#start}/{@link Reader#advance} returned.
+   * <ul><li>If {@link Reader#advance} returned true, any number of calls to {@code getCurrent}*
+   *   methods</ul>
+   * </ul>
+   *
+   * <p>
+   * For example, if the reader is reading a fixed set of data:
    * <pre>
    * for (boolean available = reader.start(); available; available = reader.advance()) {
    *   T item = reader.getCurrent();
+   *   Instant timestamp = reader.getCurrentTimestamp();
    *   ...
    * }
    * </pre>
+   *
+   * <p> If the set of data being read is continually growing:
+   * <pre>
+   * boolean available = reader.start();
+   * while (true) {
+   *   if (available) {
+   *     T item = reader.getCurrent();
+   *     Instant timestamp = reader.getCurrentTimestamp();
+   *     ...
+   *     resetExponentialBackoff();
+   *   } else {
+   *     exponentialBackoff();
+   *   }
+   *   available = reader.advance();
+   * }
+   * </pre>
+   *
    * <p>
-   * Note: this interface is work-in-progress and may change.
+   * Note: this interface is a work-in-progress and may change.
    */
-  public interface Reader<T> extends AutoCloseable {
+  public abstract static class Reader<T> implements AutoCloseable {
     /**
      * Initializes the reader and advances the reader to the first record.
      *
@@ -116,27 +126,30 @@ public abstract class Source<T> implements Serializable {
      * {@link #advance} or {@link #getCurrent}. This method may perform expensive operations that
      * are needed to initialize the reader.
      *
-     * @return {@code true} if a record was read, {@code false} if we're at the end of input.
+     * @return {@code true} if a record was read, {@code false} if there is no more input available.
      */
-    public boolean start() throws IOException;
+    public abstract boolean start() throws IOException;
 
     /**
      * Advances the reader to the next valid record.
      *
-     * @return {@code true} if a record was read, {@code false} if we're at the end of input.
+     * @return {@code true} if a record was read, {@code false} if there is no more input available.
      */
-    public boolean advance() throws IOException;
+    public abstract boolean advance() throws IOException;
 
     /**
      * Returns the value of the data item that was read by the last {@link #start} or
      * {@link #advance} call. The returned value must be effectively immutable and remain valid
      * indefinitely.
      *
+     * <p> Multiple calls to this method without an intervening call to {@link #advance} should
+     * return the same result.
+     *
      * @throws java.util.NoSuchElementException if the reader is at the beginning of the input and
      *         {@link #start} or {@link #advance} wasn't called, or if the last {@link #start} or
      *         {@link #advance} returned {@code false}.
      */
-    public T getCurrent() throws NoSuchElementException;
+    public abstract T getCurrent() throws NoSuchElementException;
 
     /**
      * Returns the timestamp associated with the current data item.
@@ -144,15 +157,20 @@ public abstract class Source<T> implements Serializable {
      * If the source does not support timestamps, this should return
      * {@code BoundedWindow.TIMESTAMP_MIN_VALUE}.
      *
-     * @throws NoSuchElementException
+     * <p> Multiple calls to this method without an intervening call to {@link #advance} should
+     * return the same result.
+     *
+     * @throws NoSuchElementException if the reader is at the beginning of the input and
+     *         {@link #start} or {@link #advance} wasn't called, or if the last {@link #start} or
+     *         {@link #advance} returned {@code false}.
      */
-    public Instant getCurrentTimestamp() throws NoSuchElementException;
+    public abstract Instant getCurrentTimestamp() throws NoSuchElementException;
 
     /**
      * Closes the reader. The reader cannot be used after this method is called.
      */
     @Override
-    public void close() throws IOException;
+    public abstract void close() throws IOException;
 
     /**
      * Returns a {@code Source} describing the same input that this {@code Reader} reads
@@ -161,20 +179,6 @@ public abstract class Source<T> implements Serializable {
      * A reader created from the result of {@code getCurrentSource}, if consumed, MUST
      * return the same data items as the current reader.
      */
-    public Source<T> getCurrentSource();
-  }
-
-  /**
-   * A base class implementing optional methods of {@link Reader} in a default way:
-   * <ul>
-   *   <li>All values have the timestamp of {@code BoundedWindow.TIMESTAMP_MIN_VALUE}.
-   * </ul>
-   * @param <T>
-   */
-  public abstract static class AbstractReader<T> implements Reader<T> {
-    @Override
-    public Instant getCurrentTimestamp() throws NoSuchElementException {
-      return BoundedWindow.TIMESTAMP_MIN_VALUE;
-    }
+    public abstract Source<T> getCurrentSource();
   }
 }

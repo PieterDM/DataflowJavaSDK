@@ -53,7 +53,7 @@ public class AvroSinkFactoryTest {
     cloudSink.setCodec(encoding);
 
     Sink<?> sink = SinkFactory.create(PipelineOptionsFactory.create(), cloudSink,
-                                      new BatchModeExecutionContext());
+        new BatchModeExecutionContext(), null);
     return sink;
   }
 
@@ -65,7 +65,7 @@ public class AvroSinkFactoryTest {
         pathToAvroFile, coder.asCloudObject());
 
     Assert.assertThat(sink, new IsInstanceOf(AvroByteSink.class));
-    AvroByteSink avroSink = (AvroByteSink) sink;
+    AvroByteSink<?> avroSink = (AvroByteSink<?>) sink;
     Assert.assertEquals(pathToAvroFile, avroSink.avroSink.filenamePrefix);
     Assert.assertEquals(coder, avroSink.coder);
   }

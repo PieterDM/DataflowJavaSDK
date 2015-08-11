@@ -23,6 +23,7 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.channels.Channels;
@@ -30,6 +31,7 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.PathMatcher;
 import java.nio.file.Paths;
 import java.util.Collection;
@@ -84,7 +86,10 @@ public class FileIOChannelFactory implements IOChannelFactory {
   @Override
   public ReadableByteChannel open(String spec) throws IOException {
     LOG.debug("opening file {}", spec);
+    @SuppressWarnings("resource") // The caller is responsible for closing the channel.
     FileInputStream inputStream = new FileInputStream(spec);
+    // Use this method for creating the channel (rather than new FileChannel) so that we get
+    // regular FileNotFoundException. Closing the underyling channel will close the inputStream.
     return inputStream.getChannel();
   }
 
@@ -104,7 +109,11 @@ public class FileIOChannelFactory implements IOChannelFactory {
 
   @Override
   public long getSizeBytes(String spec) throws IOException {
-    return Files.size(FileSystems.getDefault().getPath(spec));
+    try {
+      return Files.size(FileSystems.getDefault().getPath(spec));
+    } catch (NoSuchFileException e) {
+      throw new FileNotFoundException(e.getReason());
+    }
   }
 
   @Override

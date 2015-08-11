@@ -21,8 +21,8 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
 import com.google.api.services.bigquery.Bigquery.Datasets.Delete;
-import com.google.api.services.dataflow.Dataflow.V1b3.Projects.Jobs.Create;
-import com.google.api.services.dataflow.Dataflow.V1b3.Projects.Jobs.Get;
+import com.google.api.services.dataflow.Dataflow.Projects.Jobs.Create;
+import com.google.api.services.dataflow.Dataflow.Projects.Jobs.Get;
 import com.google.cloud.dataflow.sdk.options.GoogleApiDebugOptions.GoogleApiTracer;
 import com.google.cloud.dataflow.sdk.util.TestCredential;
 import com.google.cloud.dataflow.sdk.util.Transport;
@@ -38,7 +38,8 @@ import org.junit.runners.JUnit4;
 public class GoogleApiDebugOptionsTest {
   @Test
   public void testWhenTracingMatches() throws Exception {
-    String[] args = new String[] {"--googleApiTrace=Projects.Jobs.Get#GetTraceDestination"};
+    String[] args =
+        new String[] {"--googleApiTrace={\"Projects.Jobs.Get\":\"GetTraceDestination\"}"};
     DataflowPipelineOptions options =
         PipelineOptionsFactory.fromArgs(args).as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
@@ -46,13 +47,13 @@ public class GoogleApiDebugOptionsTest {
     assertNotNull(options.getGoogleApiTrace());
 
     Get request =
-        options.getDataflowClient().v1b3().projects().jobs().get("testProjectId", "testJobId");
+        options.getDataflowClient().projects().jobs().get("testProjectId", "testJobId");
     assertEquals("GetTraceDestination", request.get("$trace"));
   }
 
   @Test
   public void testWhenTracingDoesNotMatch() throws Exception {
-    String[] args = new String[] {"--googleApiTrace=Projects.Jobs.Create#testToken"};
+    String[] args = new String[] {"--googleApiTrace={\"Projects.Jobs.Create\":\"testToken\"}"};
     DataflowPipelineOptions options =
         PipelineOptionsFactory.fromArgs(args).as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
@@ -60,15 +61,15 @@ public class GoogleApiDebugOptionsTest {
     assertNotNull(options.getGoogleApiTrace());
 
     Get request =
-        options.getDataflowClient().v1b3().projects().jobs().get("testProjectId", "testJobId");
+        options.getDataflowClient().projects().jobs().get("testProjectId", "testJobId");
     assertNull(request.get("$trace"));
   }
 
   @Test
   public void testWithMultipleTraces() throws Exception {
     String[] args = new String[] {
-        "--googleApiTrace=Projects.Jobs.Create#CreateTraceDestination,"
-        + "Projects.Jobs.Get#GetTraceDestination"};
+        "--googleApiTrace={\"Projects.Jobs.Create\":\"CreateTraceDestination\","
+        + "\"Projects.Jobs.Get\":\"GetTraceDestination\"}"};
     DataflowPipelineOptions options =
         PipelineOptionsFactory.fromArgs(args).as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
@@ -76,17 +77,17 @@ public class GoogleApiDebugOptionsTest {
     assertNotNull(options.getGoogleApiTrace());
 
     Get getRequest =
-        options.getDataflowClient().v1b3().projects().jobs().get("testProjectId", "testJobId");
+        options.getDataflowClient().projects().jobs().get("testProjectId", "testJobId");
     assertEquals("GetTraceDestination", getRequest.get("$trace"));
 
     Create createRequest =
-        options.getDataflowClient().v1b3().projects().jobs().create("testProjectId", null);
+        options.getDataflowClient().projects().jobs().create("testProjectId", null);
     assertEquals("CreateTraceDestination", createRequest.get("$trace"));
   }
 
   @Test
-  public void testMatchingAllDataflowV1b3Calls() throws Exception {
-    String[] args = new String[] {"--googleApiTrace=Dataflow.V1b3#TraceDestination"};
+  public void testMatchingAllDataflowCalls() throws Exception {
+    String[] args = new String[] {"--googleApiTrace={\"Dataflow\":\"TraceDestination\"}"};
     DataflowPipelineOptions options =
         PipelineOptionsFactory.fromArgs(args).as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
@@ -94,11 +95,11 @@ public class GoogleApiDebugOptionsTest {
     assertNotNull(options.getGoogleApiTrace());
 
     Get getRequest =
-        options.getDataflowClient().v1b3().projects().jobs().get("testProjectId", "testJobId");
+        options.getDataflowClient().projects().jobs().get("testProjectId", "testJobId");
     assertEquals("TraceDestination", getRequest.get("$trace"));
 
     Create createRequest =
-        options.getDataflowClient().v1b3().projects().jobs().create("testProjectId", null);
+        options.getDataflowClient().projects().jobs().create("testProjectId", null);
     assertEquals("TraceDestination", createRequest.get("$trace"));
   }
 
@@ -106,11 +107,11 @@ public class GoogleApiDebugOptionsTest {
   public void testMatchingAgainstClient() throws Exception {
     DataflowPipelineOptions options = PipelineOptionsFactory.as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
-    options.setGoogleApiTrace(new GoogleApiTracer[] {
-        GoogleApiTracer.create(Transport.newDataflowClient(options).build(), "TraceDestination")});
+    options.setGoogleApiTrace(new GoogleApiTracer().addTraceFor(
+        Transport.newDataflowClient(options).build(), "TraceDestination"));
 
     Get getRequest =
-        options.getDataflowClient().v1b3().projects().jobs().get("testProjectId", "testJobId");
+        options.getDataflowClient().projects().jobs().get("testProjectId", "testJobId");
     assertEquals("TraceDestination", getRequest.get("$trace"));
 
     Delete deleteRequest = Transport.newBigQueryClient(options).build().datasets()
@@ -122,25 +123,25 @@ public class GoogleApiDebugOptionsTest {
   public void testMatchingAgainstRequestType() throws Exception {
     DataflowPipelineOptions options = PipelineOptionsFactory.as(DataflowPipelineOptions.class);
     options.setGcpCredential(new TestCredential());
-    options.setGoogleApiTrace(new GoogleApiTracer[] {GoogleApiTracer.create(
-        Transport.newDataflowClient(options).build().v1b3().projects().jobs()
-            .get("aProjectId", "aJobId"), "TraceDestination")});
+    options.setGoogleApiTrace(new GoogleApiTracer().addTraceFor(
+        Transport.newDataflowClient(options).build().projects().jobs()
+            .get("aProjectId", "aJobId"), "TraceDestination"));
 
     Get getRequest =
-        options.getDataflowClient().v1b3().projects().jobs().get("testProjectId", "testJobId");
+        options.getDataflowClient().projects().jobs().get("testProjectId", "testJobId");
     assertEquals("TraceDestination", getRequest.get("$trace"));
 
     Create createRequest =
-        options.getDataflowClient().v1b3().projects().jobs().create("testProjectId", null);
+        options.getDataflowClient().projects().jobs().create("testProjectId", null);
     assertNull(createRequest.get("$trace"));
   }
 
   @Test
-  public void testDeserializationAndSerializationOfGoogleApiTracer() {
-    String serializedValue = "Api#Token";
+  public void testDeserializationAndSerializationOfGoogleApiTracer() throws Exception {
+    String serializedValue = "{\"Api\":\"Token\"}";
     ObjectMapper objectMapper = new ObjectMapper();
     assertEquals(serializedValue,
-        objectMapper.convertValue(
-            objectMapper.convertValue(serializedValue, GoogleApiTracer.class), String.class));
+        objectMapper.writeValueAsString(
+            objectMapper.readValue(serializedValue, GoogleApiTracer.class)));
   }
 }

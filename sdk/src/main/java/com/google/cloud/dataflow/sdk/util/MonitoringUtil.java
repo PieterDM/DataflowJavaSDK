@@ -18,10 +18,11 @@ package com.google.cloud.dataflow.sdk.util;
 import static com.google.cloud.dataflow.sdk.util.TimeUtil.fromCloudTime;
 
 import com.google.api.services.dataflow.Dataflow;
-import com.google.api.services.dataflow.Dataflow.V1b3.Projects.Jobs.Messages;
+import com.google.api.services.dataflow.Dataflow.Projects.Jobs.Messages;
 import com.google.api.services.dataflow.model.JobMessage;
 import com.google.api.services.dataflow.model.ListJobMessagesResponse;
 import com.google.cloud.dataflow.sdk.PipelineResult.State;
+import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableMap;
 
@@ -43,6 +44,11 @@ import javax.annotation.Nullable;
  * A helper class for monitoring jobs submitted to the service.
  */
 public final class MonitoringUtil {
+
+  private static final String GCLOUD_DATAFLOW_PREFIX = "gcloud alpha dataflow";
+  private static final String ENDPOINT_OVERRIDE_ENV_VAR =
+      "CLOUDSDK_API_ENDPOINT_OVERRIDES_DATAFLOW";
+
   private static final Map<String, State> DATAFLOW_STATE_TO_JOB_STATE =
       ImmutableMap
           .<String, State>builder()
@@ -52,6 +58,7 @@ public final class MonitoringUtil {
           .put("JOB_STATE_DONE", State.DONE)
           .put("JOB_STATE_FAILED", State.FAILED)
           .put("JOB_STATE_CANCELLED", State.CANCELLED)
+          .put("JOB_STATE_UPDATED", State.UPDATED)
           .build();
 
   private String projectId;
@@ -92,6 +99,8 @@ public final class MonitoringUtil {
           importanceString = "Error:   ";
         } else if (message.getMessageImportance().equals("JOB_MESSAGE_WARNING")) {
           importanceString = "Warning: ";
+        } else if (message.getMessageImportance().equals("JOB_MESSAGE_BASIC")) {
+          importanceString = "Basic:  ";
         } else if (message.getMessageImportance().equals("JOB_MESSAGE_DETAILED")) {
           importanceString = "Detail:  ";
         } else {
@@ -116,7 +125,7 @@ public final class MonitoringUtil {
 
   /** Construct a helper for monitoring. */
   public MonitoringUtil(String projectId, Dataflow dataflow) {
-    this(projectId, dataflow.v1b3().projects().jobs().messages());
+    this(projectId, dataflow.projects().jobs().messages());
   }
 
   // @VisibleForTesting
@@ -201,6 +210,20 @@ public final class MonitoringUtil {
       // Should never happen.
       throw new AssertionError("UTF-8 encoding is not supported by the environment", e);
     }
+  }
+
+  public static String getGcloudCancelCommand(DataflowPipelineOptions options, String jobId) {
+
+    // If using a different Dataflow API than default, prefix command with an API override.
+    String dataflowApiOverridePrefix = "";
+    String apiUrl = options.getDataflowClient().getBaseUrl();
+    if (!apiUrl.equals(Dataflow.DEFAULT_BASE_URL)) {
+      dataflowApiOverridePrefix = String.format("%s=%s ", ENDPOINT_OVERRIDE_ENV_VAR, apiUrl);
+    }
+
+    // Assemble cancel command from optional prefix and project/job parameters.
+    return String.format("%s%s jobs --project=%s cancel %s",
+        dataflowApiOverridePrefix, GCLOUD_DATAFLOW_PREFIX, options.getProject(), jobId);
   }
 
   public static State toState(String stateName) {

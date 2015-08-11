@@ -16,6 +16,7 @@
 
 package com.google.cloud.dataflow.sdk.util;
 
+import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 
@@ -102,43 +103,132 @@ public class StringUtils {
   private static final Pattern NAMED_INNER_CLASS =
       Pattern.compile(".+\\$(?<INNER>[^0-9].*)");
 
+  private static final String ANONYMOUS_CLASS_REGEX = "\\$[0-9]+\\$";
+
   /**
    * Returns a simple name for a class.
    *
    * <p> Note: this is non-invertible - the name may be simplified to an
    * extent that it cannot be mapped back to the original class.
    *
-   * <p> This can be used to generate human-readable transform names.  It
-   * removes the package from the name, and removes common suffixes.
+   * <p> This can be used to generate human-readable names. It
+   * removes the package and outer classes from the name,
+   * and removes common suffixes.
    *
    * <p> Examples:
    * <ul>
-   *   <li>{@code some.package.WordSummaryDoFn} -> "WordSummary"
+   *   <li>{@code some.package.Word.SummaryDoFn} -> "Summary"
    *   <li>{@code another.package.PairingFn} -> "Pairing"
    * </ul>
    *
    * @throws IllegalArgumentException if the class is anonymous
    */
   public static String approximateSimpleName(Class<?> clazz) {
+    return approximateSimpleName(clazz, /* dropOuterClassNames */ true);
+  }
+
+  /**
+   * Returns a name for a PTransform class.
+   *
+   * <p> This can be used to generate human-readable transform names. It
+   * removes the package from the name, and removes common suffixes.
+   *
+   * <p> It is different than approximateSimpleName:
+   * <ul>
+   *   <li>1. It keeps the outer classes names.
+   *   <li>2. It removes the common transform inner class: "Bound".
+   * </ul>
+   *
+   * <p> Examples:
+   * <ul>
+   *   <li>{@code some.package.Word.Summary} -> "Word.Summary"
+   *   <li>{@code another.package.Pairing.Bound} -> "Pairing"
+   * </ul>
+   */
+  public static String approximatePTransformName(Class<?> clazz) {
+    Preconditions.checkArgument(PTransform.class.isAssignableFrom(clazz));
+    return approximateSimpleName(clazz, /* dropOuterClassNames */ false)
+        .replaceFirst("\\.Bound$", "");
+  }
+
+  /**
+   * Calculate the Levenshtein distance between two strings.
+   *
+   * <p> The Levenshtein distance between two words is the minimum number of single-character edits
+   * (i.e. insertions, deletions or substitutions) required to change one string into the other.
+   */
+  public static int getLevenshteinDistance(final String s, final String t) {
+    Preconditions.checkNotNull(s);
+    Preconditions.checkNotNull(t);
+
+    // base cases
+    if (s.equals(t)) {
+      return 0;
+    }
+    if (s.length() == 0) {
+      return t.length();
+    }
+    if (t.length() == 0) {
+      return s.length();
+    }
+
+    // create two work arrays to store integer distances
+    final int[] v0 = new int[t.length() + 1];
+    final int[] v1 = new int[t.length() + 1];
+
+    // initialize v0 (the previous row of distances)
+    // this row is A[0][i]: edit distance for an empty s
+    // the distance is just the number of characters to delete from t
+    for (int i = 0; i < v0.length; i++) {
+      v0[i] = i;
+    }
+
+    for (int i = 0; i < s.length(); i++) {
+      // calculate v1 (current row distances) from the previous row v0
+
+      // first element of v1 is A[i+1][0]
+      //   edit distance is delete (i+1) chars from s to match empty t
+      v1[0] = i + 1;
+
+      // use formula to fill in the rest of the row
+      for (int j = 0; j < t.length(); j++) {
+        int cost = (s.charAt(i) == t.charAt(j)) ? 0 : 1;
+        v1[j + 1] = Math.min(Math.min(v1[j] + 1, v0[j + 1] + 1), v0[j] + cost);
+      }
+
+      // copy v1 (current row) to v0 (previous row) for next iteration
+      System.arraycopy(v1, 0, v0, 0, v0.length);
+    }
+
+    return v1[t.length()];
+  }
+
+  private static String approximateSimpleName(Class<?> clazz, boolean dropOuterClassNames) {
     Preconditions.checkArgument(!clazz.isAnonymousClass(),
         "Attempted to get simple name of anonymous class");
 
     String fullName = clazz.getName();
     String shortName = fullName.substring(fullName.lastIndexOf('.') + 1);
 
-    // Simplify inner class name by dropping outer class prefixes.
-    Matcher m = NAMED_INNER_CLASS.matcher(shortName);
-    if (m.matches()) {
-      shortName = m.group("INNER");
-    }
-
     // Drop common suffixes for each named component.
     String[] names = shortName.split("\\$");
     for (int i = 0; i < names.length; i++) {
       names[i] = simplifyNameComponent(names[i]);
     }
+    shortName = Joiner.on('$').join(names);
 
-    return Joiner.on('$').join(names);
+    if (dropOuterClassNames) {
+      // Simplify inner class name by dropping outer class prefixes.
+      Matcher m = NAMED_INNER_CLASS.matcher(shortName);
+      if (m.matches()) {
+        shortName = m.group("INNER");
+      }
+    } else {
+      // Dropping anonymous outer classes
+      shortName = shortName.replaceAll(ANONYMOUS_CLASS_REGEX, ".");
+      shortName = shortName.replaceAll("\\$", ".");
+    }
+    return shortName;
   }
 
   private static String simplifyNameComponent(String name) {

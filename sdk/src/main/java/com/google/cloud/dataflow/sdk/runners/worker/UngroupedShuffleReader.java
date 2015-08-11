@@ -20,6 +20,7 @@ import com.google.api.client.util.Preconditions;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.util.CoderUtils;
+import com.google.cloud.dataflow.sdk.util.common.worker.AbstractBoundedReaderIterator;
 import com.google.cloud.dataflow.sdk.util.common.worker.BatchingShuffleEntryReader;
 import com.google.cloud.dataflow.sdk.util.common.worker.Reader;
 import com.google.cloud.dataflow.sdk.util.common.worker.ShuffleEntry;
@@ -42,7 +43,8 @@ public class UngroupedShuffleReader<T> extends Reader<T> {
   final String stopShufflePosition;
   final Coder<T> coder;
 
-  public UngroupedShuffleReader(PipelineOptions options, byte[] shuffleReaderConfig,
+  public UngroupedShuffleReader(
+      @SuppressWarnings("unused") PipelineOptions options, byte[] shuffleReaderConfig,
       @Nullable String startShufflePosition, @Nullable String stopShufflePosition, Coder<T> coder) {
     this.shuffleReaderConfig = shuffleReaderConfig;
     this.startShufflePosition = startShufflePosition;
@@ -57,7 +59,7 @@ public class UngroupedShuffleReader<T> extends Reader<T> {
         new ChunkingShuffleBatchReader(new ApplianceShuffleReader(shuffleReaderConfig))));
   }
 
-  ReaderIterator<T> iterator(ShuffleEntryReader reader) throws IOException {
+  ReaderIterator<T> iterator(ShuffleEntryReader reader) {
     return new UngroupedShuffleReaderIterator(reader);
   }
 
@@ -65,22 +67,22 @@ public class UngroupedShuffleReader<T> extends Reader<T> {
    * A ReaderIterator that reads from a ShuffleEntryReader and extracts
    * just the values.
    */
-  class UngroupedShuffleReaderIterator extends AbstractReaderIterator<T> {
+  class UngroupedShuffleReaderIterator extends AbstractBoundedReaderIterator<T> {
     Iterator<ShuffleEntry> iterator;
 
-    UngroupedShuffleReaderIterator(ShuffleEntryReader reader) throws IOException {
+    UngroupedShuffleReaderIterator(ShuffleEntryReader reader) {
       this.iterator = reader.read(
           ByteArrayShufflePosition.fromBase64(startShufflePosition),
           ByteArrayShufflePosition.fromBase64(stopShufflePosition));
     }
 
     @Override
-    public boolean hasNext() throws IOException {
+    protected boolean hasNextImpl() throws IOException {
       return iterator.hasNext();
     }
 
     @Override
-    public T next() throws IOException {
+    protected T nextImpl() throws IOException {
       ShuffleEntry record = iterator.next();
       // Throw away the primary and the secondary keys.
       byte[] value = record.getValue();

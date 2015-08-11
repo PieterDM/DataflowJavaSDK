@@ -18,8 +18,8 @@ package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
+import com.google.cloud.dataflow.sdk.transforms.windowing.PaneInfo;
+import com.google.cloud.dataflow.sdk.util.state.StateInternals;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 
@@ -27,8 +27,6 @@ import org.joda.time.Instant;
 
 import java.io.IOException;
 import java.util.Collection;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Interface that may be required by some (internal) {@code DoFn}s to implement windowing. It should
@@ -41,71 +39,29 @@ import java.util.Map;
  */
 public interface WindowingInternals<InputT, OutputT> {
 
-  /**
-   * Updates the {@code KeyedState} in place so that the given tag maps to the given value.
-   *
-   * <p> This method should be used with caution. Unless the value is removed or updated with
-   * a new timestamp, the watermark will be held up and no output will be produced.
-   *
-   * @param timestamp the timestamp to associate with the value. The watermark will be held to
-   *        the given point and no downstream watermark triggers will fire.
-   *
-   * @throws IOException if encoding the given value fails
-   */
-  public <T> void store(CodedTupleTag<T> tag, T value, Instant timestamp) throws IOException;
+  StateInternals stateInternals();
 
   /**
    * Output the value at the specified timestamp in the listed windows.
    */
   void outputWindowedValue(OutputT output, Instant timestamp,
-      Collection<? extends BoundedWindow> windows);
+      Collection<? extends BoundedWindow> windows, PaneInfo pane);
 
   /**
-   * Writes the provided value to the list of values in stored state corresponding to the
-   * provided tag.
-   *
-   * @throws IOException if encoding the given value fails
+   * Return the timer manager provided by the underlying system, or null if Timers need
+   * to be emulated.
    */
-  <T> void writeToTagList(CodedTupleTag<T> tag, T value) throws IOException;
-
-  /**
-   * Deletes the list corresponding to the given tag.
-   */
-  <T> void deleteTagList(CodedTupleTag<T> tag);
-
-  /**
-   * Reads the elements of the list in stored state corresponding to the provided tag.
-   * If the tag is undefined, will return an empty list rather than null.
-   *
-   * @throws IOException if decoding any of the requested values fails
-   */
-  <T> Iterable<T> readTagList(CodedTupleTag<T> tag) throws IOException;
-
-  /**
-   * Reads the elements of the lists in stored state corresponding to the provided tags.
-   * Any undefined tag will be an empty list rather than null.
-   *
-   * @throws IOException if decoding any of the requested values fails
-   */
-  <T> Map<CodedTupleTag<T>, Iterable<T>> readTagList(
-      List<CodedTupleTag<T>> tags) throws IOException;
-
-  /**
-   * Writes out a timer to be fired when the watermark reaches the given
-   * timestamp.  Timers are identified by their name, and can be moved
-   * by calling {@code setTimer} again, or deleted with {@link #deleteTimer}.
-   */
-  void setTimer(String timer, Instant timestamp, Trigger.TimeDomain domain);
-
-  /**
-   * Deletes the given timer.
-   */
-  void deleteTimer(String timer, Trigger.TimeDomain domain);
+  TimerInternals timerInternals();
 
   /**
    * Access the windows the element is being processed in without "exploding" it.
    */
   Collection<? extends BoundedWindow> windows();
+
+  /**
+   * Access the pane of the current window(s).
+   */
+  PaneInfo pane();
 
   /**
    * Write the given {@link PCollectionView} data to a location accessible by other workers.

@@ -32,11 +32,11 @@ import com.google.api.services.dataflow.model.WorkItemServiceState;
 import com.google.api.services.dataflow.model.WorkItemStatus;
 import com.google.cloud.dataflow.sdk.options.DataflowWorkerHarnessOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
-import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingFormatter;
 import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingInitializer;
-import com.google.cloud.dataflow.sdk.util.AttemptBoundedExponentialBackOff;
+import com.google.cloud.dataflow.sdk.runners.worker.logging.DataflowWorkerLoggingMDC;
 import com.google.cloud.dataflow.sdk.util.GcsIOChannelFactory;
 import com.google.cloud.dataflow.sdk.util.IOChannelUtils;
+import com.google.cloud.dataflow.sdk.util.IntervalBoundedExponentialBackOff;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.Transport;
 import com.google.cloud.dataflow.sdk.util.common.worker.WorkProgressUpdater;
@@ -44,6 +44,7 @@ import com.google.common.collect.ImmutableList;
 
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
+import org.joda.time.Interval;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,7 +77,7 @@ public class DataflowWorkerHarness {
 
   // ExponentialBackOff parameters for the task retry strategy. Visible for testing.
   static final int BACKOFF_INITIAL_INTERVAL_MILLIS = 5000;  // 5 second
-  static final int BACKOFF_MAX_ATTEMPTS = 10;  // 10 attempts will take approx. 15 min.
+  static final int BACKOFF_MAX_INTERVAL_MILLIS = 5 * 60 * 1000;  // 5 min.
 
   /**
    * This uncaught exception handler logs the {@link Throwable} to the logger, {@link System#err}
@@ -98,8 +99,8 @@ public class DataflowWorkerHarness {
    * Helper for initializing the BackOff used for retries.
    */
   private static BackOff createBackOff() {
-    return new AttemptBoundedExponentialBackOff(
-            BACKOFF_MAX_ATTEMPTS, BACKOFF_INITIAL_INTERVAL_MILLIS);
+    return new IntervalBoundedExponentialBackOff(
+            BACKOFF_MAX_INTERVAL_MILLIS, BACKOFF_INITIAL_INTERVAL_MILLIS);
   }
 
   /**
@@ -115,6 +116,13 @@ public class DataflowWorkerHarness {
 
     final Sleeper sleeper = Sleeper.DEFAULT;
     final DataflowWorker worker = create(pipelineOptions);
+
+    int statusPort = DataflowWorker.DEFAULT_STATUS_PORT;
+    if (System.getProperties().containsKey("status_port")) {
+      statusPort = Integer.parseInt(System.getProperty("status_port"));
+    }
+    worker.runStatusServer(statusPort);
+
     processWork(pipelineOptions, worker, sleeper);
   }
 
@@ -178,8 +186,8 @@ public class DataflowWorkerHarness {
   }
 
   static DataflowWorker create(DataflowWorkerHarnessOptions options) {
-    DataflowWorkerLoggingFormatter.setJobId(options.getJobId());
-    DataflowWorkerLoggingFormatter.setWorkerId(options.getWorkerId());
+    DataflowWorkerLoggingMDC.setJobId(options.getJobId());
+    DataflowWorkerLoggingMDC.setWorkerId(options.getWorkerId());
     options.setAppName(APPLICATION_NAME);
 
     // Configure standard IO factories.
@@ -194,6 +202,16 @@ public class DataflowWorkerHarness {
    */
   @ThreadSafe
   static class DataflowWorkUnitClient extends DataflowWorker.WorkUnitClient {
+    /**
+     * Work items are reported as complete using this class's reportWorkItemStatus() method
+     * on the same thread that requested the item using getWorkItem().
+     * This thread local variable is used to tag the current thread with the stage start time
+     * during getWorkItem() so that the elapsed execution time can be easily determined in
+     * reportWorkItemStatus(). A similar thread-local mechanism is used in DataflowWorkerLoggingMDC
+     * to track other metadata about the current operation being executed.
+     */
+    private static final ThreadLocal<DateTime> stageStartTime = new ThreadLocal<>();
+
     private final Dataflow dataflow;
     private final DataflowWorkerHarnessOptions options;
 
@@ -218,7 +236,10 @@ public class DataflowWorkerHarness {
     }
 
     /**
-     * Gets a WorkItem from the Dataflow service.
+     * Gets a {@link WorkItem} from the Dataflow service, or returns null if no work was found.
+     *
+     * <p> If work is returned, the calling thread should call reportWorkItemStatus after completing
+     * it and before requesting another work item.
      */
     @Override
     public WorkItem getWorkItem() throws IOException {
@@ -241,18 +262,18 @@ public class DataflowWorkerHarness {
 
       LOG.debug("Leasing work: {}", request);
 
-      LeaseWorkItemResponse response = dataflow.v1b3().projects().jobs().workItems().lease(
+      LeaseWorkItemResponse response = dataflow.projects().jobs().workItems().lease(
           options.getProject(), options.getJobId(), request).execute();
       LOG.debug("Lease work response: {}", response);
 
       List<WorkItem> workItems = response.getWorkItems();
       if (workItems == null || workItems.isEmpty()) {
-        // We didn't lease any work
+        // We didn't lease any work.
         return null;
-      } else if (workItems.size() > 1){
+      } else if (workItems.size() > 1) {
         throw new IOException(
             "This version of the SDK expects no more than one work item from the service: "
-            + response);
+                + response);
       }
 
       WorkItem work = response.getWorkItems().get(0);
@@ -260,23 +281,55 @@ public class DataflowWorkerHarness {
         return null;
       }
 
-      DataflowWorkerLoggingFormatter.setWorkId(Long.toString(work.getId()));
+      // Capture the work item's stage name.
+      if (work.getMapTask() != null) {
+        String stage = work.getMapTask().getStageName();
+        DataflowWorkerLoggingMDC.setStageName(stage);
+        LOG.info("Starting MapTask stage {}", stage);
+      } else if (work.getSeqMapTask() != null) {
+        String stage = work.getSeqMapTask().getStageName();
+        DataflowWorkerLoggingMDC.setStageName(stage);
+        LOG.info("Starting SeqMapTask stage {}", stage);
+      } else {
+        // Only MapTask and SeqMapTask currently have a stage name.
+        DataflowWorkerLoggingMDC.setStageName(null);
+      }
+
+      stageStartTime.set(DateTime.now());
+      DataflowWorkerLoggingMDC.setWorkId(Long.toString(work.getId()));
       // Looks like the work's a'ight.
       return work;
     }
 
+    /**
+     * Reports the status of the most recently requested work item.
+     */
     @Override
     public WorkItemServiceState reportWorkItemStatus(WorkItemStatus workItemStatus)
         throws IOException {
+      DateTime endTime = DateTime.now();
       workItemStatus.setFactory(Transport.getJsonFactory());
       LOG.debug("Reporting work status: {}", workItemStatus);
+      // Log the stage execution time of finished stages that have a stage name.
+      if (workItemStatus.getCompleted() && DataflowWorkerLoggingMDC.getStageName() != null) {
+        DateTime startTime = stageStartTime.get();
+        if (startTime != null) {
+          // This thread should have been tagged with the stage start time during getWorkItem(),
+          Interval elapsed = new Interval(startTime, endTime);
+          int numErrors = workItemStatus.getErrors() == null
+              ? 0 : workItemStatus.getErrors().size();
+          LOG.info("Finished processing stage {} with {} errors in {} seconds ",
+              DataflowWorkerLoggingMDC.getStageName(), numErrors,
+              (double) elapsed.toDurationMillis() / 1000);
+        }
+      }
       ReportWorkItemStatusResponse result =
-          dataflow.v1b3().projects().jobs().workItems().reportStatus(
+          dataflow.projects().jobs().workItems().reportStatus(
               options.getProject(), options.getJobId(),
               new ReportWorkItemStatusRequest()
               .setWorkerId(options.getWorkerId())
               .setWorkItemStatuses(Collections.singletonList(workItemStatus))
-              .setCurrentWorkerTime(toCloudTime(DateTime.now())))
+              .setCurrentWorkerTime(toCloudTime(endTime)))
           .execute();
       if (result == null || result.getWorkItemServiceStates() == null
           || result.getWorkItemServiceStates().size() != 1) {

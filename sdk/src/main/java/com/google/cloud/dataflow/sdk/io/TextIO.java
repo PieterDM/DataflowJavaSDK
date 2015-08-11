@@ -30,6 +30,7 @@ import com.google.cloud.dataflow.sdk.util.WindowedValue;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.util.common.worker.Sink;
 import com.google.cloud.dataflow.sdk.values.PCollection;
+import com.google.cloud.dataflow.sdk.values.PCollection.IsBounded;
 import com.google.cloud.dataflow.sdk.values.PDone;
 import com.google.cloud.dataflow.sdk.values.PInput;
 import com.google.common.primitives.Ints;
@@ -81,8 +82,12 @@ import javax.annotation.Nullable;
  * {@code "gs://<bucket>/<filepath>"}), and optionally
  * {@link TextIO.Write#named} to specify the name of the pipeline step
  * and/or {@link TextIO.Write#withCoder} to specify the Coder to use
- * to encode the Java values into text lines.  For example:
+ * to encode the Java values into text lines.
  *
+ * <p> Any existing files with the same names as generated output files
+ * will be overwritten.
+ *
+ * <p> For example:
  * <pre> {@code
  * // A simple Write to a local file (only runs locally):
  * PCollection<String> lines = ...;
@@ -96,6 +101,12 @@ import javax.annotation.Nullable;
  *                           .withSuffix(".txt")
  *                           .withCoder(TextualIntegerCoder.of()));
  * } </pre>
+ *
+ * <p><h3>Permissions</h3>
+ * Permission requirements depend on the
+ * {@link com.google.cloud.dataflow.sdk.runners.PipelineRunner PipelineRunner} that is
+ * used to execute the Dataflow job. Please refer to the documentation of corresponding
+ * {@code PipelineRunner}s for more details.
  */
 public class TextIO {
   public static final Coder<String> DEFAULT_TEXT_CODER = StringUtf8Coder.of();
@@ -280,18 +291,14 @@ public class TextIO {
         // format specified by the Read transform.
         return PCollection.<T>createPrimitiveOutputInternal(
                 input.getPipeline(),
-                WindowingStrategy.globalDefault())
+                WindowingStrategy.globalDefault(),
+                IsBounded.BOUNDED)
             .setCoder(coder);
       }
 
       @Override
       protected Coder<T> getDefaultOutputCoder() {
         return coder;
-      }
-
-      @Override
-      protected String getKindString() {
-        return "TextIO.Read";
       }
 
       public String getFilepattern() {
@@ -590,11 +597,6 @@ public class TextIO {
       @Override
       protected Coder<Void> getDefaultOutputCoder() {
         return VoidCoder.of();
-      }
-
-      @Override
-      protected String getKindString() {
-        return "TextIO.Write";
       }
 
       public String getFilenamePrefix() {

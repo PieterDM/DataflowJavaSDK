@@ -16,16 +16,21 @@
 
 package com.google.cloud.dataflow.sdk.runners.worker;
 
+import static com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind.SUM;
+
 import com.google.api.client.util.Preconditions;
 import com.google.cloud.dataflow.sdk.coders.BigEndianLongCoder;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.InstantCoder;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
+import com.google.cloud.dataflow.sdk.options.DataflowWorkerHarnessOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
 import com.google.cloud.dataflow.sdk.util.CoderUtils;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
 import com.google.cloud.dataflow.sdk.util.WindowedValue.WindowedValueCoder;
+import com.google.cloud.dataflow.sdk.util.common.Counter;
+import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.worker.ShuffleEntry;
 import com.google.cloud.dataflow.sdk.util.common.worker.Sink;
 import com.google.cloud.dataflow.sdk.values.KV;
@@ -51,6 +56,10 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
 
   final ShuffleKind shuffleKind;
 
+  final PipelineOptions options;
+
+  final CounterSet.AddCounterMutator addCounterMutator;
+
   boolean shardByKey;
   boolean groupValues;
   boolean sortValues;
@@ -72,9 +81,12 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
   }
 
   public ShuffleSink(PipelineOptions options, byte[] shuffleWriterConfig, ShuffleKind shuffleKind,
-      Coder<WindowedValue<T>> coder) throws Exception {
+      Coder<WindowedValue<T>> coder, CounterSet.AddCounterMutator addCounterMutator)
+      throws Exception {
     this.shuffleWriterConfig = shuffleWriterConfig;
     this.shuffleKind = shuffleKind;
+    this.options = options;
+    this.addCounterMutator = addCounterMutator;
     initCoder(coder);
   }
 
@@ -111,7 +123,7 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
         throw new Exception("unexpected kind of coder for elements written to "
             + "a key-grouping shuffle");
       }
-      KvCoder<?, ?> kvCoder = (KvCoder) elemCoder;
+      KvCoder<?, ?> kvCoder = (KvCoder<?, ?>) elemCoder;
       this.keyCoder = kvCoder.getKeyCoder();
       this.valueCoder = kvCoder.getValueCoder();
       if (sortValues) {
@@ -121,7 +133,7 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
           throw new Exception("unexpected kind of coder for values written to "
               + "a value-sorting shuffle");
         }
-        KvCoder<?, ?> kvValueCoder = (KvCoder) valueCoder;
+        KvCoder<?, ?> kvValueCoder = (KvCoder<?, ?>) valueCoder;
         this.sortKeyCoder = kvValueCoder.getKeyCoder();
         this.sortValueCoder = kvValueCoder.getValueCoder();
       } else {
@@ -144,19 +156,37 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
 
   /**
    * Returns a SinkWriter that allows writing to this ShuffleSink,
-   * using the given ShuffleEntryWriter.
+   * using the given ShuffleEntryWriter. The dataset ID is used to
+   * construct names of counters that track per-worker per-dataset
+   * bytes written to shuffle.
    */
-  public SinkWriter<WindowedValue<T>> writer(ShuffleEntryWriter writer) throws IOException {
-    return new ShuffleSinkWriter(writer);
+  public SinkWriter<WindowedValue<T>> writer(ShuffleEntryWriter writer, String datasetId) {
+    return new ShuffleSinkWriter(writer, options, addCounterMutator, datasetId);
   }
 
   /** The SinkWriter for a ShuffleSink. */
   class ShuffleSinkWriter implements SinkWriter<WindowedValue<T>> {
-    ShuffleEntryWriter writer;
-    long seqNum = 0;
+    private static final String COUNTER_WORKER_PREFIX = "worker-";
+    private static final String COUNTER_DATASET_PREFIX = "-dataset-";
+    private static final String COUNTER_SUFFIX = "-shuffle-bytes";
 
-    ShuffleSinkWriter(ShuffleEntryWriter writer) throws IOException {
+    private ShuffleEntryWriter writer;
+    private long seqNum = 0;
+    private Counter<Long> perWorkerPerDatasetBytesCounter;
+
+    ShuffleSinkWriter(
+        ShuffleEntryWriter writer,
+        PipelineOptions options,
+        CounterSet.AddCounterMutator addCounterMutator,
+        String datasetId) {
       this.writer = writer;
+      DataflowWorkerHarnessOptions dataflowOptions =
+          options.as(DataflowWorkerHarnessOptions.class);
+      this.perWorkerPerDatasetBytesCounter = addCounterMutator.addCounter(
+          Counter.longs(
+              COUNTER_WORKER_PREFIX + dataflowOptions.getWorkerId()
+              + COUNTER_DATASET_PREFIX + datasetId + COUNTER_SUFFIX,
+              SUM));
     }
 
     @Override
@@ -224,7 +254,13 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
         valueBytes = CoderUtils.encodeToByteArray(windowedElemCoder, windowedElem);
       }
 
-      return writer.put(new ShuffleEntry(keyBytes, secondaryKeyBytes, valueBytes));
+      ShuffleEntry entry = new ShuffleEntry(keyBytes, secondaryKeyBytes, valueBytes);
+      writer.put(entry);
+      long bytes = entry.length();
+      if (perWorkerPerDatasetBytesCounter != null) {
+        perWorkerPerDatasetBytesCounter.addValue(bytes);
+      }
+      return bytes;
     }
 
     @Override
@@ -236,7 +272,9 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
   @Override
   public SinkWriter<WindowedValue<T>> writer() throws IOException {
     Preconditions.checkArgument(shuffleWriterConfig != null);
-    return writer(new ChunkingShuffleEntryWriter(
-        new ApplianceShuffleWriter(shuffleWriterConfig, SHUFFLE_WRITER_BUFFER_SIZE)));
+    ApplianceShuffleWriter applianceWriter = new ApplianceShuffleWriter(
+        shuffleWriterConfig, SHUFFLE_WRITER_BUFFER_SIZE);
+    String datasetId = applianceWriter.getDatasetId();
+    return writer(new ChunkingShuffleEntryWriter(applianceWriter), datasetId);
   }
 }

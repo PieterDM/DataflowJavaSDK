@@ -20,21 +20,23 @@ import static com.google.cloud.dataflow.sdk.util.Structs.getBytes;
 import static com.google.cloud.dataflow.sdk.util.Structs.getObject;
 import static com.google.cloud.dataflow.sdk.util.Structs.getString;
 
-import com.google.api.client.util.Preconditions;
 import com.google.api.services.dataflow.model.MultiOutputInfo;
 import com.google.api.services.dataflow.model.SideInputInfo;
+import com.google.cloud.dataflow.sdk.coders.CannotProvideCoderException;
 import com.google.cloud.dataflow.sdk.coders.Coder;
+import com.google.cloud.dataflow.sdk.coders.CoderRegistry;
 import com.google.cloud.dataflow.sdk.coders.KvCoder;
+import com.google.cloud.dataflow.sdk.coders.ListCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.options.StreamingOptions;
 import com.google.cloud.dataflow.sdk.runners.worker.CombineValuesFn.CombinePhase;
 import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
+import com.google.cloud.dataflow.sdk.util.AppliedCombineFn;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.DoFnInfo;
-import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.GroupAlsoByWindowsDoFn;
-import com.google.cloud.dataflow.sdk.util.PTuple;
+import com.google.cloud.dataflow.sdk.util.NullSideInputReader;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
 import com.google.cloud.dataflow.sdk.util.Serializer;
@@ -42,7 +44,9 @@ import com.google.cloud.dataflow.sdk.util.StreamingGroupAlsoByWindowsDoFn;
 import com.google.cloud.dataflow.sdk.util.WindowedValue.WindowedValueCoder;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy;
 import com.google.cloud.dataflow.sdk.util.common.CounterSet;
+import com.google.cloud.dataflow.sdk.util.common.worker.ParDoFn;
 import com.google.cloud.dataflow.sdk.util.common.worker.StateSampler;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 
 import java.util.ArrayList;
@@ -56,110 +60,127 @@ import javax.annotation.Nullable;
  * A wrapper around a GroupAlsoByWindowsDoFn.  This class is the same as
  * NormalParDoFn, except that it gets deserialized differently.
  */
-class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
+class GroupAlsoByWindowsParDoFn extends ParDoFnBase {
 
-  @SuppressWarnings({"rawtypes", "unchecked"})
-  public static GroupAlsoByWindowsParDoFn create(
+  static GroupAlsoByWindowsParDoFn of(
       PipelineOptions options,
-      CloudObject cloudUserFn,
+      DoFn<?, ?> groupAlsoByWindowsDoFn,
       String stepName,
-      @Nullable List<SideInputInfo> sideInputInfos,
-      @Nullable List<MultiOutputInfo> multiOutputInfos,
-      Integer numOutputs,
-      ExecutionContext executionContext,
-      CounterSet.AddCounterMutator addCounterMutator,
-      StateSampler sampler /* unused */)
+      String transformName,
+      DataflowExecutionContext executionContext,
+      CounterSet.AddCounterMutator addCounterMutator)
       throws Exception {
-    Object windowingStrategyObj;
-    byte[] encodedWindowingStrategy = getBytes(cloudUserFn, PropertyNames.SERIALIZED_FN);
-    if (encodedWindowingStrategy.length == 0) {
-      windowingStrategyObj = WindowingStrategy.globalDefault();
-    } else {
-      windowingStrategyObj =
-        SerializableUtils.deserializeFromByteArray(
-            encodedWindowingStrategy, "serialized windowing strategy");
-      if (!(windowingStrategyObj instanceof WindowingStrategy)) {
-        throw new Exception(
-            "unexpected kind of WindowingStrategy: " + windowingStrategyObj.getClass().getName());
-      }
-    }
-    WindowingStrategy windowingStrategy = (WindowingStrategy) windowingStrategyObj;
-
-    byte[] serializedCombineFn = getBytes(cloudUserFn, PropertyNames.COMBINE_FN, null);
-    KeyedCombineFn combineFn;
-    if (serializedCombineFn != null) {
-      Object combineFnObj =
-          SerializableUtils.deserializeFromByteArray(serializedCombineFn, "serialized combine fn");
-      if (!(combineFnObj instanceof KeyedCombineFn)) {
-        throw new Exception(
-            "unexpected kind of KeyedCombineFn: " + combineFnObj.getClass().getName());
-      }
-      combineFn = (KeyedCombineFn) combineFnObj;
-    } else {
-      combineFn = null;
-    }
-
-    Map<String, Object> inputCoderObject = getObject(cloudUserFn, PropertyNames.INPUT_CODER);
-
-    Coder inputCoder = Serializer.deserialize(inputCoderObject, Coder.class);
-    if (!(inputCoder instanceof WindowedValueCoder)) {
-      throw new Exception(
-          "Expected WindowedValueCoder for inputCoder, got: "
-          + inputCoder.getClass().getName());
-    }
-    Coder elemCoder = ((WindowedValueCoder) inputCoder).getValueCoder();
-    if (!(elemCoder instanceof KvCoder)) {
-      throw new Exception(
-          "Expected KvCoder for inputCoder, got: " + elemCoder.getClass().getName());
-    }
-    KvCoder kvCoder = (KvCoder) elemCoder;
-
-    boolean isStreamingPipeline = false;
-    if (options instanceof StreamingOptions) {
-      isStreamingPipeline = ((StreamingOptions) options).isStreaming();
-    }
-
-    KeyedCombineFn maybeMergingCombineFn = null;
-    if (combineFn != null) {
-      String phase = getString(cloudUserFn, PropertyNames.PHASE, CombinePhase.ALL);
-      Preconditions.checkArgument(
-          phase.equals(CombinePhase.ALL) || phase.equals(CombinePhase.MERGE),
-          "Unexpected phase: " + phase);
-      if (phase.equals(CombinePhase.MERGE)) {
-        maybeMergingCombineFn = new MergingKeyedCombineFn(combineFn);
-      } else {
-        maybeMergingCombineFn = combineFn;
-      }
-    }
-
-    DoFnInfoFactory fnFactory;
-    final DoFn groupAlsoByWindowsDoFn = getGroupAlsoByWindowsDoFn(
-        isStreamingPipeline, windowingStrategy, kvCoder, maybeMergingCombineFn);
-
-    fnFactory = new DoFnInfoFactory() {
-      @Override
-      public DoFnInfo createDoFnInfo() {
-        return new DoFnInfo(groupAlsoByWindowsDoFn, null);
-      }
-    };
-    return new GroupAlsoByWindowsParDoFn(
-        options, fnFactory, stepName, executionContext, addCounterMutator);
+    return new GroupAlsoByWindowsParDoFn(options, groupAlsoByWindowsDoFn, stepName, transformName,
+        executionContext, addCounterMutator);
   }
 
-  @SuppressWarnings({"rawtypes", "unchecked"})
-  private static DoFn getGroupAlsoByWindowsDoFn(
+  /**
+   * A {@link ParDoFnFactory} to create {@link GroupAlsoByWindowsParDoFn} instances according to
+   * specifications from the Dataflow service.
+   */
+  static final class Factory implements ParDoFnFactory {
+    @Override
+    public ParDoFn create(
+        PipelineOptions options,
+        CloudObject cloudUserFn,
+        String stepName,
+        String transformName,
+        @Nullable List<SideInputInfo> sideInputInfos,
+        @Nullable List<MultiOutputInfo> multiOutputInfos,
+        int numOutputs,
+        DataflowExecutionContext executionContext,
+        CounterSet.AddCounterMutator addCounterMutator,
+        StateSampler stateSampler)
+            throws Exception {
+      Object windowingStrategyObj;
+      byte[] encodedWindowingStrategy = getBytes(cloudUserFn, PropertyNames.SERIALIZED_FN);
+      if (encodedWindowingStrategy.length == 0) {
+        windowingStrategyObj = WindowingStrategy.globalDefault();
+      } else {
+        windowingStrategyObj =
+          SerializableUtils.deserializeFromByteArray(
+              encodedWindowingStrategy, "serialized windowing strategy");
+        Preconditions.checkArgument(
+          windowingStrategyObj instanceof WindowingStrategy,
+          "unexpected kind of WindowingStrategy: " + windowingStrategyObj.getClass().getName());
+      }
+      @SuppressWarnings({"rawtypes", "unchecked"})
+      WindowingStrategy windowingStrategy = (WindowingStrategy) windowingStrategyObj;
+
+      byte[] serializedCombineFn = getBytes(cloudUserFn, PropertyNames.COMBINE_FN, null);
+      AppliedCombineFn<?, ?, ?, ?> combineFn = null;
+      if (serializedCombineFn != null) {
+        Object combineFnObj = SerializableUtils.deserializeFromByteArray(
+            serializedCombineFn, "serialized combine fn");
+        Preconditions.checkArgument(
+            combineFnObj instanceof AppliedCombineFn,
+            "unexpected kind of AppliedCombineFn: " + combineFnObj.getClass().getName());
+        combineFn = (AppliedCombineFn<?, ?, ?, ?>) combineFnObj;
+      }
+
+      Map<String, Object> inputCoderObject = getObject(cloudUserFn, PropertyNames.INPUT_CODER);
+
+      Coder<?> inputCoder = Serializer.deserialize(inputCoderObject, Coder.class);
+      Preconditions.checkArgument(
+          inputCoder instanceof WindowedValueCoder,
+          "Expected WindowedValueCoder for inputCoder, got: " + inputCoder.getClass().getName());
+      @SuppressWarnings("unchecked")
+      WindowedValueCoder<?> windowedValueCoder = (WindowedValueCoder<?>) inputCoder;
+
+      Coder<?> elemCoder = windowedValueCoder.getValueCoder();
+      Preconditions.checkArgument(
+          elemCoder instanceof KvCoder,
+          "Expected KvCoder for inputCoder, got: " + elemCoder.getClass().getName());
+      @SuppressWarnings("unchecked")
+      KvCoder<?, ?> kvCoder = (KvCoder<?, ?>) elemCoder;
+
+      boolean isStreamingPipeline = options.as(StreamingOptions.class).isStreaming();
+
+      @Nullable AppliedCombineFn<?, ?, ?, ?> maybeMergingCombineFn = null;
+      if (combineFn != null) {
+        String phase = getString(cloudUserFn, PropertyNames.PHASE, CombinePhase.ALL);
+        Preconditions.checkArgument(
+            phase.equals(CombinePhase.ALL) || phase.equals(CombinePhase.MERGE),
+            "Unexpected phase: " + phase);
+        if (phase.equals(CombinePhase.MERGE)) {
+          maybeMergingCombineFn = makeAppliedMergingFunction(combineFn);
+        } else {
+          maybeMergingCombineFn = combineFn;
+        }
+      }
+
+      DoFn<?, ?> groupAlsoByWindowsDoFn = getGroupAlsoByWindowsDoFn(
+          isStreamingPipeline, windowingStrategy, kvCoder, maybeMergingCombineFn);
+
+      return GroupAlsoByWindowsParDoFn.of(
+          options,
+          groupAlsoByWindowsDoFn,
+          stepName,
+          transformName,
+          executionContext,
+          addCounterMutator);
+    }
+  }
+
+  @Override
+  protected DoFnInfo<?, ?> getDoFnInfo() {
+    return new DoFnInfo<>(groupAlsoByWindowsDoFn, null);
+  }
+
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static DoFn<?, ?> getGroupAlsoByWindowsDoFn(
       boolean isStreamingPipeline,
       WindowingStrategy windowingStrategy,
       KvCoder kvCoder,
-      KeyedCombineFn maybeMergingCombineFn) {
+      @Nullable AppliedCombineFn maybeMergingCombineFn) {
+
     if (isStreamingPipeline) {
       if (maybeMergingCombineFn == null) {
         return StreamingGroupAlsoByWindowsDoFn.createForIterable(
             windowingStrategy, kvCoder.getValueCoder());
       } else {
         return StreamingGroupAlsoByWindowsDoFn.create(
-            windowingStrategy, maybeMergingCombineFn,
-            kvCoder.getKeyCoder(), kvCoder.getValueCoder());
+            windowingStrategy, maybeMergingCombineFn, kvCoder.getKeyCoder());
       }
     } else {
       if (maybeMergingCombineFn == null) {
@@ -167,19 +188,27 @@ class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
             windowingStrategy, kvCoder.getValueCoder());
       } else {
         return GroupAlsoByWindowsDoFn.create(
-            windowingStrategy, maybeMergingCombineFn,
-            kvCoder.getKeyCoder(), kvCoder.getValueCoder());
+            windowingStrategy, maybeMergingCombineFn, kvCoder.getKeyCoder());
       }
     }
+  }
+
+  private static <K, AccumT> AppliedCombineFn<K, AccumT, List<AccumT>, AccumT>
+  makeAppliedMergingFunction(AppliedCombineFn<K, ?, AccumT, ?> appliedFn) {
+    MergingKeyedCombineFn<K, AccumT> mergingCombineFn = new MergingKeyedCombineFn<>(appliedFn);
+    return AppliedCombineFn.<K, AccumT, List<AccumT>, AccumT>withAccumulatorCoder(
+        mergingCombineFn, ListCoder.of(appliedFn.getAccumulatorCoder()));
   }
 
   static class MergingKeyedCombineFn<K, AccumT>
       extends KeyedCombineFn<K, AccumT, List<AccumT>, AccumT> {
 
     private static final long serialVersionUID = 0;
-    final KeyedCombineFn<K, ?, AccumT, ?> keyedCombineFn;
-    MergingKeyedCombineFn(KeyedCombineFn<K, ?, AccumT, ?> keyedCombineFn) {
-      this.keyedCombineFn = keyedCombineFn;
+
+    final AppliedCombineFn<K, ?, AccumT, ?> appliedCombineFn;
+
+    MergingKeyedCombineFn(AppliedCombineFn<K, ?, AccumT, ?> keyedCombineFn) {
+      this.appliedCombineFn = keyedCombineFn;
     }
     @Override
     public List<AccumT> createAccumulator(K key) {
@@ -202,31 +231,41 @@ class GroupAlsoByWindowsParDoFn extends NormalParDoFn {
     @Override
     public AccumT extractOutput(K key, List<AccumT> accumulator) {
       if (accumulator.size() == 0) {
-        return keyedCombineFn.createAccumulator(key);
+        return appliedCombineFn.getFn().createAccumulator(key);
       } else {
-        return keyedCombineFn.mergeAccumulators(key, accumulator);
+        return appliedCombineFn.getFn().mergeAccumulators(key, accumulator);
       }
     }
     private List<AccumT> mergeToSingleton(K key, Iterable<AccumT> accumulators) {
       List<AccumT> singleton = new ArrayList<>();
-      singleton.add(keyedCombineFn.mergeAccumulators(key, accumulators));
+      singleton.add(appliedCombineFn.getFn().mergeAccumulators(key, accumulators));
       return singleton;
+    }
+
+    @Override
+    public Coder<List<AccumT>> getAccumulatorCoder(CoderRegistry registry, Coder<K> keyCoder,
+        Coder<AccumT> inputCoder) throws CannotProvideCoderException {
+      return ListCoder.of(appliedCombineFn.getAccumulatorCoder());
     }
   }
 
+  private final DoFn<?, ?> groupAlsoByWindowsDoFn;
+
   private GroupAlsoByWindowsParDoFn(
       PipelineOptions options,
-      DoFnInfoFactory fnFactory,
+      DoFn<?, ?> groupAlsoByWindowsDoFn,
       String stepName,
-      ExecutionContext executionContext,
+      String transformName,
+      DataflowExecutionContext executionContext,
       CounterSet.AddCounterMutator addCounterMutator) {
     super(
         options,
-        fnFactory,
-        PTuple.empty(),
+        NullSideInputReader.empty(),
         Arrays.asList("output"),
         stepName,
+        transformName,
         executionContext,
         addCounterMutator);
+    this.groupAlsoByWindowsDoFn = groupAlsoByWindowsDoFn;
   }
 }

@@ -29,14 +29,14 @@ import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.dataflow.Dataflow;
 import com.google.api.services.pubsub.Pubsub;
 import com.google.api.services.pubsub.model.Topic;
-import com.google.cloud.dataflow.examples.PubsubFileInjector;
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.PipelineResult;
 import com.google.cloud.dataflow.sdk.io.TextIO;
 import com.google.cloud.dataflow.sdk.options.BigQueryOptions;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
-import com.google.cloud.dataflow.sdk.options.StreamingOptions;
 import com.google.cloud.dataflow.sdk.runners.DataflowPipelineJob;
+import com.google.cloud.dataflow.sdk.runners.DataflowPipelineRunner;
+import com.google.cloud.dataflow.sdk.runners.DirectPipelineRunner;
 import com.google.cloud.dataflow.sdk.transforms.IntraBundleParallelization;
 import com.google.cloud.dataflow.sdk.util.MonitoringUtil;
 import com.google.cloud.dataflow.sdk.util.Transport;
@@ -61,12 +61,27 @@ public class DataflowExampleUtils {
   private Bigquery bigQueryClient = null;
   private Pubsub pubsubClient = null;
   private Dataflow dataflowClient = null;
-  private Pipeline injectorPipeline = null;
   private Set<DataflowPipelineJob> jobsToCancel = Sets.newHashSet();
   private List<String> pendingMessages = Lists.newArrayList();
 
+  /**
+   * Define an interface that supports the PubSub and BigQuery example options.
+   */
+  public static interface DataflowExampleUtilsOptions
+        extends DataflowExampleOptions, ExamplePubsubTopicOptions, ExampleBigQueryTableOptions {
+  }
+
   public DataflowExampleUtils(DataflowPipelineOptions options) {
     this.options = options;
+  }
+
+  /**
+   * Do resources and runner options setup.
+   */
+  public DataflowExampleUtils(DataflowPipelineOptions options, boolean isUnbounded)
+      throws IOException {
+    this.options = options;
+    setupResourcesAndRunner(isUnbounded);
   }
 
   /**
@@ -81,13 +96,22 @@ public class DataflowExampleUtils {
   }
 
   /**
-   * Sets up the BigQuery table with the given schema.
+   * Set up external resources, and configure the runner appropriately.
+   */
+  public void setupResourcesAndRunner(boolean isUnbounded) throws IOException {
+    if (isUnbounded) {
+      options.setStreaming(true);
+    }
+    setup();
+    setupRunner();
+  }
+
+  /**
+   * Sets up the Google Cloud Pub/Sub topic.
    *
-   * <p> If the table already exists, the schema has to match the given one. Otherwise, the example
-   * will throw a RuntimeException. If the table doesn't exist, a new table with the given schema
-   * will be created.
+   * <p> If the topic doesn't exist, a new topic with the given name will be created.
    *
-   * @throws IOException if there is a problem setting up the BigQuery table
+   * @throws IOException if there is a problem setting up the Pub/Sub topic
    */
   public void setupPubsubTopic() throws IOException {
     ExamplePubsubTopicOptions pubsubTopicOptions = options.as(ExamplePubsubTopicOptions.class);
@@ -100,11 +124,13 @@ public class DataflowExampleUtils {
   }
 
   /**
-   * Sets up the Google Cloud Pub/Sub topic.
+   * Sets up the BigQuery table with the given schema.
    *
-   * <p> If the topic doesn't exist, a new topic with the given name will be created.
+   * <p> If the table already exists, the schema has to match the given one. Otherwise, the example
+   * will throw a RuntimeException. If the table doesn't exist, a new table with the given schema
+   * will be created.
    *
-   * @throws IOException if there is a problem setting up the Pub/Sub topic
+   * @throws IOException if there is a problem setting up the BigQuery table
    */
   public void setupBigQueryTable() throws IOException {
     ExampleBigQueryTableOptions bigQueryTableOptions =
@@ -184,10 +210,10 @@ public class DataflowExampleUtils {
 
   private void setupPubsubTopic(String topic) throws IOException {
     if (pubsubClient == null) {
-      pubsubClient = Transport.newPubsubClient(options.as(StreamingOptions.class)).build();
+      pubsubClient = Transport.newPubsubClient(options).build();
     }
-    if (executeNullIfNotFound(pubsubClient.topics().get(topic)) == null) {
-      pubsubClient.topics().create(new Topic().setName(topic)).execute();
+    if (executeNullIfNotFound(pubsubClient.projects().topics().get(topic)) == null) {
+      pubsubClient.projects().topics().create(topic, new Topic().setName(topic)).execute();
     }
   }
 
@@ -198,10 +224,42 @@ public class DataflowExampleUtils {
    */
   private void deletePubsubTopic(String topic) throws IOException {
     if (pubsubClient == null) {
-      pubsubClient = Transport.newPubsubClient(options.as(StreamingOptions.class)).build();
+      pubsubClient = Transport.newPubsubClient(options).build();
     }
-    if (executeNullIfNotFound(pubsubClient.topics().get(topic)) != null) {
-      pubsubClient.topics().delete(topic).execute();
+    if (executeNullIfNotFound(pubsubClient.projects().topics().get(topic)) != null) {
+      pubsubClient.projects().topics().delete(topic).execute();
+    }
+  }
+
+  /**
+   * If this is an unbounded (streaming) pipeline, and both inputFile and pubsub topic are defined,
+   * start an 'injector' pipeline that publishes the contents of the file to the given topic, first
+   * creating the topic if necessary.
+   */
+  public void startInjectorIfNeeded(String inputFile) {
+    ExamplePubsubTopicOptions pubsubTopicOptions = options.as(ExamplePubsubTopicOptions.class);
+    if (pubsubTopicOptions.isStreaming()
+        && inputFile != null && !inputFile.isEmpty()
+        && pubsubTopicOptions.getPubsubTopic() != null
+        && !pubsubTopicOptions.getPubsubTopic().isEmpty()) {
+      runInjectorPipeline(inputFile, pubsubTopicOptions.getPubsubTopic());
+    }
+  }
+
+  /**
+   * Do some runner setup: check that the DirectPipelineRunner is not used in conjunction with
+   * streaming, and if streaming is specified, use the DataflowPipelineRunner. Return the streaming
+   * flag value.
+   */
+  public void setupRunner() {
+    if (options.isStreaming()) {
+      if (options.getRunner() == DirectPipelineRunner.class) {
+        throw new IllegalArgumentException(
+          "Processing of unbounded input sources is not supported with the DirectPipelineRunner.");
+      }
+      // In order to cancel the pipelines automatically,
+      // {@literal DataflowPipelineRunner} is forced to be used.
+      options.setRunner(DataflowPipelineRunner.class);
     }
   }
 
@@ -216,13 +274,30 @@ public class DataflowExampleUtils {
     copiedOptions.setStreaming(false);
     copiedOptions.setNumWorkers(
         options.as(ExamplePubsubTopicOptions.class).getInjectorNumWorkers());
-    injectorPipeline = Pipeline.create(copiedOptions);
+    copiedOptions.setJobName(options.getJobName() + "-injector");
+    Pipeline injectorPipeline = Pipeline.create(copiedOptions);
     injectorPipeline.apply(TextIO.Read.from(inputFile))
                     .apply(IntraBundleParallelization
-                        .of(new PubsubFileInjector.Publish(topic))
+                        .of(PubsubFileInjector.publish(topic))
                         .withMaxParallelism(20));
     DataflowPipelineJob injectorJob = (DataflowPipelineJob) injectorPipeline.run();
     jobsToCancel.add(injectorJob);
+  }
+
+  /**
+   * Runs the provided injector pipeline for the streaming pipeline.
+   */
+  public void runInjectorPipeline(Pipeline injectorPipeline) {
+    DataflowPipelineJob injectorJob = (DataflowPipelineJob) injectorPipeline.run();
+    jobsToCancel.add(injectorJob);
+  }
+
+  /**
+   * Start the auxiliary injector pipeline, then wait for this pipeline to finish.
+   */
+  public void mockUnboundedSource(String inputFile, PipelineResult result) {
+    startInjectorIfNeeded(inputFile);
+    waitToFinish(result);
   }
 
   /**

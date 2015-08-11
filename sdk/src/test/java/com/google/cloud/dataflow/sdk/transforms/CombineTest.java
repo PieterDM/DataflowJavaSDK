@@ -17,6 +17,7 @@
 package com.google.cloud.dataflow.sdk.transforms;
 
 import static com.google.cloud.dataflow.sdk.TestUtils.checkCombineFn;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 
 import com.google.api.client.util.Preconditions;
@@ -39,15 +40,20 @@ import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
 import com.google.cloud.dataflow.sdk.testing.RunnableOnService;
 import com.google.cloud.dataflow.sdk.testing.TestPipeline;
 import com.google.cloud.dataflow.sdk.transforms.Combine.KeyedCombineFn;
+import com.google.cloud.dataflow.sdk.transforms.windowing.AfterPane;
 import com.google.cloud.dataflow.sdk.transforms.windowing.FixedWindows;
+import com.google.cloud.dataflow.sdk.transforms.windowing.GlobalWindows;
+import com.google.cloud.dataflow.sdk.transforms.windowing.Repeatedly;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Sessions;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
+import com.google.cloud.dataflow.sdk.transforms.windowing.Window.ClosingBehavior;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.common.Counter;
 import com.google.cloud.dataflow.sdk.util.common.ElementByteSizeObserver;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PCollectionView;
+import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
@@ -68,6 +74,7 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 
@@ -99,8 +106,8 @@ public class CombineTest implements Serializable {
 
   PCollection<KV<String, Integer>> createInput(Pipeline p,
                                                KV<String, Integer>[] table) {
-    return p.apply(Create.of(Arrays.asList(table))).setCoder(
-        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+    return p.apply(Create.of(Arrays.asList(table)).withCoder(
+        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of())));
   }
 
   private void runTestSimpleCombine(KV<String, Integer>[] table,
@@ -203,8 +210,8 @@ public class CombineTest implements Serializable {
 
     PCollection<KV<String, Integer>> input =
         p.apply(Create.timestamped(Arrays.asList(TABLE),
-                                   Arrays.asList(0L, 1L, 6L, 7L, 8L)))
-         .setCoder(KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()))
+                                   Arrays.asList(0L, 1L, 6L, 7L, 8L))
+                .withCoder(KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of())))
          .apply(Window.<KV<String, Integer>>into(FixedWindows.of(Duration.millis(2))));
 
     PCollection<Integer> sum = input
@@ -230,8 +237,8 @@ public class CombineTest implements Serializable {
 
     PCollection<KV<String, Integer>> input =
         p.apply(Create.timestamped(Arrays.asList(TABLE),
-                                   Arrays.asList(0L, 4L, 7L, 10L, 16L)))
-         .setCoder(KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()))
+                                   Arrays.asList(0L, 4L, 7L, 10L, 16L))
+                .withCoder(KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of())))
          .apply(Window.<KV<String, Integer>>into(Sessions.withGapDuration(Duration.millis(5))));
 
     PCollection<Integer> sum = input
@@ -255,7 +262,7 @@ public class CombineTest implements Serializable {
     Pipeline p = TestPipeline.create();
 
     PCollection<Double> mean = p
-        .apply(Create.<Integer>of()).setCoder(BigEndianIntegerCoder.of())
+        .apply(Create.<Integer>of().withCoder(BigEndianIntegerCoder.of()))
         .apply(Window.<Integer>into(FixedWindows.of(Duration.millis(1))))
         .apply(Combine.globally(new MeanInts()).withoutDefaults());
 
@@ -296,10 +303,10 @@ public class CombineTest implements Serializable {
 
     p.traverseTopologically(new RecordingPipelineVisitor());
 
-    assertThat(p.getFullName(min), Matchers.startsWith("Min"));
-    assertThat(p.getFullName(max), Matchers.startsWith("Max"));
-    assertThat(p.getFullName(mean), Matchers.startsWith("Mean"));
-    assertThat(p.getFullName(sum), Matchers.startsWith("Sum"));
+    assertThat(p.getFullNameForTesting(min), Matchers.startsWith("Min"));
+    assertThat(p.getFullNameForTesting(max), Matchers.startsWith("Max"));
+    assertThat(p.getFullNameForTesting(mean), Matchers.startsWith("Mean"));
+    assertThat(p.getFullNameForTesting(sum), Matchers.startsWith("Sum"));
   }
 
   @Test
@@ -327,6 +334,14 @@ public class CombineTest implements Serializable {
         }
       };
 
+  private static final SerializableFunction<String, Integer> splitHotKeyFanout =
+      new SerializableFunction<String, Integer>() {
+        @Override
+        public Integer apply(String input) {
+          return Math.random() < 0.5 ? 3 : 0;
+        }
+      };
+
   @Test
   @Category(RunnableOnService.class)
   public void testHotKeyCombining() {
@@ -335,17 +350,49 @@ public class CombineTest implements Serializable {
 
     KeyedCombineFn<String, Integer, ?, Double> mean =
         new MeanInts().<String>asKeyedFn();
-    PCollection<KV<String, Double>> coldMean = input.apply(
+    PCollection<KV<String, Double>> coldMean = input.apply("ColdMean",
         Combine.perKey(mean).withHotKeyFanout(0));
-    PCollection<KV<String, Double>> warmMean = input.apply(
+    PCollection<KV<String, Double>> warmMean = input.apply("WarmMean",
         Combine.perKey(mean).withHotKeyFanout(hotKeyFanout));
-    PCollection<KV<String, Double>> hotMean = input.apply(
+    PCollection<KV<String, Double>> hotMean = input.apply("HotMean",
         Combine.perKey(mean).withHotKeyFanout(5));
+    PCollection<KV<String, Double>> splitMean = input.apply("SplitMean",
+        Combine.perKey(mean).withHotKeyFanout(splitHotKeyFanout));
 
     List<KV<String, Double>> expected = Arrays.asList(KV.of("a", 2.0), KV.of("b", 7.0));
     DataflowAssert.that(coldMean).containsInAnyOrder(expected);
     DataflowAssert.that(warmMean).containsInAnyOrder(expected);
     DataflowAssert.that(hotMean).containsInAnyOrder(expected);
+    DataflowAssert.that(splitMean).containsInAnyOrder(expected);
+
+    p.run();
+  }
+
+  private static class GetLast extends DoFn<Integer, Integer> {
+    private static final long serialVersionUID = 0L;
+    @Override
+    public void processElement(ProcessContext c) {
+      if (c.pane().isLast()) {
+        c.output(c.element());
+      }
+    }
+  }
+
+  @Test
+  @Category(RunnableOnService.class)
+  public void testHotKeyCombiningWithAccumulationMode() {
+    Pipeline p = TestPipeline.create();
+    PCollection<Integer> input = p.apply(Create.of(1, 2, 3, 4, 5));
+
+    PCollection<Integer> output = input
+        .apply(Window.<Integer>into(new GlobalWindows())
+            .triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1)))
+            .accumulatingFiredPanes()
+            .withAllowedLateness(new Duration(0), ClosingBehavior.FIRE_ALWAYS))
+        .apply(Sum.integersGlobally().withoutDefaults().withFanout(2))
+        .apply(ParDo.of(new GetLast()));
+
+    DataflowAssert.that(output).containsInAnyOrder(15);
 
     p.run();
   }
@@ -355,9 +402,9 @@ public class CombineTest implements Serializable {
     Pipeline p = TestPipeline.create();
     PCollection<KV<String, Integer>> input = copy(createInput(p, TABLE), 2);
     PCollection<KV<String, Integer>> intProduct = input
-        .apply(Combine.<String, Integer, Integer>perKey(new TestProdInt()));
+        .apply("IntProduct", Combine.<String, Integer, Integer>perKey(new TestProdInt()));
     PCollection<KV<String, Integer>> objProduct = input
-        .apply(Combine.<String, Integer, Integer>perKey(new TestProdObj()));
+        .apply("ObjProduct", Combine.<String, Integer, Integer>perKey(new TestProdObj()));
 
     List<KV<String, Integer>> expected = Arrays.asList(KV.of("a", 16), KV.of("b", 169));
     DataflowAssert.that(intProduct).containsInAnyOrder(expected);
@@ -376,12 +423,16 @@ public class CombineTest implements Serializable {
   }
 
   private static final class TestProdInt extends Combine.BinaryCombineIntegerFn {
+    @Override
     public int apply(int left, int right) {
       return left * right;
     }
+
+    @Override
     public int identity() {
       return 1;
     }
+
     @Override
     public Counter<Integer> getCounter(String name) {
       throw new UnsupportedOperationException();
@@ -389,6 +440,7 @@ public class CombineTest implements Serializable {
   }
 
   private static final class TestProdObj extends Combine.BinaryCombineFn<Integer> {
+    @Override
     public Integer apply(Integer left, Integer right) {
       return left * right;
     }
@@ -398,6 +450,7 @@ public class CombineTest implements Serializable {
    * Computes the product, considering null values to be 2.
    */
   private static final class NullCombiner extends Combine.BinaryCombineFn<Integer> {
+    @Override
     public Integer apply(Integer left, Integer right) {
       return (left == null ? 2 : left) * (right == null ? 2 : right);
     }
@@ -408,20 +461,37 @@ public class CombineTest implements Serializable {
   public void testCombineGloballyAsSingletonView() {
     Pipeline p = TestPipeline.create();
     final PCollectionView<Integer> view = p
-        .apply(Create.<Integer>of())
-        .setCoder(BigEndianIntegerCoder.of())
+        .apply("CreateEmptySideInput", Create.<Integer>of().withCoder(BigEndianIntegerCoder.of()))
         .apply(Sum.integersGlobally().asSingletonView());
 
     PCollection<Integer> output = p
-        .apply(Create.of((Void) null))
-        .apply(ParDo.of(new DoFn<Void, Integer>() {
+        .apply("CreateVoidMainInput", Create.of((Void) null))
+        .apply("OutputSideInput", ParDo.of(new DoFn<Void, Integer>() {
                   @Override
                   public void processElement(ProcessContext c) {
                     c.output(c.sideInput(view));
                   }
-                }));
+                }).withSideInputs(view));
 
     DataflowAssert.thatSingleton(output).isEqualTo(0);
+    p.run();
+  }
+
+  @Test
+  public void testCombineGetName() {
+    assertEquals("Combine.Globally", Combine.globally(new SumInts()).getName());
+    assertEquals(
+        "MyCombineGlobally", Combine.globally(new SumInts()).named("MyCombineGlobally").getName());
+    assertEquals(
+        "Combine.GloballyAsSingletonView",
+        Combine.globally(new SumInts()).asSingletonView().getName());
+    assertEquals("Combine.PerKey", Combine.perKey(new TestKeyedCombineFn()).getName());
+    assertEquals(
+        "MyCombinePerKey",
+        Combine.perKey(new TestKeyedCombineFn()).named("MyCombinePerKey").getName());
+    assertEquals(
+        "Combine.PerKeyWithHotKeyFanout",
+        Combine.perKey(new TestKeyedCombineFn()).withHotKeyFanout(10).getName());
   }
 
   ////////////////////////////////////////////////////////////////////////////
@@ -534,7 +604,7 @@ public class CombineTest implements Serializable {
   }
 
   /** Example AccumulatingCombineFn. */
-  public static class MeanInts extends
+  private static class MeanInts extends
       Combine.AccumulatingCombineFn<Integer, MeanInts.CountSum, Double> {
     private static final Coder<Long> LONG_CODER = BigEndianLongCoder.of();
     private static final Coder<Double> DOUBLE_CODER = DoubleCoder.of();
@@ -565,6 +635,32 @@ public class CombineTest implements Serializable {
       public Double extractOutput() {
         return count == 0 ? 0.0 : sum / count;
       }
+
+      @Override
+      public int hashCode() {
+        return Objects.hash(count, sum);
+      }
+
+      @Override
+      public boolean equals(Object obj) {
+        if (obj == this) {
+          return true;
+        }
+        if (!(obj instanceof CountSum)) {
+          return false;
+        }
+        CountSum other = (CountSum) obj;
+        return this.count == other.count
+            && (Math.abs(this.sum - other.sum) < 0.1);
+      }
+
+      @Override
+      public String toString() {
+        return MoreObjects.toStringHelper(this)
+            .add("count", count)
+            .add("sum", sum)
+            .toString();
+      }
     }
 
     @Override
@@ -581,7 +677,7 @@ public class CombineTest implements Serializable {
     /**
      * A {@link Coder} for {@link CountSum}.
      */
-    public class CountSumCoder extends CustomCoder<CountSum> {
+    private class CountSumCoder extends CustomCoder<CountSum> {
       @Override
       public void encode(CountSum value, OutputStream outStream,
           Context context) throws CoderException, IOException {
@@ -648,6 +744,11 @@ public class CombineTest implements Serializable {
         public Accumulator decode(InputStream inStream, Coder.Context context)
             throws CoderException, IOException {
           return new Accumulator(StringUtf8Coder.of().decode(inStream, context));
+        }
+
+        @Override
+        public String getEncodingId() {
+          return "CombineTest.TestKeyedCombineFn.getAccumulatorCoder()";
         }
       };
     }

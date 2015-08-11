@@ -47,15 +47,11 @@ public class ReadOperation extends Operation {
   /** The total byte counter for all data read by this operation. */
   final Counter<Long> byteCount;
 
-  /** StateSampler state for advancing the ReaderIterator. */
-  private final int readState;
-
   /**
    * The Reader's iterator this operation reads from, created by start().
    * Guarded by sourceIteratorLock.
    */
   volatile Reader.ReaderIterator<?> readerIterator = null;
-  private final Object sourceIteratorLock = new Object();
 
   /**
    * A cache of sourceIterator.getProgress() updated inside the read loop at a bounded rate.
@@ -85,8 +81,8 @@ public class ReadOperation extends Operation {
     this.reader = reader;
     this.byteCount = addCounterMutator.addCounter(
         Counter.longs(bytesCounterName(counterPrefix, operationName), SUM));
-    readState = stateSampler.stateForName(operationName + "-read");
     reader.addObserver(new ReaderObserver());
+    reader.setStateSamplerAndOperationName(stateSampler, operationName);
   }
 
   /** Invoked by tests. */
@@ -136,7 +132,7 @@ public class ReadOperation extends Operation {
 
     try (StateSampler.ScopedState process = stateSampler.scopedState(processState)) {
       assert process != null;
-      synchronized (sourceIteratorLock) {
+      synchronized (initializationStateLock) {
         readerIterator = reader.iterator();
       }
 
@@ -161,35 +157,22 @@ public class ReadOperation extends Operation {
 
       try {
         // Force a progress update at the beginning and at the end.
-        synchronized (sourceIteratorLock) {
-          setProgressFromIterator();
-        }
+        setProgressFromIterator();
         while (true) {
           Object value;
-          // Stop position update request comes concurrently.
-          // Accesses to iterator need to be synchronized.
-          try (StateSampler.ScopedState read = stateSampler.scopedState(readState)) {
-            assert read != null;
-            synchronized (sourceIteratorLock) {
-              if (!readerIterator.hasNext()) {
-                break;
-              }
-              value = readerIterator.next();
+          if (!readerIterator.hasNext()) {
+            break;
+          }
+          value = readerIterator.next();
 
-              if (isProgressUpdateRequested.getAndSet(false) || progressUpdatePeriodMs == 0) {
-                setProgressFromIterator();
-              }
-            }
+          if (isProgressUpdateRequested.getAndSet(false) || progressUpdatePeriodMs == 0) {
+            setProgressFromIterator();
           }
           receiver.process(value);
         }
-        synchronized (sourceIteratorLock) {
-          setProgressFromIterator();
-        }
+        setProgressFromIterator();
       } finally {
-        synchronized (sourceIteratorLock) {
-          readerIterator.close();
-        }
+        readerIterator.close();
         if (progressUpdatePeriodMs != 0) {
           updateRequester.interrupt();
           updateRequester.join();
@@ -229,14 +212,12 @@ public class ReadOperation extends Operation {
         LOG.warn("Iterator is in the Finished state, returning null stop position.");
         return null;
       }
-      synchronized (sourceIteratorLock) {
-        if (readerIterator == null) {
-          LOG.warn("Iterator has not been initialized, refusing to split at {}",
-              splitRequest);
-          return null;
-        }
-        return readerIterator.requestDynamicSplit(splitRequest);
+      if (readerIterator == null) {
+        LOG.warn("Iterator has not been initialized, refusing to split at {}",
+            splitRequest);
+        return null;
       }
+      return readerIterator.requestDynamicSplit(splitRequest);
     }
   }
 

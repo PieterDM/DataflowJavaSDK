@@ -22,6 +22,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.google.api.client.util.BackOffUtils;
 import com.google.api.client.util.Sleeper;
 import com.google.api.services.dataflow.model.DataflowPackage;
+import com.google.cloud.hadoop.util.ApiErrorExtractor;
 import com.google.common.collect.TreeTraverser;
 import com.google.common.hash.Funnels;
 import com.google.common.hash.Hasher;
@@ -36,6 +37,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.channels.Channels;
@@ -51,6 +53,10 @@ import java.util.zip.ZipOutputStream;
 public class PackageUtil {
   private static final Logger LOG = LoggerFactory.getLogger(PackageUtil.class);
   /**
+   * A reasonable upper bound on the number of jars required to launch a Dataflow job.
+   */
+  public static final int SANE_CLASSPATH_SIZE = 1000;
+  /**
    * The initial interval to use between package staging attempts.
    */
   private static final long INITIAL_BACKOFF_INTERVAL_MS = 5000L;
@@ -58,6 +64,11 @@ public class PackageUtil {
    * The maximum number of attempts when staging a file.
    */
   private static final int MAX_ATTEMPTS = 5;
+
+  /**
+   * Translates exceptions from API calls.
+   */
+  private static final ApiErrorExtractor ERROR_EXTRACTOR = new ApiErrorExtractor();
 
   /**
    * Creates a DataflowPackage containing information about how a classpath element should be
@@ -69,14 +80,13 @@ public class PackageUtil {
    *                            instead of generating one automatically.
    * @return The package.
    */
-  public static DataflowPackage createPackage(String classpathElement,
+  public static DataflowPackage createPackage(File classpathElement,
       String stagingPath, String overridePackageName) {
     try {
-      File file = new File(classpathElement);
-      String contentHash = computeContentHash(file);
+      String contentHash = computeContentHash(classpathElement);
 
       // Drop the directory prefixes, and form the filename + hash + extension.
-      String uniqueName = getUniqueContentName(file, contentHash);
+      String uniqueName = getUniqueContentName(classpathElement, contentHash);
 
       String resourcePath = IOChannelUtils.resolve(stagingPath, uniqueName);
 
@@ -107,6 +117,16 @@ public class PackageUtil {
       Sleeper retrySleeper) {
     LOG.info("Uploading {} files from PipelineOptions.filesToStage to staging location to "
         + "prepare for execution.", classpathElements.size());
+
+    if (classpathElements.size() > SANE_CLASSPATH_SIZE) {
+      LOG.warn("Your classpath contains {} elements, which Google Cloud Dataflow automatically "
+          + "copies to all workers. Having this many entries on your classpath may be indicative "
+          + "of an issue in your pipeline. You may want to consider trimming the classpath to "
+          + "necessary dependencies only, using --filesToStage pipeline option to override "
+          + "what files are being staged, or bundling several dependencies into one.",
+          classpathElements.size());
+    }
+
     ArrayList<DataflowPackage> packages = new ArrayList<>();
 
     if (stagingPath == null) {
@@ -124,8 +144,15 @@ public class PackageUtil {
         classpathElement = components[1];
       }
 
+      File file = new File(classpathElement);
+      if (!file.exists()) {
+        LOG.warn("Skipping non-existent classpath element {} that was specified.",
+            classpathElement);
+        continue;
+      }
+
       DataflowPackage workflowPackage = createPackage(
-          classpathElement, stagingPath, packageName);
+          file, stagingPath, packageName);
 
       packages.add(workflowPackage);
       String target = workflowPackage.getLocation();
@@ -133,12 +160,16 @@ public class PackageUtil {
       // TODO: Should we attempt to detect the Mime type rather than
       // always using MimeTypes.BINARY?
       try {
-        long remoteLength = IOChannelUtils.getSizeBytes(target);
-        if (remoteLength >= 0 && remoteLength == getClasspathElementLength(classpathElement)) {
-          LOG.debug("Skipping classpath element already staged: {} at {}",
-              classpathElement, target);
-          numCached++;
-          continue;
+        try {
+          long remoteLength = IOChannelUtils.getSizeBytes(target);
+          if (remoteLength == getClasspathElementLength(classpathElement)) {
+            LOG.debug("Skipping classpath element already staged: {} at {}",
+                classpathElement, target);
+            numCached++;
+            continue;
+          }
+        } catch (FileNotFoundException expected) {
+          // If the file doesn't exist, it means we need to upload it.
         }
 
         // Upload file, retrying on failure.
@@ -154,7 +185,15 @@ public class PackageUtil {
             numUploaded++;
             break;
           } catch (IOException e) {
-            if (!backoff.atMaxAttempts()) {
+            if (ERROR_EXTRACTOR.accessDenied(e)) {
+              String errorMessage = String.format(
+                  "Uploaded failed due to permissions error, will NOT retry staging "
+                  + "of classpath %s. Please verify credentials are valid and that you have "
+                  + "write access to %s. Stale credentials can be resolved by executing "
+                  + "'gcloud auth login'.", classpathElement, target);
+              LOG.error(errorMessage);
+              throw new IOException(errorMessage, e);
+            } else if (!backoff.atMaxAttempts()) {
               LOG.warn("Upload attempt failed, sleeping before retrying staging of classpath: {}",
                   classpathElement, e);
               BackOffUtils.next(retrySleeper, backoff);

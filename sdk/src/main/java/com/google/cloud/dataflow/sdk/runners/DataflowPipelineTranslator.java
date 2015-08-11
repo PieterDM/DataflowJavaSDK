@@ -39,7 +39,6 @@ import com.google.api.services.dataflow.model.Step;
 import com.google.api.services.dataflow.model.WorkerPool;
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.Pipeline.PipelineVisitor;
-import com.google.cloud.dataflow.sdk.coders.CannotProvideCoderException;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.CoderException;
 import com.google.cloud.dataflow.sdk.coders.IterableCoder;
@@ -48,9 +47,7 @@ import com.google.cloud.dataflow.sdk.io.BigQueryIO;
 import com.google.cloud.dataflow.sdk.io.PubsubIO;
 import com.google.cloud.dataflow.sdk.io.Read;
 import com.google.cloud.dataflow.sdk.io.TextIO;
-import com.google.cloud.dataflow.sdk.options.CloudDebuggerOptions.DebuggerConfig;
 import com.google.cloud.dataflow.sdk.options.DataflowPipelineOptions;
-import com.google.cloud.dataflow.sdk.options.DataflowPipelineWorkerPoolOptions.AutoscalingAlgorithmType;
 import com.google.cloud.dataflow.sdk.options.StreamingOptions;
 import com.google.cloud.dataflow.sdk.runners.dataflow.AvroIOTranslator;
 import com.google.cloud.dataflow.sdk.runners.dataflow.BigQueryIOTranslator;
@@ -68,9 +65,9 @@ import com.google.cloud.dataflow.sdk.transforms.ParDo;
 import com.google.cloud.dataflow.sdk.transforms.View;
 import com.google.cloud.dataflow.sdk.transforms.windowing.DefaultTrigger;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Window;
+import com.google.cloud.dataflow.sdk.util.AppliedCombineFn;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.DoFnInfo;
-import com.google.cloud.dataflow.sdk.util.GroupAlsoByWindowsDoFn;
 import com.google.cloud.dataflow.sdk.util.OutputReference;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
@@ -142,17 +139,48 @@ public class DataflowPipelineTranslator {
   }
 
   /**
-   * Translates a {@link Pipeline} into a {@code Job}.
+   * Translates a {@link Pipeline} into a {@code JobSpecification}.
    */
-  public Job translate(Pipeline pipeline, List<DataflowPackage> packages) {
+  public JobSpecification translate(Pipeline pipeline, List<DataflowPackage> packages) {
     Translator translator = new Translator(pipeline);
-    return translator.translate(packages);
+    Job result = translator.translate(packages);
+    return new JobSpecification(result, Collections.unmodifiableMap(translator.stepNames));
   }
 
-  public static String jobToString(Job job)
-      throws JsonProcessingException {
-    return new ObjectMapper().writerWithDefaultPrettyPrinter()
-        .writeValueAsString(job);
+  /**
+   * The result of a job translation.
+   *
+   * <p>Used to pass the result {@link Job} and any state that was used to construct the job that
+   * may be of use to other classes (eg the {@link PTransform} to StepName mapping).
+   */
+  public static class JobSpecification {
+    private final Job job;
+    private final Map<AppliedPTransform<?, ?, ?>, String> stepNames;
+
+    public JobSpecification(Job job, Map<AppliedPTransform<?, ?, ?>, String> stepNames) {
+      this.job = job;
+      this.stepNames = stepNames;
+    }
+
+    public Job getJob() {
+      return job;
+    }
+
+    /**
+     * Returns the mapping of {@link AppliedPTransform AppliedPTransforms} to the internal step
+     * name for that {@code AppliedPTransform}.
+     */
+    public Map<AppliedPTransform<?, ?, ?>, String> getStepNames() {
+      return stepNames;
+    }
+  }
+
+  public static String jobToString(Job job) {
+    try {
+      return MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(job);
+    } catch (JsonProcessingException exc) {
+      throw new IllegalStateException("Failed to render Job as String.", exc);
+    }
   }
 
   /////////////////////////////////////////////////////////////////////////////
@@ -175,7 +203,6 @@ public class DataflowPipelineTranslator {
    * Returns the {@link TransformTranslator} to use for instances of the
    * specified PTransform class, or null if none registered.
    */
-  @SuppressWarnings("unchecked")
   public <TransformT extends PTransform>
       TransformTranslator<TransformT> getTransformTranslator(Class<TransformT> transformClass) {
     return transformTranslators.get(transformClass);
@@ -212,6 +239,11 @@ public class DataflowPipelineTranslator {
      * Returns the output of the currently being translated transform.
      */
     <OutputT extends POutput> OutputT getOutput(PTransform<?, OutputT> transform);
+
+    /**
+     * Returns the full name of the currently being translated transform.
+     */
+    String getFullName(PTransform<?, ?> transform);
 
     /**
      * Adds a step to the Dataflow workflow for the given transform, with
@@ -323,9 +355,9 @@ public class DataflowPipelineTranslator {
     private Step currentStep;
 
     /**
-     * A Map from PTransforms to their unique Dataflow step names.
+     * A Map from AppliedPTransform to their unique Dataflow step names.
      */
-    private final Map<PTransform, String> stepNames = new HashMap<>();
+    private final Map<AppliedPTransform<?, ?, ?>, String> stepNames = new HashMap<>();
 
     /**
      * A Map from PValues to their output names used by their producer
@@ -372,28 +404,8 @@ public class DataflowPipelineTranslator {
 
       WorkerPool workerPool = new WorkerPool();
 
-      workerPool.setKind(options.getWorkerPoolType());
       if (options.getTeardownPolicy() != null) {
         workerPool.setTeardownPolicy(options.getTeardownPolicy().getTeardownPolicyName());
-      }
-
-      // Config Cloud Debugger
-      if (!Strings.isNullOrEmpty(options.getCdbgVersion())) {
-        String cdbgVersion = options.getCdbgVersion();
-        DebuggerConfig debuggerConfig = new DebuggerConfig();
-        debuggerConfig.setVersion(cdbgVersion);
-
-        Map<String, String> metadata = workerPool.getMetadata();
-        if (metadata == null) {
-          metadata = new HashMap<String, String>();
-        }
-
-        try {
-          metadata.put("debugger", debuggerConfig.computeMetadataString());
-        } catch (JsonProcessingException e) {
-          throw new IllegalArgumentException("Cannot format Debugger version.", e);
-        }
-        workerPool.setMetadata(metadata);
       }
 
       if (options.isStreaming()) {
@@ -422,10 +434,13 @@ public class DataflowPipelineTranslator {
       if (!Strings.isNullOrEmpty(options.getZone())) {
         workerPool.setZone(options.getZone());
       }
+      if (!Strings.isNullOrEmpty(options.getNetwork())) {
+        workerPool.setNetwork(options.getNetwork());
+      }
       if (options.getDiskSizeGb() > 0) {
         workerPool.setDiskSizeGb(options.getDiskSizeGb());
       }
-      if (!options.getAutoscalingAlgorithm().equals(AutoscalingAlgorithmType.NONE)) {
+      if (options.getAutoscalingAlgorithm() != null) {
         AutoscalingSettings settings = new AutoscalingSettings();
         settings.setAlgorithm(options.getAutoscalingAlgorithm().getAlgorithm());
         settings.setMaxNumWorkers(options.getMaxNumWorkers());
@@ -448,16 +463,24 @@ public class DataflowPipelineTranslator {
 
     @Override
     public <InputT extends PInput> InputT getInput(PTransform<InputT, ?> transform) {
-      checkArgument(currentTransform != null && currentTransform.transform == transform,
-          "can only be called with current transform");
-      return (InputT) currentTransform.input;
+      return (InputT) getCurrentTransform(transform).getInput();
     }
 
     @Override
     public <OutputT extends POutput> OutputT getOutput(PTransform<?, OutputT> transform) {
-      checkArgument(currentTransform != null && currentTransform.transform == transform,
+      return (OutputT) getCurrentTransform(transform).getOutput();
+    }
+
+    @Override
+    public String getFullName(PTransform<?, ?> transform) {
+      return getCurrentTransform(transform).getFullName();
+    }
+
+    private AppliedPTransform<?, ?, ?> getCurrentTransform(PTransform<?, ?> transform) {
+      checkArgument(
+          currentTransform != null && currentTransform.getTransform() == transform,
           "can only be called with current transform");
-      return (OutputT) currentTransform.output;
+      return currentTransform;
     }
 
     @Override
@@ -468,7 +491,6 @@ public class DataflowPipelineTranslator {
     public void leaveCompositeTransform(TransformTreeNode node) {
     }
 
-    @SuppressWarnings("unchecked")
     @Override
     public void visitTransform(TransformTreeNode node) {
       PTransform<?, ?> transform = node.getTransform();
@@ -480,7 +502,7 @@ public class DataflowPipelineTranslator {
       }
       LOG.debug("Translating {}", transform);
       currentTransform = AppliedPTransform.of(
-          node.getInput(), node.getOutput(), (PTransform) transform);
+          node.getFullName(), node.getInput(), node.getOutput(), (PTransform) transform);
       translator.translate(transform, this);
       currentTransform = null;
     }
@@ -502,7 +524,7 @@ public class DataflowPipelineTranslator {
     @Override
     public void addStep(PTransform<?, ?> transform, String type) {
       String stepName = genStepName();
-      if (stepNames.put(transform, stepName) != null) {
+      if (stepNames.put(getCurrentTransform(transform), stepName) != null) {
         throw new IllegalArgumentException(
             transform + " already has a name specified");
       }
@@ -517,14 +539,14 @@ public class DataflowPipelineTranslator {
       currentStep.setName(stepName);
       currentStep.setKind(type);
       steps.add(currentStep);
-      addInput(PropertyNames.USER_NAME, pipeline.getFullName(transform));
+      addInput(PropertyNames.USER_NAME, getFullName(transform));
     }
 
     @Override
     public void addStep(PTransform<?, ? extends PValue> transform, Step original) {
       Step step = original.clone();
       String stepName = step.getName();
-      if (stepNames.put(transform, stepName) != null) {
+      if (stepNames.put(getCurrentTransform(transform), stepName) != null) {
         throw new IllegalArgumentException(transform + " already has a name specified");
       }
 
@@ -533,7 +555,6 @@ public class DataflowPipelineTranslator {
         @Nullable List<Map<String, Object>> outputInfoList = null;
         try {
           // TODO: This should be done via a Structs accessor.
-          @SuppressWarnings("unchecked")
           @Nullable List<Map<String, Object>> list =
               (List<Map<String, Object>>) properties.get(PropertyNames.OUTPUT_INFO);
           outputInfoList = list;
@@ -549,7 +570,7 @@ public class DataflowPipelineTranslator {
             name = null;
           }
           if (name != null) {
-            registerOutputName(pipeline.getOutput(transform), name);
+            registerOutputName(getOutput(transform), name);
           }
         }
       }
@@ -661,7 +682,6 @@ public class DataflowPipelineTranslator {
      * Dataflow step, producing the specified output {@code PValue}
      * with the given {@code Coder} (if not {@code null}).
      */
-    @SuppressWarnings("unchecked")
     private void addOutput(String name, PValue value, Coder<?> valueCoder) {
       registerOutputName(value, name);
 
@@ -696,7 +716,7 @@ public class DataflowPipelineTranslator {
 
     @Override
     public OutputReference asOutputReference(PValue value) {
-      PTransform<?, ?> transform =
+      AppliedPTransform<?, ?, ?> transform =
           value.getProducingTransformInternal();
       String stepName = stepNames.get(transform);
       if (stepName == null) {
@@ -776,7 +796,6 @@ public class DataflowPipelineTranslator {
     DataflowPipelineTranslator.registerTransformTranslator(
         Combine.GroupedValues.class,
         new DataflowPipelineTranslator.TransformTranslator<Combine.GroupedValues>() {
-          @SuppressWarnings("unchecked")
           @Override
           public void translate(
               Combine.GroupedValues transform,
@@ -789,33 +808,32 @@ public class DataflowPipelineTranslator {
               DataflowPipelineTranslator.TranslationContext context) {
             context.addStep(transform, "CombineValues");
             context.addInput(PropertyNames.PARALLEL_INPUT, context.getInput(transform));
+
+            AppliedCombineFn<? super K, ? super InputT, ?, OutputT> fn =
+                transform.getAppliedFn(
+                    context.getInput(transform).getPipeline().getCoderRegistry(),
+                    context.getInput(transform).getCoder());
+
+            context.addEncodingInput(fn.getAccumulatorCoder());
             context.addInput(
                 PropertyNames.SERIALIZED_FN,
-                byteArrayToJsonString(serializeToByteArray(transform.getFn())));
-            try {
-              context.addEncodingInput(transform.getAccumulatorCoder(
-                  context.getInput(transform).getPipeline().getCoderRegistry(),
-                  context.getInput(transform)));
-            } catch (CannotProvideCoderException exc) {
-              throw new IllegalStateException(
-                "Could not determine coder for input to Combine.GroupedValues", exc);
-            }
+                byteArrayToJsonString(serializeToByteArray(fn)));
             context.addOutput(PropertyNames.OUTPUT, context.getOutput(transform));
           }
         });
 
     registerTransformTranslator(
-        Create.class,
-        new TransformTranslator<Create>() {
+        Create.Values.class,
+        new TransformTranslator<Create.Values>() {
           @Override
           public void translate(
-              Create transform,
+              Create.Values transform,
               TranslationContext context) {
             createHelper(transform, context);
           }
 
           private <T> void createHelper(
-              Create<T> transform,
+              Create.Values<T> transform,
               TranslationContext context) {
             context.addStep(transform, "CreateCollection");
 
@@ -961,7 +979,8 @@ public class DataflowPipelineTranslator {
             context.addInput(PropertyNames.PARALLEL_INPUT, context.getInput(transform));
             context.addOutput(PropertyNames.OUTPUT, context.getOutput(transform));
 
-            byte[] serializedBytes = serializeToByteArray(transform.getWindowingStrategy());
+            WindowingStrategy<?, ?> strategy = context.getOutput(transform).getWindowingStrategy();
+            byte[] serializedBytes = serializeToByteArray(strategy);
             String serializedJson = byteArrayToJsonString(serializedBytes);
             assert Arrays.equals(serializedBytes,
                                  jsonStringToByteArray(serializedJson));
@@ -985,15 +1004,15 @@ public class DataflowPipelineTranslator {
     registerTransformTranslator(
         PubsubIO.Read.Bound.class, new PubsubIOTranslator.ReadTranslator());
     registerTransformTranslator(
-        PubsubIO.Write.Bound.class, new PubsubIOTranslator.WriteTranslator());
+        DataflowPipelineRunner.StreamingPubsubIOWrite.class,
+        new PubsubIOTranslator.WriteTranslator());
 
     registerTransformTranslator(
         TextIO.Read.Bound.class, new TextIOTranslator.ReadTranslator());
     registerTransformTranslator(
         TextIO.Write.Bound.class, new TextIOTranslator.WriteTranslator());
 
-    registerTransformTranslator(
-        Read.Bound.class, new ReadTranslator());
+    registerTransformTranslator(Read.Bounded.class, new ReadTranslator());
   }
 
   private static void translateInputs(
@@ -1030,12 +1049,6 @@ public class DataflowPipelineTranslator {
         PropertyNames.SERIALIZED_FN,
         byteArrayToJsonString(serializeToByteArray(
             new DoFnInfo(fn, windowingStrategy, sideInputs, inputCoder))));
-    if (fn instanceof DoFn.RequiresKeyedState
-        // Adjust requires keyed state property for the Dataflow Service.
-        // TODO: Remove when this is performed by the service.
-        && !(fn instanceof GroupAlsoByWindowsDoFn)) {
-      context.addInput(PropertyNames.USES_KEYED_STATE, "true");
-    }
   }
 
   private static void translateOutputs(

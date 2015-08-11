@@ -18,6 +18,7 @@ package com.google.cloud.dataflow.sdk.testing;
 
 import static org.hamcrest.core.StringContains.containsString;
 import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.google.cloud.dataflow.sdk.Pipeline;
@@ -42,6 +43,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.util.regex.Pattern;
 
 /**
  * Test case for {@link DataflowAssert}.
@@ -114,8 +116,8 @@ public class DataflowAssertTest implements Serializable {
     PCollection<NotSerializableObject> pcollection = pipeline
         .apply(Create.of(
           new NotSerializableObject(),
-          new NotSerializableObject()))
-        .setCoder(NotSerializableObjectCoder.of());
+          new NotSerializableObject())
+            .withCoder(NotSerializableObjectCoder.of()));
 
     DataflowAssert.that(pcollection).containsInAnyOrder(
       new NotSerializableObject(),
@@ -137,8 +139,8 @@ public class DataflowAssertTest implements Serializable {
     PCollection<NotSerializableObject> pcollection = pipeline
         .apply(Create.of(
           new NotSerializableObject(),
-          new NotSerializableObject()))
-        .setCoder(NotSerializableObjectCoder.of());
+          new NotSerializableObject())
+            .withCoder(NotSerializableObjectCoder.of()));
 
     DataflowAssert.that(pcollection).satisfies(
         new SerializableFunction<Iterable<NotSerializableObject>, Void>() {
@@ -198,8 +200,12 @@ public class DataflowAssertTest implements Serializable {
       try {
         pipeline.run();
       } catch (AssertionError exc) {
-        assertThat(exc.getMessage(),
-            containsString("Expected: iterable over [<4>, <7>, <3>, <2>, <1>] in any order"));
+        // A loose pattern, but should get the job done.
+        Pattern expectedPattern = Pattern.compile(
+            "Expected: iterable over \\[((<4>|<7>|<3>|<2>|<1>)(, )?){5}\\] in any order");
+        assertTrue("Expected error message from DataflowAssert with substring matching "
+            + expectedPattern + " but the message was \"" + exc.getMessage() + "\"",
+            expectedPattern.matcher(exc.getMessage()).find());
         return;
       }
     } else if (pipeline.getRunner() instanceof TestDataflowPipelineRunner) {

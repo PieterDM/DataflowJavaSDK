@@ -35,6 +35,9 @@ import com.google.cloud.dataflow.sdk.util.common.CounterSet;
  * finishing its consumers.
  */
 public abstract class Operation {
+  /** The name of this operation. */
+  public final String operationName;
+
   /**
    * The array of consuming receivers, one per operation output
    * "port" (e.g., DoFn main or side output).  A receiver might be
@@ -77,6 +80,7 @@ public abstract class Operation {
                    String counterPrefix,
                    CounterSet.AddCounterMutator addCounterMutator,
                    StateSampler stateSampler) {
+    this.operationName = operationName;
     this.receivers = receivers;
     this.stateSampler = stateSampler;
     startState = stateSampler.stateForName(operationName + "-start");

@@ -16,6 +16,8 @@
 
 package com.google.cloud.dataflow.sdk.runners.worker;
 
+import static com.google.cloud.dataflow.sdk.runners.worker.DataflowOutputCounter.getElementCounterName;
+import static com.google.cloud.dataflow.sdk.runners.worker.DataflowOutputCounter.getObjectCounterName;
 import static com.google.cloud.dataflow.sdk.util.common.Counter.AggregationKind.SUM;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.collection.IsIterableContainingInOrder.contains;
@@ -29,8 +31,9 @@ import static org.junit.Assert.fail;
 
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
-import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
+import com.google.cloud.dataflow.sdk.util.DirectSideInputReader;
 import com.google.cloud.dataflow.sdk.util.DoFnInfo;
+import com.google.cloud.dataflow.sdk.util.NullSideInputReader;
 import com.google.cloud.dataflow.sdk.util.PTuple;
 import com.google.cloud.dataflow.sdk.util.UserCodeException;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
@@ -59,12 +62,12 @@ public class NormalParDoFnTest {
     enum State { UNSTARTED, STARTED, PROCESSING, FINISHED }
     State state = State.UNSTARTED;
 
-    List<TupleTag> sideOutputTupleTags;
+    List<TupleTag<String>> sideOutputTupleTags;
 
     public TestDoFn(List<String> sideOutputTags) {
       sideOutputTupleTags = new ArrayList<>();
       for (String sideOutputTag : sideOutputTags) {
-        sideOutputTupleTags.add(new TupleTag(sideOutputTag));
+        sideOutputTupleTags.add(new TupleTag<String>(sideOutputTag));
       }
     }
 
@@ -93,7 +96,7 @@ public class NormalParDoFnTest {
 
     private void outputToAll(Context c, String value) {
       c.output(value);
-      for (TupleTag sideOutputTupleTag : sideOutputTupleTags) {
+      for (TupleTag<String> sideOutputTupleTag : sideOutputTupleTags) {
         c.sideOutput(sideOutputTupleTag,
                      sideOutputTupleTag.getId() + ": " + value);
       }
@@ -136,24 +139,12 @@ public class NormalParDoFnTest {
     }
   }
 
-  static class TestDoFnInfoFactory implements NormalParDoFn.DoFnInfoFactory {
-    DoFnInfo fnInfo;
-
-    TestDoFnInfoFactory(DoFnInfo fnInfo) {
-      this.fnInfo = fnInfo;
-    }
-
-    public DoFnInfo createDoFnInfo() {
-      return fnInfo;
-    }
-  }
-
   @Test
   public void testNormalParDoFn() throws Exception {
     List<String> sideOutputTags = Arrays.asList("tag1", "tag2", "tag3");
 
     TestDoFn fn = new TestDoFn(sideOutputTags);
-    DoFnInfo fnInfo = new DoFnInfo(fn, WindowingStrategy.globalDefault());
+    DoFnInfo<?, ?> fnInfo = new DoFnInfo<>(fn, WindowingStrategy.globalDefault());
     TestReceiver receiver = new TestReceiver();
     TestReceiver receiver1 = new TestReceiver();
     TestReceiver receiver2 = new TestReceiver();
@@ -164,11 +155,15 @@ public class NormalParDoFnTest {
     List<String> outputTags = new ArrayList<>();
     outputTags.add("output");
     outputTags.addAll(sideOutputTags);
-    NormalParDoFn normalParDoFn =
-        new NormalParDoFn(PipelineOptionsFactory.create(),
-                          new TestDoFnInfoFactory(fnInfo), sideInputValues, outputTags, "doFn",
-                          new BatchModeExecutionContext(),
-                          (new CounterSet()).getAddCounterMutator());
+    NormalParDoFn normalParDoFn = NormalParDoFn.of(
+        PipelineOptionsFactory.create(),
+        fnInfo,
+        DirectSideInputReader.of(sideInputValues),
+        outputTags,
+        "doFn",
+        "doFn",
+        DataflowExecutionContext.withoutSideInputs(),
+        (new CounterSet()).getAddCounterMutator());
 
     normalParDoFn.startBundle(receiver, receiver1, receiver2, receiver3);
 
@@ -218,16 +213,20 @@ public class NormalParDoFnTest {
   @Test
   public void testUnexpectedNumberOfReceivers() throws Exception {
     TestDoFn fn = new TestDoFn(Collections.<String>emptyList());
-    DoFnInfo fnInfo = new DoFnInfo(fn, WindowingStrategy.globalDefault());
+    DoFnInfo<?, ?> fnInfo = new DoFnInfo<>(fn, WindowingStrategy.globalDefault());
     TestReceiver receiver = new TestReceiver();
 
     PTuple sideInputValues = PTuple.empty();
     List<String> outputTags = Arrays.asList("output");
-    NormalParDoFn normalParDoFn =
-        new NormalParDoFn(PipelineOptionsFactory.create(),
-                          new TestDoFnInfoFactory(fnInfo), sideInputValues, outputTags, "doFn",
-                          new BatchModeExecutionContext(),
-                          (new CounterSet()).getAddCounterMutator());
+    NormalParDoFn normalParDoFn = NormalParDoFn.of(
+        PipelineOptionsFactory.create(),
+        fnInfo,
+        DirectSideInputReader.of(sideInputValues),
+        outputTags,
+        "doFn",
+        "doFn",
+        DataflowExecutionContext.withoutSideInputs(),
+        (new CounterSet()).getAddCounterMutator());
 
     try {
       normalParDoFn.startBundle();
@@ -257,16 +256,20 @@ public class NormalParDoFnTest {
   @Test
   public void testErrorPropagation() throws Exception {
     TestErrorDoFn fn = new TestErrorDoFn();
-    DoFnInfo fnInfo = new DoFnInfo(fn, WindowingStrategy.globalDefault());
+    DoFnInfo<?, ?> fnInfo = new DoFnInfo<>(fn, WindowingStrategy.globalDefault());
     TestReceiver receiver = new TestReceiver();
 
     PTuple sideInputValues = PTuple.empty();
     List<String> outputTags = Arrays.asList("output");
-    NormalParDoFn normalParDoFn =
-        new NormalParDoFn(PipelineOptionsFactory.create(),
-                          new TestDoFnInfoFactory(fnInfo), sideInputValues, outputTags, "doFn",
-                          new BatchModeExecutionContext(),
-                          (new CounterSet()).getAddCounterMutator());
+    NormalParDoFn normalParDoFn = NormalParDoFn.of(
+        PipelineOptionsFactory.create(),
+        fnInfo,
+        DirectSideInputReader.of(sideInputValues),
+        outputTags,
+        "doFn",
+        "doFn",
+        DataflowExecutionContext.withoutSideInputs(),
+        (new CounterSet()).getAddCounterMutator());
 
     try {
       normalParDoFn.startBundle(receiver);
@@ -325,14 +328,17 @@ public class NormalParDoFnTest {
   @Test
   public void testUndeclaredSideOutputs() throws Exception {
     TestDoFn fn = new TestDoFn(Arrays.asList("declared", "undecl1", "undecl2", "undecl3"));
-    DoFnInfo fnInfo = new DoFnInfo(fn, WindowingStrategy.globalDefault());
+    DoFnInfo<?, ?> fnInfo = new DoFnInfo<>(fn, WindowingStrategy.globalDefault());
     CounterSet counters = new CounterSet();
-    NormalParDoFn normalParDoFn =
-        new NormalParDoFn(
-            PipelineOptionsFactory.create(), new TestDoFnInfoFactory(fnInfo), PTuple.empty(),
-            Arrays.asList("output", "declared"), "doFn",
-            new BatchModeExecutionContext(),
-            counters.getAddCounterMutator());
+    NormalParDoFn normalParDoFn = NormalParDoFn.of(
+        PipelineOptionsFactory.create(),
+        fnInfo,
+        NullSideInputReader.empty(),
+        Arrays.asList("output", "declared"),
+        "doFn",
+        "doFn",
+        DataflowExecutionContext.withoutSideInputs(),
+        counters.getAddCounterMutator());
 
     normalParDoFn.startBundle(new TestReceiver(), new TestReceiver());
     normalParDoFn.processElement(WindowedValue.valueInGlobalWindow(5));
@@ -340,12 +346,12 @@ public class NormalParDoFnTest {
 
     assertEquals(
         new CounterSet(
-            Counter.longs("implicit-undecl1-ElementCount", SUM)
-            .resetToValue(3L),
-            Counter.longs("implicit-undecl2-ElementCount", SUM)
-            .resetToValue(3L),
-            Counter.longs("implicit-undecl3-ElementCount", SUM)
-            .resetToValue(3L)),
+            Counter.longs(getElementCounterName("implicit-undecl1"), SUM).resetToValue(3L),
+            Counter.longs(getObjectCounterName("implicit-undecl1"), SUM).resetToValue(3L),
+            Counter.longs(getElementCounterName("implicit-undecl2"), SUM).resetToValue(3L),
+            Counter.longs(getObjectCounterName("implicit-undecl2"), SUM).resetToValue(3L),
+            Counter.longs(getElementCounterName("implicit-undecl3"), SUM).resetToValue(3L),
+            Counter.longs(getObjectCounterName("implicit-undecl3"), SUM).resetToValue(3L)),
         counters);
   }
 }

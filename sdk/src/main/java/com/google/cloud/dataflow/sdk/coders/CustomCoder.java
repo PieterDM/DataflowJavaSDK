@@ -17,23 +17,31 @@
 package com.google.cloud.dataflow.sdk.coders;
 
 import static com.google.cloud.dataflow.sdk.util.Structs.addString;
+import static com.google.cloud.dataflow.sdk.util.Structs.addStringList;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.cloud.dataflow.sdk.util.CloudObject;
+import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
 import com.google.cloud.dataflow.sdk.util.StringUtils;
+import com.google.common.collect.Lists;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.io.Serializable;
+import java.util.Collection;
 
 /**
  * An abstract base class for writing {@link Coder}s that encodes itself via java
- * serialization.  Subclasses only need to implement the {@link Coder#encode}
- * and {@link Coder#decode} methods.
+ * serialization.
  *
- * <p>
- * Not to be confused with {@link SerializableCoder} that encodes serializables.
+ * <p>To complete an implementation, subclasses must implement {@link Coder#encode}
+ * and {@link Coder#decode} methods. Anonymous subclasses must furthermore override
+ * {@link #getEncodingId}.
+ *
+ * <p>Not to be confused with {@link SerializableCoder} that encodes objects that implement the
+ * {@link Serializable} interface.
  *
  * @param <T> the type of elements handled by this coder
  */
@@ -53,6 +61,7 @@ public abstract class CustomCoder<T> extends AtomicCoder<T>
       // updating constructed values, so it would throw an exception, causing
       // deserialization to fail.
       @JsonProperty(value = "@type", required = false) String typeId,
+      @JsonProperty(value = "encoding_id", required = false) String encodingId,
       @JsonProperty("type") String type,
       @JsonProperty("serialized_coder") String serializedCoder) {
     return (CustomCoder<?>) SerializableUtils.deserializeFromByteArray(
@@ -70,6 +79,18 @@ public abstract class CustomCoder<T> extends AtomicCoder<T>
     addString(result, "serialized_coder",
         StringUtils.byteArrayToJsonString(
             SerializableUtils.serializeToByteArray(this)));
+
+    String encodingId = getEncodingId();
+    checkNotNull(encodingId, "Coder.getEncodingId() must not return null.");
+    if (!encodingId.isEmpty()) {
+      addString(result, PropertyNames.ENCODING_ID, encodingId);
+    }
+
+    Collection<String> allowedEncodings = getAllowedEncodings();
+    if (!allowedEncodings.isEmpty()) {
+      addStringList(result, PropertyNames.ALLOWED_ENCODINGS, Lists.newArrayList(allowedEncodings));
+    }
+
     return result;
   }
 
@@ -78,6 +99,18 @@ public abstract class CustomCoder<T> extends AtomicCoder<T>
     throw new NonDeterministicException(this,
         "CustomCoder implementations must override verifyDeterministic,"
         + " or they are presumed nondeterministic.");
+  }
+
+  @Override
+  public String getEncodingId() {
+    if (getClass().isAnonymousClass()) {
+      throw new UnsupportedOperationException(
+          String.format("Anonymous CustomCoder subclass %s must override getEncodingId()."
+              + " Otherwise, convert to a named class and getEncodingId() will be automatically"
+              + " generated from the fully qualified class name.",
+              getClass()));
+    }
+    return getClass().getCanonicalName();
   }
 
   // This coder inherits isRegisterByteSizeObserverCheap,

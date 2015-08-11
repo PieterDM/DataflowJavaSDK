@@ -23,13 +23,8 @@ import static org.junit.Assert.assertThat;
 import static org.mockito.Mockito.when;
 
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.MergeResult;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.OnElementEvent;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.OnMergeEvent;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.OnTimerEvent;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TimeDomain;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TriggerContext;
 import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger.TriggerResult;
-import com.google.cloud.dataflow.sdk.util.ExecutableTrigger;
+import com.google.cloud.dataflow.sdk.util.TimeDomain;
 import com.google.cloud.dataflow.sdk.util.TriggerTester;
 import com.google.cloud.dataflow.sdk.util.WindowingStrategy.AccumulationMode;
 
@@ -49,7 +44,6 @@ import org.mockito.MockitoAnnotations;
 @RunWith(JUnit4.class)
 public class RepeatedlyTest {
   @Mock private Trigger<IntervalWindow> mockRepeated;
-  private ExecutableTrigger<IntervalWindow> executableRepeated;
 
   private TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester;
   private IntervalWindow firstWindow;
@@ -58,21 +52,17 @@ public class RepeatedlyTest {
     MockitoAnnotations.initMocks(this);
     Trigger<IntervalWindow> underTest = Repeatedly.forever(mockRepeated);
     tester = TriggerTester.nonCombining(
-        windowFn, underTest, AccumulationMode.DISCARDING_FIRED_PANES);
-    executableRepeated = tester.getTrigger().subTriggers().get(0);
+        windowFn, underTest,
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
     firstWindow = new IntervalWindow(new Instant(0), new Instant(10));
-  }
-
-  @SuppressWarnings("unchecked")
-  private TriggerContext<IntervalWindow> isTriggerContext() {
-    return Mockito.isA(TriggerContext.class);
   }
 
   private void injectElement(int element, TriggerResult result1)
       throws Exception {
     if (result1 != null) {
       when(mockRepeated.onElement(
-          isTriggerContext(), Mockito.<OnElementEvent<IntervalWindow>>any()))
+          Mockito.<Trigger<IntervalWindow>.OnElementContext>any()))
           .thenReturn(result1);
     }
     tester.injectElement(element, new Instant(element));
@@ -90,11 +80,7 @@ public class RepeatedlyTest {
     assertThat(tester.extractOutput(), Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2), 1, 0, 10),
         isSingleWindowedValue(Matchers.containsInAnyOrder(3), 3, 0, 10)));
-    assertFalse(tester.isDone(firstWindow));
-    assertThat(tester.getKeyedStateInUse(), Matchers.contains(
-        tester.bufferTag(firstWindow),
-        // Holding the earliest not-yet-output element (4) waiting to fire.
-        tester.earliestElement(firstWindow)));
+    assertFalse(tester.isMarkedFinished(firstWindow));
   }
 
   @Test
@@ -103,38 +89,36 @@ public class RepeatedlyTest {
 
     injectElement(1, TriggerResult.CONTINUE);
 
-    tester.setTimer(firstWindow, new Instant(11), TimeDomain.EVENT_TIME, executableRepeated);
-    when(mockRepeated.onTimer(isTriggerContext(), Mockito.<OnTimerEvent<IntervalWindow>>any()))
+    when(mockRepeated.onTimer(Mockito.<Trigger<IntervalWindow>.OnTimerContext>any()))
         .thenReturn(TriggerResult.FIRE);
-    tester.advanceWatermark(new Instant(12));
+    tester.fireTimer(firstWindow, new Instant(11), TimeDomain.EVENT_TIME);
 
     injectElement(2, TriggerResult.CONTINUE);
 
-    tester.setTimer(firstWindow, new Instant(12), TimeDomain.EVENT_TIME, executableRepeated);
-    when(mockRepeated.onTimer(isTriggerContext(), Mockito.<OnTimerEvent<IntervalWindow>>any()))
+    when(mockRepeated.onTimer(Mockito.<Trigger<IntervalWindow>.OnTimerContext>any()))
         .thenReturn(TriggerResult.FIRE_AND_FINISH);
-    tester.advanceWatermark(new Instant(13));
+    tester.fireTimer(firstWindow, new Instant(12), TimeDomain.EVENT_TIME);
 
     injectElement(3, TriggerResult.CONTINUE);
 
-    tester.setTimer(firstWindow, new Instant(13), TimeDomain.EVENT_TIME, executableRepeated);
-    when(mockRepeated.onTimer(isTriggerContext(), Mockito.<OnTimerEvent<IntervalWindow>>any()))
+    when(mockRepeated.onTimer(Mockito.<Trigger<IntervalWindow>.OnTimerContext>any()))
         .thenReturn(TriggerResult.CONTINUE);
-    tester.advanceWatermark(new Instant(14));
+    tester.fireTimer(firstWindow, new Instant(13), TimeDomain.EVENT_TIME);
 
     injectElement(4, TriggerResult.CONTINUE);
 
-    tester.setTimer(firstWindow, new Instant(14), TimeDomain.EVENT_TIME, executableRepeated);
-    when(mockRepeated.onTimer(isTriggerContext(), Mockito.<OnTimerEvent<IntervalWindow>>any()))
+    when(mockRepeated.onTimer(Mockito.<Trigger<IntervalWindow>.OnTimerContext>any()))
         .thenReturn(TriggerResult.FIRE);
-    tester.advanceWatermark(new Instant(15));
+    tester.fireTimer(firstWindow, new Instant(14), TimeDomain.EVENT_TIME);
 
     assertThat(tester.extractOutput(), Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(1), 1, 0, 10),
         isSingleWindowedValue(Matchers.containsInAnyOrder(2), 2, 0, 10),
         isSingleWindowedValue(Matchers.containsInAnyOrder(3, 4), 3, 0, 10)));
-    assertFalse(tester.isDone(firstWindow));
-    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+    assertFalse(tester.isMarkedFinished(firstWindow));
+
+    tester.assertHasOnlyGlobalAndPaneInfoFor(
+        new IntervalWindow(new Instant(0), new Instant(10)));
   }
 
   @Test
@@ -146,14 +130,15 @@ public class RepeatedlyTest {
     injectElement(5, TriggerResult.CONTINUE);
 
     when(mockRepeated.onMerge(
-        isTriggerContext(),
-        Mockito.<OnMergeEvent<IntervalWindow>>any())).thenReturn(MergeResult.FIRE_AND_FINISH);
+        Mockito.<Trigger<IntervalWindow>.OnMergeContext>any()))
+        .thenReturn(MergeResult.FIRE_AND_FINISH);
     tester.doMerge();
 
     assertThat(tester.extractOutput(), Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(1, 5, 12), 1, 1, 22)));
-    assertFalse(tester.isDone(firstWindow));
-    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+    assertFalse(tester.isMarkedFinished(new IntervalWindow(new Instant(1), new Instant(22))));
+    tester.assertHasOnlyGlobalAndPaneInfoFor(
+        new IntervalWindow(new Instant(1), new Instant(22)));
   }
 
   @Test
@@ -161,16 +146,29 @@ public class RepeatedlyTest {
     BoundedWindow window = new IntervalWindow(new Instant(0), new Instant(10));
 
     assertEquals(new Instant(9),
-        Repeatedly.forever(AfterWatermark.pastEndOfWindow()).getWatermarkCutoff(window));
+        Repeatedly.forever(AfterWatermark.pastEndOfWindow())
+        .getWatermarkThatGuaranteesFiring(window));
     assertEquals(new Instant(9), Repeatedly.forever(AfterWatermark.pastEndOfWindow())
         .orFinally(AfterPane.elementCountAtLeast(1))
-        .getWatermarkCutoff(window));
+        .getWatermarkThatGuaranteesFiring(window));
     assertEquals(new Instant(9), Repeatedly.forever(AfterPane.elementCountAtLeast(1))
         .orFinally(AfterWatermark.pastEndOfWindow())
-        .getWatermarkCutoff(window));
+        .getWatermarkThatGuaranteesFiring(window));
     assertEquals(BoundedWindow.TIMESTAMP_MAX_VALUE,
         Repeatedly.forever(AfterPane.elementCountAtLeast(1))
         .orFinally(AfterPane.elementCountAtLeast(10))
-        .getWatermarkCutoff(window));
+        .getWatermarkThatGuaranteesFiring(window));
+  }
+
+  @Test
+  public void testContinuation() throws Exception {
+    Trigger<IntervalWindow> trigger = AfterProcessingTime.pastFirstElementInPane();
+    Trigger<IntervalWindow> repeatedly = Repeatedly.forever(trigger);
+    assertEquals(
+        Repeatedly.forever(trigger.getContinuationTrigger()),
+        repeatedly.getContinuationTrigger());
+    assertEquals(
+        Repeatedly.forever(trigger.getContinuationTrigger().getContinuationTrigger()),
+        repeatedly.getContinuationTrigger().getContinuationTrigger());
   }
 }

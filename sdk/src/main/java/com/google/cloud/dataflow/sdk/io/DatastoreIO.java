@@ -51,10 +51,10 @@ import com.google.cloud.dataflow.sdk.options.GcpOptions;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.transforms.Write;
 import com.google.cloud.dataflow.sdk.util.AttemptBoundedExponentialBackOff;
-import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.RetryHttpRequestInitializer;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -144,6 +144,15 @@ import java.util.NoSuchElementException;
  * or insert) mutations. Please read
  * <a href="https://cloud.google.com/datastore/docs/concepts/entities">Entities, Properties, and
  * Keys</a> for more information about entity keys.
+ *
+ * <p><h3>Permissions</h3>
+ * Permission requirements depend on the
+ * {@link com.google.cloud.dataflow.sdk.runners.PipelineRunner PipelineRunner} that is
+ * used to execute the Dataflow job. Please refer to the documentation of corresponding
+ * {@code PipelineRunner}s for more details.
+ *
+ * <p>Please see <a href="https://cloud.google.com/datastore/docs/activate">Cloud Datastore Sign Up
+ * </a>for security and permission related information specific to Datastore.
  */
 @Experimental(Experimental.Kind.SOURCE_SINK)
 public class DatastoreIO {
@@ -168,7 +177,7 @@ public class DatastoreIO {
    * Returns a {@code PTransform} that reads Datastore entities from the query
    * against the given dataset.
    */
-  public static Read.Bound<Entity> readFrom(String datasetId, Query query) {
+  public static Read.Bounded<Entity> readFrom(String datasetId, Query query) {
     return Read.from(new Source(DEFAULT_HOST, datasetId, query));
   }
 
@@ -176,7 +185,7 @@ public class DatastoreIO {
    * Returns a {@code PTransform} that reads Datastore entities from the query
    * against the given dataset and host.
    */
-  public static Read.Bound<Entity> readFrom(String host, String datasetId, Query query) {
+  public static Read.Bounded<Entity> readFrom(String host, String datasetId, Query query) {
     return Read.from(new Source(host, datasetId, query));
   }
 
@@ -293,11 +302,17 @@ public class DatastoreIO {
       DataflowPipelineOptions dataflowOptions = options.as(DataflowPipelineOptions.class);
       long numSplits;
       try {
-        numSplits = getEstimatedSizeBytes(options) / desiredBundleSizeBytes;
+        numSplits = Math.round(((double) getEstimatedSizeBytes(options)) / desiredBundleSizeBytes);
       } catch (Exception e) {
         LOG.warn("Estimated size unavailable, using number of workers", e);
         // Fallback in case estimated size is unavailable.
         numSplits = dataflowOptions.getNumWorkers();
+      }
+
+      // If the desiredBundleSize or number of workers results in 1 split, simply return
+      // a source that reads from the original query.
+      if (numSplits <= 1) {
+        return Lists.newArrayList(this);
       }
 
       List<Query> splitQueries;
@@ -316,8 +331,7 @@ public class DatastoreIO {
     }
 
     @Override
-    public BoundedReader<Entity> createReader(
-        PipelineOptions pipelineOptions, ExecutionContext executionContext) throws IOException {
+    public BoundedReader<Entity> createReader(PipelineOptions pipelineOptions) throws IOException {
       return new DatastoreReader(this, getDatastore(pipelineOptions));
     }
 
@@ -395,8 +409,8 @@ public class DatastoreIO {
   }
 
   /**
-   * A {@link Sink} that writes a {@link PCollection PCollection<Entity>} containing
-   * entities to a Datastore kind.
+   * A {@link Sink} that writes a {@link PCollection} containing
+   * {@link Entity Entities} to a Datastore kind.
    *
    */
   public static class Sink extends com.google.cloud.dataflow.sdk.io.Sink<Entity> {
@@ -436,7 +450,8 @@ public class DatastoreIO {
       Preconditions.checkNotNull(
           host, "Host is a required parameter. Please use withHost to set the host.");
       Preconditions.checkNotNull(
-          datasetId, "Dataset id is a required parameter. Please use to to set the datasetId.");
+          datasetId,
+          "Dataset ID is a required parameter. Please use withDataset to to set the datasetId.");
     }
 
     @Override
@@ -658,7 +673,7 @@ public class DatastoreIO {
    * <p> Timestamped records are currently not supported.
    * All records implicitly have the timestamp of {@code BoundedWindow.TIMESTAMP_MIN_VALUE}.
    */
-  public static class DatastoreReader extends BoundedSource.AbstractBoundedReader<Entity> {
+  public static class DatastoreReader extends BoundedSource.BoundedReader<Entity> {
     private final Source source;
 
     /**
@@ -692,7 +707,7 @@ public class DatastoreIO {
     private Entity currentEntity;
 
     /**
-     * Returns a DatastoreIterator with query and Datastore object set.
+     * Returns a DatastoreReader with Source and Datastore object set.
      *
      * @param datastore a datastore connection to use.
      */

@@ -17,193 +17,89 @@
 package com.google.cloud.dataflow.sdk.util;
 
 import com.google.cloud.dataflow.sdk.coders.Coder;
-import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
-import com.google.cloud.dataflow.sdk.transforms.windowing.Trigger;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTag;
-import com.google.cloud.dataflow.sdk.values.CodedTupleTagMap;
-import com.google.cloud.dataflow.sdk.values.PCollectionView;
+import com.google.cloud.dataflow.sdk.util.state.StateInternals;
 import com.google.cloud.dataflow.sdk.values.TupleTag;
 
-import org.joda.time.Instant;
-
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
- * Context about the current execution.  This is guaranteed to exist during processing,
+ * Context for the current execution. This is guaranteed to exist during processing,
  * but does not necessarily persist between different batches of work.
  */
-public abstract class ExecutionContext {
-  private Map<String, StepContext> cachedStepContexts = new HashMap<>();
-
+public interface ExecutionContext {
   /**
    * Returns the {@link StepContext} associated with the given step.
    */
-  public StepContext getStepContext(String stepName) {
-    StepContext context = cachedStepContexts.get(stepName);
-    if (context == null) {
-      context = createStepContext(stepName);
-      cachedStepContexts.put(stepName, context);
-    }
-    return context;
-  }
+  StepContext getStepContext(String stepName, String transformName);
 
   /**
    * Returns a collection view of all of the {@link StepContext}s.
    */
-  public Collection<StepContext> getAllStepContexts() {
-    return cachedStepContexts.values();
-  }
-
-  /**
-   * Implementations should override this to create the specific type
-   * of {@link StepContext} they neeed.
-   */
-  public abstract StepContext createStepContext(String stepName);
-
-  /**
-   * Writes out a timer to be fired when the watermark reaches the given
-   * timestamp.  Timers are identified by their name, and can be moved
-   * by calling {@code setTimer} again, or deleted with
-   * {@link ExecutionContext#deleteTimer}.
-   */
-  public abstract void setTimer(String timer, Instant timestamp, Trigger.TimeDomain domain);
-
-  /**
-   * Deletes the given timer.
-   */
-  public abstract void deleteTimer(String timer, Trigger.TimeDomain domain);
+  Collection<StepContext> getAllStepContexts();
 
   /**
    * Hook for subclasses to implement that will be called whenever
    * {@link com.google.cloud.dataflow.sdk.transforms.DoFn.Context#output}
    * is called.
    */
-  public void noteOutput(WindowedValue<?> output) {}
+  void noteOutput(WindowedValue<?> output);
 
   /**
    * Hook for subclasses to implement that will be called whenever
    * {@link com.google.cloud.dataflow.sdk.transforms.DoFn.Context#sideOutput}
    * is called.
    */
-  public void noteSideOutput(TupleTag<?> tag, WindowedValue<?> output) {}
-
-  /**
-   * Returns the side input associated with the given view and window, given the set of side
-   * inputs available.
-   */
-  public abstract <T> T getSideInput(
-      PCollectionView<T> view, BoundedWindow mainInputWindow, PTuple sideInputs);
-
-  /**
-   * Writes the given {@link PCollectionView} data to a globally accessible location.
-   */
-  public <T, W extends BoundedWindow> void writePCollectionViewData(
-      TupleTag<?> tag,
-      Iterable<WindowedValue<T>> data, Coder<Iterable<WindowedValue<T>>> dataCoder,
-      W window, Coder<W> windowCoder) throws IOException {
-    throw new UnsupportedOperationException("Not implemented.");
-  }
+  void noteSideOutput(TupleTag<?> tag, WindowedValue<?> output);
 
   /**
    * Per-step, per-key context used for retrieving state.
    */
-  public abstract class StepContext implements DoFn.KeyedState {
-    private final String stepName;
-
-    public StepContext(String stepName) {
-      this.stepName = stepName;
-    }
-
-    public String getStepName() {
-      return stepName;
-    }
-
-    public ExecutionContext getExecutionContext() {
-      return ExecutionContext.this;
-    }
-
-    public void noteOutput(WindowedValue<?> output) {
-      ExecutionContext.this.noteOutput(output);
-    }
-
-    public void noteSideOutput(TupleTag<?> tag, WindowedValue<?> output) {
-      ExecutionContext.this.noteSideOutput(tag, output);
-    }
+  public interface StepContext {
 
     /**
-     * Stores the provided value in per-{@link com.google.cloud.dataflow.sdk.transforms.DoFn},
-     * per-key state.  This state is in the form of a map from tags to arbitrary
-     * encodable values.
-     *
-     * @throws IOException if encoding the given value fails
+     * The name of the step.
      */
-    public abstract <T> void store(CodedTupleTag<T> tag, T value, Instant timestamp)
-        throws IOException;
-
-    @Override
-    public <T> void store(CodedTupleTag<T> tag, T value) throws IOException {
-      store(tag, value, BoundedWindow.TIMESTAMP_MAX_VALUE);
-    }
+    String getStepName();
 
     /**
-     * Loads the values from the per-{@link com.google.cloud.dataflow.sdk.transforms.DoFn},
-     * per-key state corresponding to the given tags.
-     *
-     * @throws IOException if decoding any of the requested values fails
+     * The name of the transform for the step.
      */
-    @Override
-    public abstract CodedTupleTagMap lookup(Iterable<? extends CodedTupleTag<?>> tags)
-        throws IOException;
+    String getTransformName();
 
     /**
-     * Loads the value from the per-{@link com.google.cloud.dataflow.sdk.transforms.DoFn},
-     * per-key state corresponding to the given tag.
-     *
-     * @throws IOException if decoding the value fails
+     * The context in which this step is executing.
      */
-    @Override
-    public <T> T lookup(CodedTupleTag<T> tag) throws IOException {
-      return lookup(Arrays.asList(tag)).get(tag);
-    }
+    ExecutionContext getExecutionContext();
 
     /**
-     * Writes the provided value to the list of values in stored state corresponding to the
-     * provided tag.
-     *
-     * @throws IOException if encoding the given value fails
+     * Hook for subclasses to implement that will be called whenever
+     * {@link com.google.cloud.dataflow.sdk.transforms.DoFn.Context#output}
+     * is called.
      */
-    public <T> void writeToTagList(CodedTupleTag<T> tag, T value) throws IOException {
-      writeToTagList(tag, value, BoundedWindow.TIMESTAMP_MAX_VALUE);
-    }
-
-    public abstract <T> void writeToTagList(CodedTupleTag<T> tag, T value, Instant timestamp)
-        throws IOException;
+    void noteOutput(WindowedValue<?> output);
 
     /**
-     * Deletes the list corresponding to the given tag.
+     * Hook for subclasses to implement that will be called whenever
+     * {@link com.google.cloud.dataflow.sdk.transforms.DoFn.Context#sideOutput}
+     * is called.
      */
-    public abstract <T> void deleteTagList(CodedTupleTag<T> tag);
+    void noteSideOutput(TupleTag<?> tag, WindowedValue<?> output);
 
     /**
-     * Reads the elements of the list in stored state corresponding to the provided tag.
-     *
-     * @throws IOException if decoding any of the requested values fails
+     * Writes the given {@link PCollectionView} data to a globally accessible location.
      */
-    public <T> Iterable<T> readTagList(CodedTupleTag<T> tag) throws IOException {
-      return readTagLists(Arrays.asList(tag)).get(tag);
-    }
+    <T, W extends BoundedWindow> void writePCollectionViewData(
+        TupleTag<?> tag,
+        Iterable<WindowedValue<T>> data,
+        Coder<Iterable<WindowedValue<T>>> dataCoder,
+        W window,
+        Coder<W> windowCoder)
+            throws IOException;
 
-    /**
-     * Reads the elements of the list in stored state corresponding to the provided tag.
-     *
-     * @throws IOException if decoding any of the requested values fails
-     */
-    public abstract <T> Map<CodedTupleTag<T>, Iterable<T>> readTagLists(
-        Iterable<CodedTupleTag<T>> tags) throws IOException;
+    StateInternals stateInternals();
+
+    TimerInternals timerInternals();
   }
 }

@@ -30,6 +30,7 @@ import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.WindowedValue;
 import com.google.cloud.dataflow.sdk.util.WindowedValue.FullWindowedValueCoder;
+import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.worker.Sink;
 
 import org.hamcrest.core.IsInstanceOf;
@@ -58,9 +59,12 @@ public class ShuffleSinkFactoryTest {
     cloudSink.setSpec(spec);
     cloudSink.setCodec(encoding);
 
+    CounterSet.AddCounterMutator addCounterMutator =
+        new CounterSet().getAddCounterMutator();
     Sink<?> sink = SinkFactory.create(PipelineOptionsFactory.create(),
                                       cloudSink,
-                                      new BatchModeExecutionContext());
+                                      new BatchModeExecutionContext(),
+                                      addCounterMutator);
     Assert.assertThat(sink, new IsInstanceOf(ShuffleSink.class));
     ShuffleSink shuffleSink = (ShuffleSink) sink;
     Assert.assertArrayEquals(shuffleWriterConfig,
@@ -90,7 +94,7 @@ public class ShuffleSinkFactoryTest {
                                             Coder<?> keyCoder,
                                             Coder<?> valueCoder)
       throws Exception {
-    FullWindowedValueCoder<?> coder = (FullWindowedValueCoder<?>) WindowedValue.getFullCoder(
+    FullWindowedValueCoder<?> coder = WindowedValue.getFullCoder(
         KvCoder.of(keyCoder, valueCoder), IntervalWindow.getCoder());
     ShuffleSink shuffleSink = runTestCreateShuffleSinkHelper(
         shuffleWriterConfig, "partition_keys", coder.asCloudObject(), coder);
@@ -112,7 +116,7 @@ public class ShuffleSinkFactoryTest {
                                         Coder<?> keyCoder,
                                         Coder<?> valueCoder)
       throws Exception {
-    FullWindowedValueCoder<?> coder = (FullWindowedValueCoder<?>) WindowedValue.getFullCoder(
+    FullWindowedValueCoder<?> coder = WindowedValue.getFullCoder(
         KvCoder.of(keyCoder, valueCoder), IntervalWindow.getCoder());
     ShuffleSink shuffleSink = runTestCreateShuffleSinkHelper(
         shuffleWriterConfig, "group_keys", coder.asCloudObject(), coder);
@@ -133,7 +137,7 @@ public class ShuffleSinkFactoryTest {
                                                Coder<?> sortKeyCoder,
                                                Coder<?> sortValueCoder)
       throws Exception {
-    FullWindowedValueCoder<?> coder = (FullWindowedValueCoder<?>) WindowedValue.getFullCoder(
+    FullWindowedValueCoder<?> coder = WindowedValue.getFullCoder(
         KvCoder.of(keyCoder, KvCoder.of(sortKeyCoder, sortValueCoder)),
         IntervalWindow.getCoder());
     ShuffleSink shuffleSink = runTestCreateShuffleSinkHelper(
@@ -153,7 +157,7 @@ public class ShuffleSinkFactoryTest {
 
   @Test
   public void testCreateUngroupingShuffleSink() throws Exception {
-    FullWindowedValueCoder<?> coder = (FullWindowedValueCoder<?>) WindowedValue.getFullCoder(
+    FullWindowedValueCoder<?> coder = WindowedValue.getFullCoder(
         StringUtf8Coder.of(), IntervalWindow.getCoder());
     runTestCreateUngroupingShuffleSink(
         new byte[]{(byte) 0xE1},

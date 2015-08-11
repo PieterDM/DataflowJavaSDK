@@ -14,6 +14,12 @@
 
 package com.google.cloud.dataflow.sdk.coders;
 
+import com.google.cloud.dataflow.sdk.util.CloudObject;
+import com.google.cloud.dataflow.sdk.util.Structs;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -29,8 +35,10 @@ import javax.xml.bind.Unmarshaller;
  *
  * @param <T> type of JAXB annotated objects that will be serialized.
  */
-public class JAXBCoder<T> extends CustomCoder<T> {
+public class JAXBCoder<T> extends AtomicCoder<T> {
+
   private static final long serialVersionUID = 0L;
+
   private final Class<T> jaxbClass;
   private transient Marshaller jaxbMarshaller = null;
   private transient Unmarshaller jaxbUnmarshaller = null;
@@ -82,5 +90,36 @@ public class JAXBCoder<T> extends CustomCoder<T> {
       throw new CoderException(e);
     }
   }
-}
 
+  @Override
+  public String getEncodingId() {
+    return getJAXBClass().getName();
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////////
+  // JSON Serialization details below
+
+  private static final String JAXB_CLASS = "jaxb_class";
+
+  /**
+   * Constructor for JSON deserialization only.
+   */
+  @JsonCreator
+  public static <T> JAXBCoder<T> of(
+      @JsonProperty(JAXB_CLASS) String jaxbClassName) {
+    try {
+      @SuppressWarnings("unchecked")
+      Class<T> jaxbClass = (Class<T>) Class.forName(jaxbClassName);
+      return of(jaxbClass);
+    } catch (ClassNotFoundException e) {
+      throw new IllegalArgumentException(e);
+    }
+  }
+
+  @Override
+  public CloudObject asCloudObject() {
+    CloudObject result = super.asCloudObject();
+    Structs.addString(result, JAXB_CLASS, jaxbClass.getName());
+    return result;
+  }
+}

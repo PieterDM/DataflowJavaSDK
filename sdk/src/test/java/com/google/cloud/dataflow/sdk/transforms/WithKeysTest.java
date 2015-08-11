@@ -16,6 +16,8 @@
 
 package com.google.cloud.dataflow.sdk.transforms;
 
+import static org.junit.Assert.assertEquals;
+
 import com.google.cloud.dataflow.sdk.Pipeline;
 import com.google.cloud.dataflow.sdk.coders.StringUtf8Coder;
 import com.google.cloud.dataflow.sdk.testing.DataflowAssert;
@@ -65,8 +67,8 @@ public class WithKeysTest {
     Pipeline p = TestPipeline.create();
 
     PCollection<String> input =
-        p.apply(Create.of(Arrays.asList(COLLECTION))).setCoder(
-            StringUtf8Coder.of());
+        p.apply(Create.of(Arrays.asList(COLLECTION)).withCoder(
+            StringUtf8Coder.of()));
 
     PCollection<KV<Integer, String>> output = input.apply(WithKeys.of(
         new LengthAsKey()));
@@ -81,8 +83,8 @@ public class WithKeysTest {
     Pipeline p = TestPipeline.create();
 
     PCollection<String> input =
-        p.apply(Create.of(Arrays.asList(COLLECTION))).setCoder(
-            StringUtf8Coder.of());
+        p.apply(Create.of(Arrays.asList(COLLECTION)).withCoder(
+            StringUtf8Coder.of()));
 
     PCollection<KV<Integer, String>> output =
         input.apply(WithKeys.<Integer, String>of(100));
@@ -90,6 +92,11 @@ public class WithKeysTest {
         .containsInAnyOrder(WITH_CONST_KEYS);
 
     p.run();
+  }
+
+  @Test
+  public void testWithKeysGetName() {
+    assertEquals("WithKeys", WithKeys.<Integer, String>of(100).getName());
   }
 
   /**

@@ -31,6 +31,8 @@ import java.util.List;
 @RunWith(JUnit4.class)
 public class VarLongCoderTest {
 
+  private static final Coder<Long> TEST_CODER = VarLongCoder.of();
+
   private static final List<Long> TEST_VALUES = Arrays.asList(
       -11L, -3L, -1L, 0L, 1L, 5L, 13L, 29L,
       Integer.MAX_VALUE + 131L,
@@ -40,9 +42,39 @@ public class VarLongCoderTest {
 
   @Test
   public void testDecodeEncodeEqual() throws Exception {
-    Coder<Long> coder = VarLongCoder.of();
     for (Long value : TEST_VALUES) {
-      CoderProperties.coderDecodeEncodeEqual(coder, value);
+      CoderProperties.coderDecodeEncodeEqual(TEST_CODER, value);
     }
+  }
+
+  // If this changes, it implies the binary format has changed.
+  private static final String EXPECTED_ENCODING_ID = "";
+
+  @Test
+  public void testEncodingId() throws Exception {
+    CoderProperties.coderHasEncodingId(TEST_CODER, EXPECTED_ENCODING_ID);
+  }
+
+  /**
+   * Generated data to check that the wire format has not changed. To regenerate, see
+   * {@link com.google.cloud.dataflow.sdk.coders.PrintBase64Encodings}.
+   */
+  private static final List<String> TEST_ENCODINGS = Arrays.asList(
+      "9f__________AQ",
+      "_f__________AQ",
+      "____________AQ",
+      "AA",
+      "AQ",
+      "BQ",
+      "DQ",
+      "HQ",
+      "goGAgAg",
+      "4_____f_____AQ",
+      "__________9_",
+      "gICAgICAgICAAQ");
+
+  @Test
+  public void testWireFormatEncode() throws Exception {
+    CoderProperties.coderEncodesBase64(TEST_CODER, TEST_VALUES, TEST_ENCODINGS);
   }
 }

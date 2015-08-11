@@ -32,6 +32,7 @@ import com.google.cloud.dataflow.sdk.coders.KvCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
 import com.google.cloud.dataflow.sdk.transforms.Combine;
 import com.google.cloud.dataflow.sdk.transforms.windowing.BoundedWindow;
+import com.google.cloud.dataflow.sdk.util.AppliedCombineFn;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.CoderUtils;
 import com.google.cloud.dataflow.sdk.util.ExecutionContext;
@@ -43,6 +44,7 @@ import com.google.cloud.dataflow.sdk.util.WindowedValue.WindowedValueCoder;
 import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.ElementByteSizeObservable;
 import com.google.cloud.dataflow.sdk.util.common.ElementByteSizeObserver;
+import com.google.cloud.dataflow.sdk.util.common.worker.ElementCounter;
 import com.google.cloud.dataflow.sdk.util.common.worker.FlattenOperation;
 import com.google.cloud.dataflow.sdk.util.common.worker.MapTaskExecutor;
 import com.google.cloud.dataflow.sdk.util.common.worker.Operation;
@@ -74,7 +76,7 @@ public class MapTaskExecutorFactory {
    * Creates a new MapTaskExecutor from the given MapTask definition.
    */
   public static MapTaskExecutor create(
-      PipelineOptions options, MapTask mapTask, ExecutionContext context) throws Exception {
+      PipelineOptions options, MapTask mapTask, DataflowExecutionContext context) throws Exception {
     List<Operation> operations = new ArrayList<>();
     CounterSet counters = new CounterSet();
     String counterPrefix = mapTask.getStageName() + "-";
@@ -94,9 +96,15 @@ public class MapTaskExecutorFactory {
   /**
    * Creates an Operation from the given ParallelInstruction definition.
    */
-  static Operation createOperation(PipelineOptions options, ParallelInstruction instruction,
-      ExecutionContext executionContext, List<Operation> priorOperations, String counterPrefix,
-      CounterSet.AddCounterMutator addCounterMutator, StateSampler stateSampler) throws Exception {
+  static Operation createOperation(
+      PipelineOptions options,
+      ParallelInstruction instruction,
+      DataflowExecutionContext executionContext,
+      List<Operation> priorOperations,
+      String counterPrefix,
+      CounterSet.AddCounterMutator addCounterMutator,
+      StateSampler stateSampler)
+      throws Exception {
     if (instruction.getRead() != null) {
       return createReadOperation(options, instruction, executionContext, priorOperations,
           counterPrefix, addCounterMutator, stateSampler);
@@ -117,9 +125,15 @@ public class MapTaskExecutorFactory {
     }
   }
 
-  static ReadOperation createReadOperation(PipelineOptions options, ParallelInstruction instruction,
-      ExecutionContext executionContext, List<Operation> priorOperations, String counterPrefix,
-      CounterSet.AddCounterMutator addCounterMutator, StateSampler stateSampler) throws Exception {
+  static ReadOperation createReadOperation(
+      PipelineOptions options,
+      ParallelInstruction instruction,
+      DataflowExecutionContext executionContext,
+      @SuppressWarnings("unused") List<Operation> priorOperations,
+      String counterPrefix,
+      CounterSet.AddCounterMutator addCounterMutator,
+      StateSampler stateSampler)
+      throws Exception {
     ReadInstruction read = instruction.getRead();
 
     Reader<?> reader = ReaderFactory.create(options, read.getSource(), executionContext);
@@ -137,7 +151,8 @@ public class MapTaskExecutorFactory {
       CounterSet.AddCounterMutator addCounterMutator, StateSampler stateSampler) throws Exception {
     WriteInstruction write = instruction.getWrite();
 
-    Sink sink = SinkFactory.create(options, write.getSink(), executionContext);
+    Sink<?> sink =
+        SinkFactory.create(options, write.getSink(), executionContext, addCounterMutator);
 
     OutputReceiver[] receivers =
         createOutputReceivers(instruction, counterPrefix, addCounterMutator, stateSampler, 0);
@@ -150,15 +165,30 @@ public class MapTaskExecutorFactory {
     return operation;
   }
 
-  static ParDoOperation createParDoOperation(PipelineOptions options,
-      ParallelInstruction instruction, ExecutionContext executionContext,
-      List<Operation> priorOperations, String counterPrefix,
-      CounterSet.AddCounterMutator addCounterMutator, StateSampler stateSampler) throws Exception {
+  private static ParDoFnFactory parDoFnFactory = new ParDoFnFactory.DefaultFactory();
+
+  static ParDoOperation createParDoOperation(
+      PipelineOptions options,
+      ParallelInstruction instruction,
+      DataflowExecutionContext executionContext,
+      List<Operation> priorOperations,
+      String counterPrefix,
+      CounterSet.AddCounterMutator addCounterMutator,
+      StateSampler stateSampler)
+      throws Exception {
     ParDoInstruction parDo = instruction.getParDo();
 
-    ParDoFn fn = ParDoFnFactory.create(options, CloudObject.fromSpec(parDo.getUserFn()),
-        instruction.getSystemName(), parDo.getSideInputs(), parDo.getMultiOutputInfos(),
-        parDo.getNumOutputs(), executionContext, addCounterMutator, stateSampler);
+    ParDoFn fn = parDoFnFactory.create(
+        options,
+        CloudObject.fromSpec(parDo.getUserFn()),
+        instruction.getSystemName(),
+        instruction.getName(),
+        parDo.getSideInputs(),
+        parDo.getMultiOutputInfos(),
+        parDo.getNumOutputs(),
+        executionContext,
+        addCounterMutator,
+        stateSampler);
 
     OutputReceiver[] receivers = createOutputReceivers(
         instruction, counterPrefix, addCounterMutator, stateSampler, parDo.getNumOutputs());
@@ -171,8 +201,10 @@ public class MapTaskExecutorFactory {
     return operation;
   }
 
-  static PartialGroupByKeyOperation createPartialGroupByKeyOperation(PipelineOptions options,
-      ParallelInstruction instruction, ExecutionContext executionContext,
+  static PartialGroupByKeyOperation createPartialGroupByKeyOperation(
+      @SuppressWarnings("unused") PipelineOptions options,
+      ParallelInstruction instruction,
+      @SuppressWarnings("unused") ExecutionContext executionContext,
       List<Operation> priorOperations, String counterPrefix,
       CounterSet.AddCounterMutator addCounterMutator, StateSampler stateSampler) throws Exception {
     PartialGroupByKeyInstruction pgbk = instruction.getPartialGroupByKey();
@@ -194,13 +226,13 @@ public class MapTaskExecutorFactory {
     OutputReceiver[] receivers =
         createOutputReceivers(instruction, counterPrefix, addCounterMutator, stateSampler, 1);
 
-    PartialGroupByKeyOperation.Combiner valueCombiner = createValueCombiner(pgbk);
+    PartialGroupByKeyOperation.Combiner<?, ?, ?, ?> valueCombiner = createValueCombiner(pgbk);
 
     PartialGroupByKeyOperation operation = new PartialGroupByKeyOperation(
         instruction.getSystemName(),
-        new WindowingCoderGroupingKeyCreator(keyCoder),
-        new CoderSizeEstimator(WindowedValue.getValueOnlyCoder(keyCoder)),
-        new CoderSizeEstimator(valueCoder), 0.001 /*sizeEstimatorSampleRate*/, valueCombiner,
+        new WindowingCoderGroupingKeyCreator<>(keyCoder),
+        new CoderSizeEstimator<>(WindowedValue.getValueOnlyCoder(keyCoder)),
+        new CoderSizeEstimator<>(valueCoder), 0.001 /*sizeEstimatorSampleRate*/, valueCombiner,
         PairInfo.create(), receivers, counterPrefix, addCounterMutator, stateSampler);
 
     attachInput(operation, pgbk.getInput(), priorOperations);
@@ -208,6 +240,7 @@ public class MapTaskExecutorFactory {
     return operation;
   }
 
+  @SuppressWarnings({"rawtypes", "unchecked"})
   static ValueCombiner createValueCombiner(PartialGroupByKeyInstruction pgbk) throws Exception {
     if (pgbk.getValueCombiningFn() == null) {
       return null;
@@ -216,7 +249,7 @@ public class MapTaskExecutorFactory {
     Object deserializedFn = SerializableUtils.deserializeFromByteArray(
         getBytes(CloudObject.fromSpec(pgbk.getValueCombiningFn()), PropertyNames.SERIALIZED_FN),
         "serialized combine fn");
-    return new ValueCombiner((Combine.KeyedCombineFn) deserializedFn);
+    return new ValueCombiner(((AppliedCombineFn) deserializedFn).getFn());
   }
 
   /**
@@ -283,47 +316,49 @@ public class MapTaskExecutorFactory {
    * Implements PGBKOp.GroupingKeyCreator via Coder.
    */
   // TODO: Actually support window merging in the combiner table.
-  public static class WindowingCoderGroupingKeyCreator
-      implements GroupingKeyCreator {
+  public static class WindowingCoderGroupingKeyCreator<K>
+      implements GroupingKeyCreator<WindowedValue<K>> {
 
     private static final Instant ignored = BoundedWindow.TIMESTAMP_MIN_VALUE;
 
-    private final Coder coder;
+    private final Coder<K> coder;
 
-    public WindowingCoderGroupingKeyCreator(Coder coder) {
+    public WindowingCoderGroupingKeyCreator(Coder<K> coder) {
       this.coder = coder;
     }
 
     @Override
-    public Object createGroupingKey(Object key) throws Exception {
-      WindowedValue<?> windowedKey = (WindowedValue<?>) key;
+    public Object createGroupingKey(WindowedValue<K> key) throws Exception {
       // Ignore timestamp for grouping purposes.
       // The PGBK output will inherit the timestamp of one of its inputs.
       return WindowedValue.of(
-          coder.structuralValue(windowedKey.getValue()),
+          coder.structuralValue(key.getValue()),
           ignored,
-          windowedKey.getWindows());
+          key.getWindows(),
+          key.getPane());
     }
   }
 
   /**
    * Implements PGBKOp.SizeEstimator via Coder.
    */
-  public static class CoderSizeEstimator implements PartialGroupByKeyOperation.SizeEstimator {
-    final Coder coder;
+  public static class CoderSizeEstimator<T>implements PartialGroupByKeyOperation.SizeEstimator<T> {
+    final Coder<T> coder;
 
-    public CoderSizeEstimator(Coder coder) {
+    public CoderSizeEstimator(Coder<T> coder) {
       this.coder = coder;
     }
 
     @Override
-    public long estimateSize(Object value) throws Exception {
+    public long estimateSize(T value) throws Exception {
       return CoderUtils.encodeToByteArray(coder, value).length;
     }
   }
 
-  static FlattenOperation createFlattenOperation(PipelineOptions options,
-      ParallelInstruction instruction, ExecutionContext executionContext,
+  static FlattenOperation createFlattenOperation(
+      @SuppressWarnings("unused") PipelineOptions options,
+      ParallelInstruction instruction,
+      @SuppressWarnings("unused") ExecutionContext executionContext,
       List<Operation> priorOperations, String counterPrefix,
       CounterSet.AddCounterMutator addCounterMutator, StateSampler stateSampler) throws Exception {
     FlattenInstruction flatten = instruction.getFlatten();
@@ -346,8 +381,10 @@ public class MapTaskExecutorFactory {
    * ParallelInstruction definition.
    */
   static OutputReceiver[] createOutputReceivers(ParallelInstruction instruction,
-      String counterPrefix, CounterSet.AddCounterMutator addCounterMutator,
-      StateSampler stateSampler, int expectedNumOutputs) throws Exception {
+      @SuppressWarnings("unused") String counterPrefix,
+      CounterSet.AddCounterMutator addCounterMutator,
+      @SuppressWarnings("unused") StateSampler stateSampler,
+      int expectedNumOutputs) throws Exception {
     int numOutputs = 0;
     if (instruction.getOutputs() != null) {
       numOutputs = instruction.getOutputs().size();
@@ -358,10 +395,15 @@ public class MapTaskExecutorFactory {
     OutputReceiver[] receivers = new OutputReceiver[numOutputs];
     for (int i = 0; i < numOutputs; i++) {
       InstructionOutput cloudOutput = instruction.getOutputs().get(i);
-      receivers[i] = new OutputReceiver(cloudOutput.getName(),
-          new ElementByteSizeObservableCoder(Serializer.deserialize(
-              cloudOutput.getCodec(), Coder.class)),
-          counterPrefix, addCounterMutator);
+      receivers[i] = new OutputReceiver();
+
+      @SuppressWarnings("unchecked")
+      ElementCounter outputCounter = new DataflowOutputCounter(
+          cloudOutput.getName(),
+          new ElementByteSizeObservableCoder<>(
+              Serializer.deserialize(cloudOutput.getCodec(), Coder.class)),
+          addCounterMutator);
+      receivers[i].addOutputCounter(outputCounter);
     }
     return receivers;
   }

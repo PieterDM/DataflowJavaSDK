@@ -22,7 +22,6 @@ import com.google.cloud.dataflow.sdk.coders.Proto2CoderTestMessages.MessageC;
 import com.google.cloud.dataflow.sdk.testing.CoderProperties;
 import com.google.common.collect.ImmutableList;
 
-import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -30,7 +29,6 @@ import org.junit.runners.JUnit4;
 /**
  * Tests for Proto2Coder.
  */
-@Ignore("Enable when we fix interal build process")
 @RunWith(JUnit4.class)
 public class Proto2CoderTest {
 
@@ -62,7 +60,8 @@ public class Proto2CoderTest {
         .addField2(MessageB.newBuilder()
             .setField1(true).build())
         .build();
-    CoderProperties.coderDecodeEncodeEqual(ListCoder.of(Proto2Coder.of(MessageA.class)),
+    CoderProperties.coderDecodeEncodeEqual(
+        ListCoder.of(Proto2Coder.of(MessageA.class)),
         ImmutableList.of(value1, value2));
   }
 
@@ -82,7 +81,30 @@ public class Proto2CoderTest {
             .build())
         .build();
     CoderProperties.coderDecodeEncodeEqual(
-        Proto2Coder.of(MessageC.class)
-        .addExtensionsFrom(Proto2CoderTestMessages.class), value);
+        Proto2Coder.of(MessageC.class).withExtensionsFrom(Proto2CoderTestMessages.class),
+        value);
+  }
+
+  @Test
+  public void testCoderSerialization() throws Exception {
+    Proto2Coder<MessageA> coder = Proto2Coder.of(MessageA.class);
+    CoderProperties.coderSerializable(coder);
+  }
+
+  @Test
+  public void testCoderExtensionsSerialization() throws Exception {
+    Proto2Coder<MessageC> coder = Proto2Coder.of(MessageC.class)
+        .withExtensionsFrom(Proto2CoderTestMessages.class);
+    CoderProperties.coderSerializable(coder);
+  }
+
+  @Test
+  public void testEncodingId() throws Exception {
+    Coder<MessageA> coderA = Proto2Coder.of(MessageA.class);
+    CoderProperties.coderHasEncodingId(coderA, MessageA.class.getName());
+
+    Proto2Coder<MessageC> coder = Proto2Coder.of(MessageC.class)
+        .withExtensionsFrom(Proto2CoderTestMessages.class);
+    CoderProperties.coderHasEncodingId(coder, MessageC.class.getName());
   }
 }

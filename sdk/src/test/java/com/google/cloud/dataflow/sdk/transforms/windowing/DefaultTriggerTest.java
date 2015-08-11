@@ -32,6 +32,8 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
+import java.util.List;
+
 /**
  * Tests the {@link DefaultTrigger} in a variety of windowing modes.
  */
@@ -43,7 +45,8 @@ public class DefaultTriggerTest {
     TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         FixedWindows.of(Duration.millis(10)),
         DefaultTrigger.<IntervalWindow>of(),
-        AccumulationMode.DISCARDING_FIRED_PANES);
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(9));
@@ -68,8 +71,11 @@ public class DefaultTriggerTest {
     assertThat(tester.extractOutput(), Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(3, 4), 15, 10, 20),
         isSingleWindowedValue(Matchers.contains(5), 30, 30, 40)));
-    assertFalse(tester.isDone(new IntervalWindow(new Instant(30), new Instant(40))));
-    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+    assertFalse(tester.isMarkedFinished(new IntervalWindow(new Instant(30), new Instant(40))));
+    tester.assertHasOnlyGlobalAndPaneInfoFor(
+        new IntervalWindow(new Instant(0), new Instant(10)),
+        new IntervalWindow(new Instant(10), new Instant(20)),
+        new IntervalWindow(new Instant(30), new Instant(40)));
   }
 
   @Test
@@ -77,7 +83,8 @@ public class DefaultTriggerTest {
     TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         Sessions.withGapDuration(Duration.millis(10)),
         DefaultTrigger.<IntervalWindow>of(),
-        AccumulationMode.DISCARDING_FIRED_PANES);
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(9));
@@ -93,9 +100,11 @@ public class DefaultTriggerTest {
     assertThat(tester.extractOutput(), Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2, 3), 1, 1, 25),
         isSingleWindowedValue(Matchers.contains(4), 30, 30, 40)));
-    assertFalse(tester.isDone(new IntervalWindow(new Instant(1), new Instant(25))));
-    assertFalse(tester.isDone(new IntervalWindow(new Instant(30), new Instant(40))));
-    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+    assertFalse(tester.isMarkedFinished(new IntervalWindow(new Instant(1), new Instant(25))));
+    assertFalse(tester.isMarkedFinished(new IntervalWindow(new Instant(30), new Instant(40))));
+    tester.assertHasOnlyGlobalAndPaneInfoFor(
+        new IntervalWindow(new Instant(1), new Instant(25)),
+        new IntervalWindow(new Instant(30), new Instant(40)));
   }
 
   @Test
@@ -103,7 +112,8 @@ public class DefaultTriggerTest {
     TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         SlidingWindows.of(Duration.millis(10)).every(Duration.millis(5)),
         DefaultTrigger.<IntervalWindow>of(),
-        AccumulationMode.DISCARDING_FIRED_PANES);
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(4));
@@ -112,29 +122,32 @@ public class DefaultTriggerTest {
     tester.advanceWatermark(new Instant(100));
     assertThat(tester.extractOutput(), Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2), 1, -5, 5),
-        isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2, 3), 1, 0, 10),
-        isSingleWindowedValue(Matchers.containsInAnyOrder(3), 9, 5, 15)));
+        isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2, 3), 5, 0, 10),
+        isSingleWindowedValue(Matchers.containsInAnyOrder(3), 10, 5, 15)));
 
+    // This data is late, so it will hold the watermark to 109
     tester.injectElement(4, new Instant(8));
 
-    // Late data means the merge tree might be empty
     tester.advanceWatermark(new Instant(101));
-    assertThat(tester.extractOutput(), Matchers.contains(
-        isSingleWindowedValue(Matchers.containsInAnyOrder(4), 8, 0, 10),
-        isSingleWindowedValue(Matchers.containsInAnyOrder(4), 8, 5, 15)));
+    assertThat(tester.getWatermarkHold(), Matchers.equalTo(new Instant(109)));
+    tester.advanceWatermark(new Instant(120));
+    List<WindowedValue<Iterable<Integer>>> output = tester.extractOutput();
+    assertThat(output, Matchers.contains(
+        isSingleWindowedValue(Matchers.contains(4), 9, 0, 10),
+        isSingleWindowedValue(Matchers.contains(4), 14, 5, 15)));
 
-    assertFalse(tester.isDone(new IntervalWindow(new Instant(1), new Instant(10))));
-    assertFalse(tester.isDone(new IntervalWindow(new Instant(5), new Instant(15))));
-    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+    assertFalse(tester.isMarkedFinished(new IntervalWindow(new Instant(1), new Instant(10))));
+    assertFalse(tester.isMarkedFinished(new IntervalWindow(new Instant(5), new Instant(15))));
+    tester.assertHasOnlyGlobalState();
   }
-
 
   @Test
   public void testDefaultTriggerWithContainedSessionWindow() throws Exception {
     TriggerTester<Integer, Iterable<Integer>, IntervalWindow> tester = TriggerTester.nonCombining(
         Sessions.withGapDuration(Duration.millis(10)),
         DefaultTrigger.<IntervalWindow>of(),
-        AccumulationMode.DISCARDING_FIRED_PANES);
+        AccumulationMode.DISCARDING_FIRED_PANES,
+        Duration.millis(100));
 
     tester.injectElement(1, new Instant(1));
     tester.injectElement(2, new Instant(9));
@@ -144,14 +157,20 @@ public class DefaultTriggerTest {
     Iterable<WindowedValue<Iterable<Integer>>> extractOutput = tester.extractOutput();
     assertThat(extractOutput, Matchers.contains(
         isSingleWindowedValue(Matchers.containsInAnyOrder(1, 2, 3), 1, 1, 19)));
-    assertThat(tester.getKeyedStateInUse(), Matchers.emptyIterable());
+    tester.assertHasOnlyGlobalAndPaneInfoFor(
+        new IntervalWindow(new Instant(1), new Instant(19)));
   }
 
   @Test
   public void testFireDeadline() throws Exception {
-    assertEquals(new Instant(9), DefaultTrigger.of().getWatermarkCutoff(
+    assertEquals(new Instant(9), DefaultTrigger.of().getWatermarkThatGuaranteesFiring(
         new IntervalWindow(new Instant(0), new Instant(10))));
     assertEquals(GlobalWindow.INSTANCE.maxTimestamp(),
-        DefaultTrigger.of().getWatermarkCutoff(GlobalWindow.INSTANCE));
+        DefaultTrigger.of().getWatermarkThatGuaranteesFiring(GlobalWindow.INSTANCE));
+  }
+
+  @Test
+  public void testContinuation() throws Exception {
+    assertEquals(DefaultTrigger.of(), DefaultTrigger.of().getContinuationTrigger());
   }
 }

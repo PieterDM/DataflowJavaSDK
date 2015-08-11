@@ -24,6 +24,7 @@ import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.ExecutionContext;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.WindowedValue.ValueOnlyWindowedValueCoder;
+import com.google.cloud.dataflow.sdk.util.common.CounterSet;
 import com.google.cloud.dataflow.sdk.util.common.worker.Sink;
 
 /**
@@ -34,10 +35,12 @@ public final class AvroSinkFactory {
   // Do not instantiate.
   private AvroSinkFactory() {}
 
+  @SuppressWarnings("unused")
   public static <T> Sink<T> create(PipelineOptions options,
                                    CloudObject spec,
                                    Coder<T> coder,
-                                   ExecutionContext executionContext)
+                                   ExecutionContext executionContext,
+                                   CounterSet.AddCounterMutator addCounterMutator)
       throws Exception {
     return create(spec, coder);
   }

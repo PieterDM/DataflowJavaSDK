@@ -34,6 +34,8 @@ import java.util.List;
 @RunWith(JUnit4.class)
 public class ListCoderTest {
 
+  private static final Coder<List<Integer>> TEST_CODER = ListCoder.of(VarIntCoder.of());
+
   private static final List<List<Integer>> TEST_VALUES = Arrays.<List<Integer>>asList(
       Collections.<Integer>emptyList(),
       Collections.singletonList(43),
@@ -42,9 +44,9 @@ public class ListCoderTest {
 
   @Test
   public void testDecodeEncodeContentsInSameOrder() throws Exception {
-    Coder<List<Integer>> coder = ListCoder.of(VarIntCoder.of());
     for (List<Integer> value : TEST_VALUES) {
-      CoderProperties.<Integer, List<Integer>>coderDecodeEncodeContentsInSameOrder(coder, value);
+      CoderProperties.<Integer, List<Integer>>coderDecodeEncodeContentsInSameOrder(
+          TEST_CODER, value);
     }
   }
 
@@ -68,5 +70,33 @@ public class ListCoderTest {
     List<Integer> list = Collections.emptyList();
     Coder<List<Integer>> coder = ListCoder.of(VarIntCoder.of());
     CoderProperties.<List<Integer>>coderDecodeEncodeEqual(coder, list);
+  }
+
+  @Test
+  public void testCoderSerializable() throws Exception {
+    CoderProperties.coderSerializable(TEST_CODER);
+  }
+
+  // If this changes, it implies the binary format has changed.
+  private static final String EXPECTED_ENCODING_ID = "";
+
+  @Test
+  public void testEncodingId() throws Exception {
+    CoderProperties.coderHasEncodingId(TEST_CODER, EXPECTED_ENCODING_ID);
+  }
+
+  /**
+   * Generated data to check that the wire format has not changed. To regenerate, see
+   * {@link com.google.cloud.dataflow.sdk.coders.PrintBase64Encodings}.
+   */
+  private static final List<String> TEST_ENCODINGS = Arrays.asList(
+      "AAAAAA",
+      "AAAAASs",
+      "AAAABAECAwQ",
+      "AAAAAwcGBQ");
+
+  @Test
+  public void testWireFormatEncode() throws Exception {
+      CoderProperties.coderEncodesBase64(TEST_CODER, TEST_VALUES, TEST_ENCODINGS);
   }
 }

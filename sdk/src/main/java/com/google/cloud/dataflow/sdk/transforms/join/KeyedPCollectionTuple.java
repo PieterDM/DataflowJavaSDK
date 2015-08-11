@@ -33,9 +33,9 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * An immutable tuple of keyed {@link PCollection}s
+ * An immutable tuple of keyed {@link PCollection PCollections}
  * with key type K.
- * ({@link PCollection}s containing values of type
+ * ({@link PCollection PCollections} containing values of type
  * {@code KV<K, ?>})
  *
  * @param <K> the type of key shared by all constituent PCollections
@@ -89,16 +89,16 @@ public class KeyedPCollectionTuple<K> implements PInput {
   }
 
   /**
-   * Returns a list of {@link TaggedKeyedPCollection}s for the
-   * {@link PCollection}s contained in
-   * this {@link KeyedPCollectionTuple KeyedPCollectionTuple<K>}.
+   * Returns a list of {@link TaggedKeyedPCollection TaggedKeyedPCollections} for the
+   * {@link PCollection PCollections} contained in this {@link KeyedPCollectionTuple}.
    */
   public List<TaggedKeyedPCollection<K, ?>> getKeyedCollections() {
     return keyedCollections;
   }
 
   /**
-   * Applies the given {@link PTransform} to this input.
+   * Like {@link #apply(String, PTransform)} but defaulting to the name
+   * provided by the {@link PTransform}.
    */
   public <OutputT extends POutput> OutputT apply(
       PTransform<KeyedPCollectionTuple<K>, OutputT> transform) {
@@ -106,8 +106,19 @@ public class KeyedPCollectionTuple<K> implements PInput {
   }
 
   /**
-   * Expands the component {@link PCollection}s, stripping off any tag-specific
-   * information.
+   * Applies the given {@link PTransform} to this input {@code KeyedPCollectionTuple} and returns
+   * its {@code OutputT}. This uses {@code name} to identify the specific application of
+   * the transform. This name is used in various places, including the monitoring UI,
+   * logging, and to stably identify this application node in the job graph.
+   */
+  public <OutputT extends POutput> OutputT apply(
+      String name, PTransform<KeyedPCollectionTuple<K>, OutputT> transform) {
+    return Pipeline.applyTransform(name, this, transform);
+  }
+
+  /**
+   * Expands the component {@link PCollection PCollections}, stripping off
+   * any tag-specific information.
    */
   @Override
   public Collection<? extends PValue> expand() {
@@ -119,7 +130,7 @@ public class KeyedPCollectionTuple<K> implements PInput {
   }
 
   /**
-   * Returns the key {@link Coder} for all {@link PCollection}s
+   * Returns the key {@link Coder} for all {@link PCollection PCollections}
    * in this {@link KeyedPCollectionTuple}.
    */
   public Coder<K> getKeyCoder() {

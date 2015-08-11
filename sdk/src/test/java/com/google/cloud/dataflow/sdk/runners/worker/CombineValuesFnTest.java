@@ -29,7 +29,7 @@ import com.google.cloud.dataflow.sdk.coders.CoderRegistry;
 import com.google.cloud.dataflow.sdk.coders.DeterministicStandardCoder;
 import com.google.cloud.dataflow.sdk.options.PipelineOptionsFactory;
 import com.google.cloud.dataflow.sdk.transforms.Combine;
-import com.google.cloud.dataflow.sdk.util.BatchModeExecutionContext;
+import com.google.cloud.dataflow.sdk.util.AppliedCombineFn;
 import com.google.cloud.dataflow.sdk.util.CloudObject;
 import com.google.cloud.dataflow.sdk.util.CoderUtils;
 import com.google.cloud.dataflow.sdk.util.PropertyNames;
@@ -40,6 +40,7 @@ import com.google.cloud.dataflow.sdk.util.common.worker.ParDoFn;
 import com.google.cloud.dataflow.sdk.util.common.worker.Receiver;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.TypeDescriptor;
+import com.google.common.base.MoreObjects;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -53,6 +54,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Tests for CombineValuesFn.
@@ -94,21 +96,28 @@ public class CombineValuesFnTest {
 
       @Override
       public int hashCode() {
-        return KV.of(count, sum).hashCode();
+        return Objects.hash(count, sum);
       }
 
       @Override
       public boolean equals(Object obj) {
-        if (obj == null || !(obj instanceof CountSum)) {
-          return false;
-        }
         if (obj == this) {
           return true;
         }
-
+        if (!(obj instanceof CountSum)) {
+          return false;
+        }
         CountSum other = (CountSum) obj;
         return (this.count == other.count)
             && (Math.abs(this.sum - other.sum) < 0.1);
+      }
+
+      @Override
+      public String toString() {
+        return MoreObjects.toStringHelper(this)
+            .add("count", count)
+            .add("sum", sum)
+            .toString();
       }
     }
 
@@ -148,16 +157,13 @@ public class CombineValuesFnTest {
       return (new MeanInts ()).new CountSum(count, sum);
     }
 
+    @Override
     public CloudObject asCloudObject() {
       return makeCloudEncoding(this.getClass().getName());
     }
 
     @Override
     public List<? extends Coder<?>> getCoderArguments() {
-      return null;
-    }
-
-    public List<Object> getInstanceComponents(MeanInts.CountSum exampleValue) {
       return null;
     }
 
@@ -184,26 +190,32 @@ public class CombineValuesFnTest {
     }
   }
 
+  private static final ParDoFnFactory parDoFnFactory = new CombineValuesFn.Factory();
+
   @SuppressWarnings("rawtypes")
   private static ParDoFn createCombineValuesFn(
-      String phase, Combine.KeyedCombineFn combineFn) throws Exception {
+      String phase, Combine.KeyedCombineFn combineFn, Coder<?> accumCoder) throws Exception {
     // This partially mirrors the work that
     // com.google.cloud.dataflow.sdk.transforms.Combine.translateHelper
     // does, at least for the KeyedCombineFn. The phase is generated
     // by the back-end.
     CloudObject spec = CloudObject.forClassName("CombineValuesFn");
+    @SuppressWarnings("unchecked")
+    AppliedCombineFn appliedCombineFn =
+        AppliedCombineFn.withAccumulatorCoder(combineFn, accumCoder);
     addString(spec, PropertyNames.SERIALIZED_FN,
-        byteArrayToJsonString(serializeToByteArray(combineFn)));
+        byteArrayToJsonString(serializeToByteArray(appliedCombineFn)));
     addString(spec, PropertyNames.PHASE, phase);
 
-    return CombineValuesFn.create(
+    return parDoFnFactory.create(
             PipelineOptionsFactory.create(),
             spec,
             "name",
+            "transformName",
             null, // no side inputs
             null, // no side outputs
             1, // single main output
-            new BatchModeExecutionContext(),
+            DataflowExecutionContext.withoutSideInputs(),
             (new CounterSet()).getAddCounterMutator(),
             null);
   }
@@ -212,12 +224,11 @@ public class CombineValuesFnTest {
   public void testCombineValuesFnAll() throws Exception {
     TestReceiver receiver = new TestReceiver();
 
-    Combine.KeyedCombineFn<String, Integer,
-        MeanInts.CountSum, String> combiner =
+    Combine.KeyedCombineFn<String, Integer, MeanInts.CountSum, String> combiner =
         (new MeanInts()).asKeyedFn();
 
     ParDoFn combineParDoFn = createCombineValuesFn(
-        CombineValuesFn.CombinePhase.ALL, combiner);
+        CombineValuesFn.CombinePhase.ALL, combiner, new CountSumCoder());
 
     combineParDoFn.startBundle(receiver);
     combineParDoFn.processElement(WindowedValue.valueInGlobalWindow(
@@ -229,9 +240,9 @@ public class CombineValuesFnTest {
     combineParDoFn.finishBundle();
 
     Object[] expectedReceivedElems = {
-      WindowedValue.valueInGlobalWindow(KV.of("a", "6.0")),
-      WindowedValue.valueInGlobalWindow(KV.of("b", "3.7")),
-      WindowedValue.valueInGlobalWindow(KV.of("c", "6.5")),
+      WindowedValue.valueInGlobalWindow(KV.of("a", String.format("%.1f", 6.0))),
+      WindowedValue.valueInGlobalWindow(KV.of("b", String.format("%.1f", 3.7))),
+      WindowedValue.valueInGlobalWindow(KV.of("c", String.format("%.1f", 6.5))),
     };
     assertArrayEquals(expectedReceivedElems, receiver.receivedElems.toArray());
   }
@@ -245,7 +256,7 @@ public class CombineValuesFnTest {
         MeanInts.CountSum, String> combiner = mean.asKeyedFn();
 
     ParDoFn combineParDoFn = createCombineValuesFn(
-        CombineValuesFn.CombinePhase.ADD, combiner);
+        CombineValuesFn.CombinePhase.ADD, combiner, new CountSumCoder());
 
     combineParDoFn.startBundle(receiver);
     combineParDoFn.processElement(WindowedValue.valueInGlobalWindow(
@@ -273,7 +284,7 @@ public class CombineValuesFnTest {
         MeanInts.CountSum, String> combiner = mean.asKeyedFn();
 
     ParDoFn combineParDoFn = createCombineValuesFn(
-        CombineValuesFn.CombinePhase.MERGE, combiner);
+        CombineValuesFn.CombinePhase.MERGE, combiner, new CountSumCoder());
 
     combineParDoFn.startBundle(receiver);
     combineParDoFn.processElement(WindowedValue.valueInGlobalWindow(
@@ -305,7 +316,7 @@ public class CombineValuesFnTest {
         MeanInts.CountSum, String> combiner = mean.asKeyedFn();
 
     ParDoFn combineParDoFn = createCombineValuesFn(
-        CombineValuesFn.CombinePhase.EXTRACT, combiner);
+        CombineValuesFn.CombinePhase.EXTRACT, combiner, new CountSumCoder());
 
     combineParDoFn.startBundle(receiver);
     combineParDoFn.processElement(WindowedValue.valueInGlobalWindow(
@@ -315,8 +326,8 @@ public class CombineValuesFnTest {
     combineParDoFn.finishBundle();
 
     assertArrayEquals(
-        new Object[]{ WindowedValue.valueInGlobalWindow(KV.of("a", "4.5")),
-                      WindowedValue.valueInGlobalWindow(KV.of("b", "7.0")) },
+        new Object[]{ WindowedValue.valueInGlobalWindow(KV.of("a", String.format("%.1f", 4.5))),
+                      WindowedValue.valueInGlobalWindow(KV.of("b", String.format("%.1f", 7.0))) },
         receiver.receivedElems.toArray());
   }
 

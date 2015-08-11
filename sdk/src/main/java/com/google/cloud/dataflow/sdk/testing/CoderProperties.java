@@ -20,6 +20,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.emptyIterable;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
@@ -27,8 +28,11 @@ import static org.junit.Assert.fail;
 import com.google.cloud.dataflow.sdk.coders.Coder;
 import com.google.cloud.dataflow.sdk.coders.Coder.NonDeterministicException;
 import com.google.cloud.dataflow.sdk.coders.CoderException;
+import com.google.cloud.dataflow.sdk.util.CoderUtils;
+import com.google.cloud.dataflow.sdk.util.PropertyNames;
 import com.google.cloud.dataflow.sdk.util.SerializableUtils;
 import com.google.cloud.dataflow.sdk.util.Serializer;
+import com.google.cloud.dataflow.sdk.util.Structs;
 import com.google.common.collect.Iterables;
 
 import java.io.ByteArrayInputStream;
@@ -36,6 +40,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -55,9 +60,9 @@ public class CoderProperties {
        Coder.Context.OUTER, Coder.Context.NESTED);
 
   /**
-   * Verifies that for the given {@link Coder Coder<T>}, and values of
-   * type {@code T}, if the values are equal then the encoded bytes are equal,
-   * in any {@link Coder.Context}.
+   * Verifies that for the given {@code Coder<T>}, and values of
+   * type {@code T}, if the values are equal then the encoded bytes are equal, in any
+   * {@code Coder.Context}.
    */
   public static <T> void coderDeterministic(
       Coder<T> coder, T value1, T value2)
@@ -68,7 +73,7 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<T>}, {@link Coder.Context}, and values of
+   * Verifies that for the given {@code Coder<T>}, {@code Coder.Context}, and values of
    * type {@code T}, if the values are equal then the encoded bytes are equal.
    */
   public static <T> void coderDeterministicInContext(
@@ -87,9 +92,9 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<T>},
+   * Verifies that for the given {@code Coder<T>},
    * and value of type {@code T}, encoding followed by decoding yields an
-   * equal value of type {@code T}, in any {@link Coder.Context}.
+   * equal value of type {@code T}, in any {@code Coder.Context}.
    */
   public static <T> void coderDecodeEncodeEqual(
       Coder<T> coder, T value)
@@ -100,7 +105,7 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<T>}, {@link Coder.Context},
+   * Verifies that for the given {@code Coder<T>}, {@code Coder.Context},
    * and value of type {@code T}, encoding followed by decoding yields an
    * equal value of type {@code T}.
    */
@@ -111,9 +116,9 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<Collection<T>>},
+   * Verifies that for the given {@code Coder<Collection<T>>},
    * and value of type {@code Collection<T>}, encoding followed by decoding yields an
-   * equal value of type {@code Collection<T>}, in any {@link Coder.Context}.
+   * equal value of type {@code Collection<T>}, in any {@code Coder.Context}.
    */
   public static <T, CollectionT extends Collection<T>> void coderDecodeEncodeContentsEqual(
       Coder<CollectionT> coder, CollectionT value)
@@ -124,9 +129,9 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<Collection<T>>},
+   * Verifies that for the given {@code Coder<Collection<T>>},
    * and value of type {@code Collection<T>}, encoding followed by decoding yields an
-   * equal value of type {@code Collection<T>}, in the given {@link Coder.Context}.
+   * equal value of type {@code Collection<T>}, in the given {@code Coder.Context}.
    */
   @SuppressWarnings("unchecked")
   public static <T, CollectionT extends Collection<T>> void coderDecodeEncodeContentsEqualInContext(
@@ -143,9 +148,9 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<Collection<T>>},
+   * Verifies that for the given {@code Coder<Collection<T>>},
    * and value of type {@code Collection<T>}, encoding followed by decoding yields an
-   * equal value of type {@code Collection<T>}, in any {@link Coder.Context}.
+   * equal value of type {@code Collection<T>}, in any {@code Coder.Context}.
    */
   public static <T, IterableT extends Iterable<T>> void coderDecodeEncodeContentsInSameOrder(
       Coder<IterableT> coder, IterableT value)
@@ -157,9 +162,9 @@ public class CoderProperties {
   }
 
   /**
-   * Verifies that for the given {@link Coder Coder<Iterable<T>>},
+   * Verifies that for the given {@code Coder<Iterable<T>>},
    * and value of type {@code Iterable<T>}, encoding followed by decoding yields an
-   * equal value of type {@code Collection<T>}, in the given {@link Coder.Context}.
+   * equal value of type {@code Collection<T>}, in the given {@code Coder.Context}.
    */
   @SuppressWarnings("unchecked")
   public static <T, IterableT extends Iterable<T>> void
@@ -199,6 +204,24 @@ public class CoderProperties {
             encode(coder, context, value2)));
   }
 
+  public static <T> void coderHasEncodingId(Coder<T> coder, String encodingId) throws Exception {
+    assertThat(coder.getEncodingId(), equalTo(encodingId));
+    assertThat(Structs.getString(coder.asCloudObject(), PropertyNames.ENCODING_ID, ""),
+        equalTo(encodingId));
+  }
+
+  public static <T> void coderAllowsEncoding(Coder<T> coder, String encodingId) throws Exception {
+    assertThat(coder.getAllowedEncodings(), hasItem(encodingId));
+    assertThat(
+        String.format("Expected to find \"%s\" in property \"%s\" of %s",
+            encodingId, PropertyNames.ALLOWED_ENCODINGS, coder.asCloudObject()),
+        Structs.getStrings(
+            coder.asCloudObject(),
+            PropertyNames.ALLOWED_ENCODINGS,
+            Collections.<String>emptyList()),
+        hasItem(encodingId));
+  }
+
   public static <T> void structuralValueConsistentWithEquals(
       Coder<T> coder, T value1, T value2)
       throws Exception {
@@ -217,6 +240,80 @@ public class CoderProperties {
         Arrays.equals(
             encode(coder, context, value1),
             encode(coder, context, value2)));
+  }
+
+
+  private static final String DECODING_WIRE_FORMAT_MESSAGE =
+      "Decoded value from known wire format does not match expected value."
+      + " This probably means that this Coder no longer correctly decodes"
+      + " a prior wire format. Changing the wire formats this Coder can read"
+      + " should be avoided, as it is likely to cause breakage."
+      + " If you truly intend to change the backwards compatibility for this Coder "
+      + " then you must remove any now-unsupported encodings from getAllowedEncodings().";
+
+  public static <T> void coderDecodesBase64(Coder<T> coder, String base64Encoding, T value)
+      throws Exception {
+    assertThat(DECODING_WIRE_FORMAT_MESSAGE, CoderUtils.decodeFromBase64(coder, base64Encoding),
+        equalTo(value));
+  }
+
+  public static <T> void coderDecodesBase64(
+      Coder<T> coder, List<String> base64Encodings, List<T> values) throws Exception {
+    assertThat("List of base64 encodings has different size than List of values",
+        base64Encodings.size(), equalTo(values.size()));
+
+    for (int i = 0; i < base64Encodings.size(); i++) {
+      coderDecodesBase64(coder, base64Encodings.get(i), values.get(i));
+    }
+  }
+
+  private static final String ENCODING_WIRE_FORMAT_MESSAGE =
+      "Encoded value does not match expected wire format."
+      + " Changing the wire format should be avoided, as it is likely to cause breakage."
+      + " If you truly intend to change the wire format for this Coder "
+      + " then you must update getEncodingId() to a new value and add any supported"
+      + " prior formats to getAllowedEncodings()."
+      + " See com.google.cloud.dataflow.sdk.coders.PrintBase64Encoding for how to generate"
+      + " new test data.";
+
+  public static <T> void coderEncodesBase64(Coder<T> coder, T value, String base64Encoding)
+      throws Exception {
+    assertThat(ENCODING_WIRE_FORMAT_MESSAGE, CoderUtils.encodeToBase64(coder, value),
+        equalTo(base64Encoding));
+  }
+
+  public static <T> void coderEncodesBase64(
+      Coder<T> coder, List<T> values, List<String> base64Encodings) throws Exception {
+    assertThat("List of base64 encodings has different size than List of values",
+        base64Encodings.size(), equalTo(values.size()));
+
+    for (int i = 0; i < base64Encodings.size(); i++) {
+      coderEncodesBase64(coder, values.get(i), base64Encodings.get(i));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  public static <T, IterableT extends Iterable<T>> void coderDecodesBase64ContentsEqual(
+      Coder<IterableT> coder, String base64Encoding, IterableT expected) throws Exception {
+
+    IterableT result = CoderUtils.decodeFromBase64(coder, base64Encoding);
+    if (Iterables.isEmpty(expected)) {
+      assertThat(ENCODING_WIRE_FORMAT_MESSAGE, result, emptyIterable());
+    } else {
+      assertThat(ENCODING_WIRE_FORMAT_MESSAGE, result,
+          containsInAnyOrder((T[]) Iterables.toArray(expected, Object.class)));
+    }
+  }
+
+  public static <T, IterableT extends Iterable<T>> void coderDecodesBase64ContentsEqual(
+      Coder<IterableT> coder, List<String> base64Encodings, List<IterableT> expected)
+          throws Exception {
+    assertThat("List of base64 encodings has different size than List of values",
+        base64Encodings.size(), equalTo(expected.size()));
+
+    for (int i = 0; i < base64Encodings.size(); i++) {
+      coderDecodesBase64ContentsEqual(coder, base64Encodings.get(i), expected.get(i));
+    }
   }
 
   //////////////////////////////////////////////////////////////////////////

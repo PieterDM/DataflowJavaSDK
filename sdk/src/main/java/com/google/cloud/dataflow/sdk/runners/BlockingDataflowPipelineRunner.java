@@ -43,6 +43,15 @@ import javax.annotation.Nullable;
  *
  * <p> Returns the final job state, or throws an exception if the job
  * fails or cannot be monitored.
+ *
+ * <p><h3>Permissions</h3>
+ * When reading from a Dataflow source or writing to a Dataflow sink using
+ * {@code BlockingDataflowPipelineRunner}, the Google cloudservices account and the Google compute
+ * engine service account of the GCP project running the Dataflow Job will need access to the
+ * corresponding source/sink.
+ *
+ * <p> Please see <a href="https://cloud.google.com/dataflow/security-and-permissions">Google Cloud
+ * Dataflow Security and Permissions</a> for more details.
  */
 public class BlockingDataflowPipelineRunner extends
     PipelineRunner<DataflowPipelineJob> {
@@ -52,14 +61,14 @@ public class BlockingDataflowPipelineRunner extends
   // TODO: make this configurable after removal of option map.
   private static final long BUILTIN_JOB_TIMEOUT_SEC = -1L;
 
-  private DataflowPipelineRunner dataflowPipelineRunner = null;
-  private MonitoringUtil.JobMessagesHandler jobMessagesHandler;
+  private final DataflowPipelineRunner dataflowPipelineRunner;
+  private final BlockingDataflowPipelineOptions options;
 
   protected BlockingDataflowPipelineRunner(
       DataflowPipelineRunner internalRunner,
-      MonitoringUtil.JobMessagesHandler jobMessagesHandler) {
+      BlockingDataflowPipelineOptions options) {
     this.dataflowPipelineRunner = internalRunner;
-    this.jobMessagesHandler = jobMessagesHandler;
+    this.options = options;
   }
 
   /**
@@ -72,37 +81,83 @@ public class BlockingDataflowPipelineRunner extends
     DataflowPipelineRunner dataflowPipelineRunner =
         DataflowPipelineRunner.fromOptions(dataflowOptions);
 
-    return new BlockingDataflowPipelineRunner(dataflowPipelineRunner,
-        new MonitoringUtil.PrintHandler(dataflowOptions.getJobMessageOutput()));
+    return new BlockingDataflowPipelineRunner(dataflowPipelineRunner, dataflowOptions);
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * @throws DataflowJobExecutionException if there is an exception during job execution.
+   * @throws DataflowServiceException if there is an exception retrieving information about the job.
+   */
   @Override
   public DataflowPipelineJob run(Pipeline p) {
-    DataflowPipelineJob job = dataflowPipelineRunner.run(p);
+    final DataflowPipelineJob job = dataflowPipelineRunner.run(p);
 
-    @Nullable
-    State result;
+    // We ignore the potential race condition here (Ctrl-C after job submission but before the
+    // shutdown hook is registered). Even if we tried to do something smarter (eg., SettableFuture)
+    // the run method (which produces the job) could fail or be Ctrl-C'd before it had returned a
+    // job. The display of the command to cancel the job is best-effort anyways -- RPC's could fail,
+    // etc. If the user wants to verify the job was cancelled they should look at the job status.
+    Thread shutdownHook = new Thread() {
+      @Override
+      public void run() {
+        LOG.warn("Job is already running in Google Cloud Platform, Ctrl-C will not cancel it.\n"
+            + "To cancel the job in the cloud, run:\n> {}",
+            MonitoringUtil.getGcloudCancelCommand(options, job.getJobId()));
+      }
+    };
+
     try {
-      result = job.waitToFinish(
-          BUILTIN_JOB_TIMEOUT_SEC, TimeUnit.SECONDS, jobMessagesHandler);
-    } catch (IOException | InterruptedException ex) {
-      throw new RuntimeException("Exception caught during job execution", ex);
-    }
+      Runtime.getRuntime().addShutdownHook(shutdownHook);
 
-    if (result == null) {
-      throw new RuntimeException("No result provided: "
-          + "possible error requesting job status.");
-    }
+      @Nullable
+      State result;
+      try {
+        result = job.waitToFinish(
+            BUILTIN_JOB_TIMEOUT_SEC, TimeUnit.SECONDS,
+            new MonitoringUtil.PrintHandler(options.getJobMessageOutput()));
+      } catch (IOException | InterruptedException ex) {
+        LOG.debug("Exception caught while retrieving status for job {}", job.getJobId(), ex);
+        throw new DataflowServiceException(
+            job, "Exception caught while retrieving status for job " + job.getJobId(), ex);
+      }
 
-    LOG.info("Job finished with status {}", result);
-    if (result.isTerminal()) {
-      return job;
-    }
+      if (result == null) {
+        throw new DataflowServiceException(
+            job, "Timed out while retrieving status for job " + job.getJobId());
+      }
 
-    // TODO: introduce an exception that can wrap a JobState,
-    // so that detailed error information can be retrieved.
-    throw new RuntimeException(
-        "Failed to wait for the job to finish. Returned result: " + result);
+      LOG.info("Job finished with status {}", result);
+      if (!result.isTerminal()) {
+        throw new IllegalStateException("Expected terminal state for job " + job.getJobId()
+            + ", got " + result);
+      }
+
+      if (result == State.DONE) {
+        return job;
+      } else if (result == State.UPDATED) {
+        DataflowPipelineJob newJob = job.getReplacedByJob();
+        LOG.info("Job {} has been updated and is running as the new job with id {}."
+            + "To access the updated job on the Dataflow monitoring console, please navigate to {}",
+            job.getJobId(),
+            newJob.getJobId(),
+            MonitoringUtil.getJobMonitoringPageURL(newJob.getProjectId(), newJob.getJobId()));
+        throw new DataflowJobUpdatedException(
+            job,
+            String.format("Job %s updated; new job is %s.", job.getJobId(), newJob.getJobId()),
+            newJob);
+      } else if (result == State.CANCELLED) {
+        String message = String.format("Job %s cancelled by user", job.getJobId());
+        LOG.info(message);
+        throw new DataflowJobCancelledException(job, message);
+      } else {
+        throw new DataflowJobExecutionException(job, "Job " + job.getJobId()
+            + " failed with status " + result);
+      }
+    } finally {
+      Runtime.getRuntime().removeShutdownHook(shutdownHook);
+    }
   }
 
   @Override
@@ -117,5 +172,10 @@ public class BlockingDataflowPipelineRunner extends
   @Experimental
   public void setHooks(DataflowPipelineRunnerHooks hooks) {
     this.dataflowPipelineRunner.setHooks(hooks);
+  }
+
+  @Override
+  public String toString() {
+    return "BlockingDataflowPipelineRunner#" + options.getJobName();
   }
 }
